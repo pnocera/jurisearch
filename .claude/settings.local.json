@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Skill(deep-research)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:opendata.justice-administrative.fr)",
+      "WebFetch(domain:api.gouv.fr)",
+      "WebFetch(domain:www.data.gouv.fr)",
+      "WebFetch(domain:echanges.dila.gouv.fr)",
+      "WebFetch(domain:huggingface.co)",
+      "WebFetch(domain:www.anthropic.com)",
+      "WebFetch(domain:www.mindstudio.ai)",
+      "WebFetch(domain:www.openlegi.fr)"
+    ]
+  }
+}
