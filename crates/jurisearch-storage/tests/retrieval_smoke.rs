@@ -1,42 +1,11 @@
-use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
+mod common;
 
-fn discover_pg_config() -> Result<Option<PgConfig>, StorageError> {
-    let pg_config = match PgConfig::discover() {
-        Ok(pg_config) => pg_config,
-        Err(error @ StorageError::MissingPgConfig { .. }) => {
-            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
-                return Err(error);
-            }
-            eprintln!("skipping retrieval smoke: {error}");
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-
-    for extension in ["pg_search", "vector"] {
-        if let Err(error) = pg_config.require_extension_assets(extension) {
-            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
-                return Err(error);
-            }
-            eprintln!("skipping retrieval smoke: {error}");
-            return Ok(None);
-        }
-    }
-
-    Ok(Some(pg_config))
-}
-
-fn vector_literal(active_index: usize) -> String {
-    let values = (0..1024)
-        .map(|index| if index == active_index { "1" } else { "0" })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{values}]")
-}
+use common::{discover_pg_config, vector_literal};
+use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
 
 #[test]
 fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), StorageError> {
-    let Some(pg_config) = discover_pg_config()? else {
+    let Some(pg_config) = discover_pg_config("retrieval smoke")? else {
         return Ok(());
     };
     let root = tempfile::Builder::new()
@@ -47,6 +16,15 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     let unrelated_vector = vector_literal(1);
 
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    let bm25_index = postgres.execute_sql(
+        "SELECT indexname \
+         FROM pg_indexes \
+         WHERE schemaname = 'public' \
+           AND tablename = 'chunks' \
+           AND indexname = 'chunks_bm25_idx';",
+    )?;
+    assert_eq!(bm25_index, "chunks_bm25_idx");
+
     postgres.execute_sql(&format!(
         "INSERT INTO documents \
            (document_id, source, kind, source_uid, citation, title, body, \

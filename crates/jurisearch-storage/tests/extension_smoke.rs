@@ -1,28 +1,13 @@
-use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
+mod common;
+
+use common::discover_pg_config;
+use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
 
 #[test]
 fn creates_pg_search_and_vector_extensions_when_assets_are_available() -> Result<(), StorageError> {
-    let pg_config = match PgConfig::discover() {
-        Ok(pg_config) => pg_config,
-        Err(error @ StorageError::MissingPgConfig { .. }) => {
-            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
-                return Err(error);
-            }
-            eprintln!("skipping PostgreSQL extension smoke: {error}");
-            return Ok(());
-        }
-        Err(error) => return Err(error),
+    let Some(pg_config) = discover_pg_config("PostgreSQL extension smoke")? else {
+        return Ok(());
     };
-
-    for extension in ["pg_search", "vector"] {
-        if let Err(error) = pg_config.require_extension_assets(extension) {
-            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
-                return Err(error);
-            }
-            eprintln!("skipping PostgreSQL extension smoke: {error}");
-            return Ok(());
-        }
-    }
 
     let postgres = ManagedPostgres::start_temp(pg_config)?;
     let extensions = postgres.execute_sql(

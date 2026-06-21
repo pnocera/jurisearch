@@ -1,34 +1,11 @@
-use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
+mod common;
 
-fn discover_pg_config() -> Result<Option<PgConfig>, StorageError> {
-    let pg_config = match PgConfig::discover() {
-        Ok(pg_config) => pg_config,
-        Err(error @ StorageError::MissingPgConfig { .. }) => {
-            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
-                return Err(error);
-            }
-            eprintln!("skipping durable PostgreSQL lifecycle smoke: {error}");
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-
-    for extension in ["pg_search", "vector"] {
-        if let Err(error) = pg_config.require_extension_assets(extension) {
-            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
-                return Err(error);
-            }
-            eprintln!("skipping durable PostgreSQL lifecycle smoke: {error}");
-            return Ok(None);
-        }
-    }
-
-    Ok(Some(pg_config))
-}
+use common::discover_pg_config;
+use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
 
 #[test]
 fn durable_lifecycle_restarts_and_rejects_concurrent_owner() -> Result<(), StorageError> {
-    let Some(pg_config) = discover_pg_config()? else {
+    let Some(pg_config) = discover_pg_config("durable PostgreSQL lifecycle smoke")? else {
         return Ok(());
     };
     let root = tempfile::Builder::new()
