@@ -100,6 +100,9 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
         parse_errors.join("\n")
     );
     assert_eq!(parsed_articles, ARTICLE_SAMPLE_TARGET);
+    // The current 25-article default window is intentionally near the start of the baseline and
+    // includes publisher links. If the default archive changes, adjust the window rather than
+    // treating a link-free sample as proof that edge extraction is broken.
     assert!(
         publisher_edges > 0,
         "expected real LEGI article sample to emit publisher graph-edge candidates"

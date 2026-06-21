@@ -123,6 +123,11 @@ impl CanonicalDocument {
     }
 }
 
+/// Publisher-provided relationship evidence extracted from a canonical document.
+///
+/// Phase 0.5 emits these as unresolved candidates: `relation` is conservative
+/// (`refers_to`), `edge_source` is `publisher`, and `to_document_id` stays
+/// `None` until the graph materialization step resolves `to_source_uid`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalGraphEdge {
     pub edge_id: String,
@@ -389,7 +394,7 @@ impl RawArticle {
             .cloned()
             .unwrap_or_else(|| "LEGI".to_owned());
 
-        let document = CanonicalDocument {
+        let mut document = CanonicalDocument {
             document_id: format!("legi:{id}@{valid_from}"),
             source: "legi".to_owned(),
             kind: "article".to_owned(),
@@ -415,7 +420,6 @@ impl RawArticle {
                 etat.as_deref().unwrap_or("absent")
             ),
         };
-        let mut document = document;
         document.publisher_edges = publisher_links
             .into_iter()
             .enumerate()
@@ -530,7 +534,7 @@ fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>,
                 message: error.to_string(),
             })?;
         attributes.push(GraphEdgeAttribute {
-            key: local_name(attribute.key.as_ref()),
+            key: attribute_name(attribute.key.as_ref()),
             value: value.into_owned(),
         });
     }
@@ -577,12 +581,13 @@ fn extract_known_source_uid(value: &str) -> Option<String> {
             let start = value.find(prefix)?;
             let suffix = value[start + prefix.len()..]
                 .chars()
-                .take_while(|character| character.is_ascii_alphanumeric())
+                .take_while(|character| character.is_ascii_digit())
+                .take(12)
                 .collect::<String>();
-            if suffix.is_empty() {
-                None
-            } else {
+            if suffix.len() == 12 {
                 Some(format!("{prefix}{suffix}"))
+            } else {
+                None
             }
         })
 }
@@ -739,6 +744,13 @@ fn local_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
+fn attribute_name(name: &[u8]) -> String {
+    let name = local_name(name);
+    name.rsplit_once(':')
+        .map(|(_, local)| local.to_owned())
+        .unwrap_or(name)
+}
+
 pub fn source_payload_hash(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
@@ -756,8 +768,8 @@ mod tests {
     use crate::archive::ArchiveMember;
 
     use super::{
-        CanonicalDocument, LegiParseError, ParsedLegiXml, SourceProvenance, parse_legi_member,
-        parse_legi_xml, source_payload_hash,
+        CanonicalDocument, LegiParseError, ParsedLegiXml, SourceProvenance,
+        extract_known_source_uid, parse_legi_member, parse_legi_xml, source_payload_hash,
     };
 
     #[test]
@@ -800,6 +812,7 @@ mod tests {
             edge.source_text.as_deref(),
             Some("Decret no 73-138 - art. 11")
         );
+        assert!(!document.body.contains("Decret no 73-138"));
         assert_eq!(edge.source_payload_hash, document.source_payload_hash);
         assert_eq!(edge.source_archive, document.source_archive);
         assert_eq!(edge.source_member_path, document.source_member_path);
@@ -853,6 +866,43 @@ mod tests {
         );
         assert_eq!(anchor_edge.source_text.as_deref(), Some("article suivant"));
         assert_eq!(anchor_edge.edge_source, "publisher");
+        assert!(document.body.contains("Voir article suivant."));
+    }
+
+    #[test]
+    fn extracts_all_dila_publisher_link_tags() {
+        let xml = article_fixture().replace(
+            "  </LIENS>",
+            r#"    <LIEN_ART id="LEGIARTI000000000001" typelien="CITATION"/>
+    <LIEN_SECTION_TA id="LEGISCTA000000000002" typelien="CITATION"/>
+    <LIEN_TXT id="LEGITEXT000000000003" typelien="CITATION">Texte cible</LIEN_TXT>
+  </LIENS>"#,
+        );
+        let document = parse_article_fixture(&xml).unwrap();
+
+        for (tag, target) in [
+            ("LIEN", "LEGIARTI000006554637"),
+            ("LIEN_ART", "LEGIARTI000000000001"),
+            ("LIEN_SECTION_TA", "LEGISCTA000000000002"),
+            ("LIEN_TXT", "LEGITEXT000000000003"),
+        ] {
+            let edge = document
+                .publisher_edges
+                .iter()
+                .find(|edge| edge.source_tag == tag)
+                .unwrap_or_else(|| panic!("missing {tag} publisher edge"));
+            assert_eq!(edge.to_source_uid.as_deref(), Some(target));
+            assert_eq!(edge.edge_source, "publisher");
+        }
+    }
+
+    #[test]
+    fn source_uid_extraction_requires_twelve_digits_after_known_prefix() {
+        assert_eq!(
+            extract_known_source_uid("/codes/article_lc/LEGIARTI000006419321X"),
+            Some("LEGIARTI000006419321".to_owned())
+        );
+        assert_eq!(extract_known_source_uid("LEGIARTI00000641932X"), None);
     }
 
     #[test]
