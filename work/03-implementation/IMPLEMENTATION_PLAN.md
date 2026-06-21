@@ -720,7 +720,8 @@ Current status (2026-06-21):
 
 - Done: `jurisearch status` now includes a fail-closed `phase1_gate` object for the LEGI/statutory Phase 1 claim. It reports `claim_allowed=false` until index query readiness, latest completed ingest run, zero failed members, projection/embedding coverage, replay snapshot availability, release-gating eval fixtures, final embedding-model selection, and reranker adoption/deferral are all satisfied.
 - Done: the built-in Phase 1 eval fixture summary is machine-readable in `phase1_gate.eval_fixtures`; the current built-in hierarchy fixtures are source-verified development fixtures, not release-gating fixtures, so the gate correctly remains pending.
-- Remaining: build the release-gating LEGI eval set, run and store real retrieval/embedding/reranker benchmark evidence, decide the final embedding model, and record any required re-embed/index migration.
+- Done: the first Phase 1 LEGI release-candidate fixture set is source-checked against the real DILA Freemium LEGI archive at `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz`. The candidates cover known-article lookup, conceptual statutory retrieval, temporal retrieval, and citation-rich statutory retrieval, carry structured `as_of` dates for future fixture execution, and `phase1_gate.eval_fixtures.release_candidates` reports them separately from `release_gating`.
+- Remaining: promote release candidates only after named human legal-domain review, execute the fixtures against retrieval, run and store real embedding/reranker benchmark evidence, decide the final embedding model, and record any required re-embed/index migration.
 
 ---
 

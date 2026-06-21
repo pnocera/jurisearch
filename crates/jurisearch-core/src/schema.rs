@@ -359,6 +359,7 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "total": { "type": "integer" },
                     "source_verified": { "type": "integer" },
+                    "release_candidates": { "type": "integer" },
                     "release_gating": { "type": "integer" },
                     "hierarchy_sensitive": { "type": "integer" },
                     "categories": { "type": "object" }

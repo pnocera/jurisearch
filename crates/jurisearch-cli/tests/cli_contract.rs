@@ -159,6 +159,10 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "#/schemas/Phase1GateCheck"
     );
     assert_eq!(
+        json["schemas"]["EvalFixtureSummary"]["properties"]["release_candidates"]["type"],
+        "integer"
+    );
+    assert_eq!(
         json["schemas"]["ModelFetchRequest"]["properties"]["allow_download"]["default"],
         false
     );
@@ -289,8 +293,12 @@ fn status_returns_json_without_index() {
     assert_eq!(json["phase1_gate"]["state"], "not_ready");
     assert_eq!(json["phase1_gate"]["claim_allowed"], false);
     assert_eq!(json["phase1_gate"]["scope"], "phase1_legi_statutory_search");
-    assert_eq!(json["phase1_gate"]["eval_fixtures"]["total"], 2);
-    assert_eq!(json["phase1_gate"]["eval_fixtures"]["source_verified"], 2);
+    assert_eq!(json["phase1_gate"]["eval_fixtures"]["total"], 6);
+    assert_eq!(json["phase1_gate"]["eval_fixtures"]["source_verified"], 6);
+    assert_eq!(
+        json["phase1_gate"]["eval_fixtures"]["release_candidates"],
+        4
+    );
     assert_eq!(json["phase1_gate"]["eval_fixtures"]["release_gating"], 0);
     assert!(
         json["phase1_gate"]["checks"]
