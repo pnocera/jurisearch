@@ -11,6 +11,26 @@ use thiserror::Error;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const LEGIFRANCE_TOKEN_SKEW: Duration = Duration::from_secs(30);
+const UPSTREAM_BODY_LIMIT: usize = 500;
+const PROD_JUDILIBRE_CREDENTIALS: &[&str] = &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_API_KEY"];
+const SANDBOX_JUDILIBRE_CREDENTIALS: &[&str] =
+    &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_SANDBOX_API_KEY"];
+const PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS: &[&str] = &[
+    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID",
+    "PISTE_OAUTH_CLIENT_ID",
+];
+const SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS: &[&str] = &[
+    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID",
+    "PISTE_SANDBOX_OAUTH_CLIENT_ID",
+];
+const PROD_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
+    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
+    "PISTE_OAUTH_CLIENT_SECRET",
+];
+const SANDBOX_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
+    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
+    "PISTE_SANDBOX_OAUTH_CLIENT_SECRET",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PisteEnvironment {
@@ -105,37 +125,25 @@ impl OfficialApiConfig {
         };
         let mut config = Self::for_environment(environment);
         config.api_base_url =
-            env::var("JURISEARCH_PISTE_API_BASE_URL").unwrap_or(config.api_base_url);
+            nonempty_env_or_default("JURISEARCH_PISTE_API_BASE_URL", config.api_base_url);
         config.oauth_base_url =
-            env::var("JURISEARCH_PISTE_OAUTH_BASE_URL").unwrap_or(config.oauth_base_url);
+            nonempty_env_or_default("JURISEARCH_PISTE_OAUTH_BASE_URL", config.oauth_base_url);
         config.judilibre_key_id = first_nonempty_env(if environment == PisteEnvironment::Sandbox {
-            &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_SANDBOX_API_KEY"]
+            SANDBOX_JUDILIBRE_CREDENTIALS
         } else {
-            &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_API_KEY"]
+            PROD_JUDILIBRE_CREDENTIALS
         });
         config.legifrance_client_id =
             first_nonempty_env(if environment == PisteEnvironment::Sandbox {
-                &[
-                    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID",
-                    "PISTE_SANDBOX_OAUTH_CLIENT_ID",
-                ]
+                SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS
             } else {
-                &[
-                    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID",
-                    "PISTE_OAUTH_CLIENT_ID",
-                ]
+                PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS
             });
         config.legifrance_client_secret =
             first_nonempty_env(if environment == PisteEnvironment::Sandbox {
-                &[
-                    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
-                    "PISTE_SANDBOX_OAUTH_CLIENT_SECRET",
-                ]
+                SANDBOX_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS
             } else {
-                &[
-                    "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
-                    "PISTE_OAUTH_CLIENT_SECRET",
-                ]
+                PROD_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS
             });
         config
     }
@@ -176,7 +184,7 @@ impl PisteClient {
             .as_deref()
             .filter(|key| !key.trim().is_empty())
             .ok_or(OfficialApiError::MissingCredential {
-                name: "PISTE_API_KEY",
+                names: judilibre_credential_names(self.config.environment),
             })?;
         let url = join_url(&self.config.api_base_url, path);
         let response = self
@@ -221,7 +229,7 @@ impl PisteClient {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .ok_or(OfficialApiError::MissingCredential {
-                name: "PISTE_OAUTH_CLIENT_ID",
+                names: legifrance_client_id_credential_names(self.config.environment),
             })?;
         let client_secret = self
             .config
@@ -229,7 +237,7 @@ impl PisteClient {
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .ok_or(OfficialApiError::MissingCredential {
-                name: "PISTE_OAUTH_CLIENT_SECRET",
+                names: legifrance_client_secret_credential_names(self.config.environment),
             })?;
         let url = join_url(&self.config.oauth_base_url, "/api/oauth/token");
         let response = self
@@ -250,8 +258,10 @@ impl PisteClient {
                 "OAuth token response did not include access_token".to_owned(),
             ));
         }
+        let now = Instant::now();
         let expires_at = token_response.expires_in.map(|seconds| {
-            Instant::now() + Duration::from_secs(seconds).saturating_sub(LEGIFRANCE_TOKEN_SKEW)
+            now.checked_add(Duration::from_secs(seconds).saturating_sub(LEGIFRANCE_TOKEN_SKEW))
+                .unwrap_or(now)
         });
         let token = CachedToken {
             access_token: token_response.access_token,
@@ -270,8 +280,8 @@ impl PisteClient {
 
 #[derive(Debug, Error)]
 pub enum OfficialApiError {
-    #[error("missing official API credential `{name}`")]
-    MissingCredential { name: &'static str },
+    #[error("missing official API credential; checked {names:?}")]
+    MissingCredential { names: &'static [&'static str] },
     #[error("official API rate limited the request with status 429")]
     RateLimited {
         retry_after: Option<String>,
@@ -289,11 +299,12 @@ impl OfficialApiError {
     #[must_use]
     pub fn to_error_object(&self) -> ErrorObject {
         match self {
-            Self::MissingCredential { name } => ErrorObject {
+            Self::MissingCredential { names } => ErrorObject {
                 code: ErrorCode::DependencyUnavailable,
                 message: self.to_string(),
                 suggestions: vec![format!(
-                    "Set `{name}` in the environment or configure an OS keyring entry."
+                    "Set one of {} in the environment or configure an OS keyring entry.",
+                    names.join(", ")
                 )],
             },
             Self::RateLimited { retry_after, .. } => ErrorObject {
@@ -355,6 +366,36 @@ fn first_nonempty_env(names: &[&str]) -> Option<String> {
         .find_map(|name| env::var(name).ok().filter(|value| !value.trim().is_empty()))
 }
 
+fn nonempty_env_or_default(name: &str, default: String) -> String {
+    env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(default)
+}
+
+fn judilibre_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
+    match environment {
+        PisteEnvironment::Production => PROD_JUDILIBRE_CREDENTIALS,
+        PisteEnvironment::Sandbox => SANDBOX_JUDILIBRE_CREDENTIALS,
+    }
+}
+
+fn legifrance_client_id_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
+    match environment {
+        PisteEnvironment::Production => PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS,
+        PisteEnvironment::Sandbox => SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS,
+    }
+}
+
+fn legifrance_client_secret_credential_names(
+    environment: PisteEnvironment,
+) -> &'static [&'static str] {
+    match environment {
+        PisteEnvironment::Production => PROD_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS,
+        PisteEnvironment::Sandbox => SANDBOX_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS,
+    }
+}
+
 fn join_url(base: &str, path: &str) -> String {
     format!(
         "{}/{}",
@@ -377,11 +418,20 @@ fn official_api_error(error: ureq::Error) -> OfficialApiError {
             OfficialApiError::RateLimited { retry_after, body }
         }
         ureq::Error::Status(status, response) => {
-            let body = response.into_string().unwrap_or_default();
+            let body = truncated_body(response.into_string().unwrap_or_default());
             OfficialApiError::UpstreamStatus { status, body }
         }
         other => OfficialApiError::Transport(other.to_string()),
     }
+}
+
+fn truncated_body(body: String) -> String {
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut truncated = body.chars().take(UPSTREAM_BODY_LIMIT).collect::<String>();
+    if body.chars().count() > UPSTREAM_BODY_LIMIT {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 #[cfg(test)]
@@ -389,6 +439,7 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        sync::{Mutex, MutexGuard},
         thread,
     };
 
@@ -396,6 +447,8 @@ mod tests {
 
     use super::{OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment};
     use jurisearch_core::error::ErrorCode;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn config_redacts_secrets_in_debug_output() {
@@ -407,6 +460,7 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-key"));
+        assert!(!debug.contains("client-id"));
         assert!(!debug.contains("client-secret"));
     }
 
@@ -424,6 +478,22 @@ mod tests {
 
         let response = client.judilibre_search().unwrap();
         assert_eq!(response["total"], 1);
+    }
+
+    #[test]
+    fn judilibre_transactional_history_uses_expected_path() {
+        let base_url = spawn_server(1, |request| {
+            assert!(request.starts_with("GET /cassation/judilibre/v1.0/transactionalhistory "));
+            assert!(request.contains("\r\nKeyId: test-key\r\n"));
+            ok_json(r#"{"events":[]}"#)
+        });
+        let mut config = OfficialApiConfig::production();
+        config.api_base_url = base_url;
+        config.judilibre_key_id = Some("test-key".to_owned());
+        let client = PisteClient::new(config);
+
+        let response = client.judilibre_transactional_history().unwrap();
+        assert_eq!(response["events"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -460,6 +530,38 @@ mod tests {
     }
 
     #[test]
+    fn legifrance_refetches_short_lived_token_after_skew() {
+        let mut token_count = 0;
+        let base_url = spawn_server(4, move |request| {
+            if request.starts_with("POST /api/oauth/token ") {
+                token_count += 1;
+                ok_json(&format!(
+                    r#"{{"access_token":"token-{token_count}","expires_in":1}}"#
+                ))
+            } else {
+                assert!(request.starts_with("POST /dila/legifrance/lf-engine-app/search "));
+                assert!(request.contains(&format!(
+                    "\r\nAuthorization: Bearer token-{token_count}\r\n"
+                )));
+                ok_json(r#"{"results":[]}"#)
+            }
+        });
+        let mut config = OfficialApiConfig::sandbox();
+        config.api_base_url = base_url.clone();
+        config.oauth_base_url = base_url;
+        config.legifrance_client_id = Some("client-id".to_owned());
+        config.legifrance_client_secret = Some("client-secret".to_owned());
+        let mut client = PisteClient::new(config);
+
+        client
+            .legifrance_search(&json!({ "query": "responsabilite" }))
+            .unwrap();
+        client
+            .legifrance_search(&json!({ "query": "responsabilite" }))
+            .unwrap();
+    }
+
+    #[test]
     fn rate_limit_maps_to_upstream_error_object() {
         let base_url = spawn_server(1, |_request| {
             "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nContent-Length: 17\r\n\r\nrate limited body"
@@ -482,17 +584,143 @@ mod tests {
     }
 
     #[test]
+    fn non_429_upstream_status_is_truncated_in_error_object() {
+        let long_body = format!("{}{}", "x".repeat(700), "\nwith whitespace");
+        let response = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\r\n{}",
+            long_body.len(),
+            long_body
+        );
+        let base_url = spawn_server(1, move |_request| response.clone());
+        let mut config = OfficialApiConfig::production();
+        config.api_base_url = base_url;
+        config.judilibre_key_id = Some("test-key".to_owned());
+        let client = PisteClient::new(config);
+
+        let error = client.judilibre_search().unwrap_err();
+        assert!(matches!(
+            error,
+            OfficialApiError::UpstreamStatus { status: 500, .. }
+        ));
+        let object = error.to_error_object();
+        assert_eq!(object.code, ErrorCode::Upstream);
+        assert!(object.message.len() < 620);
+        assert!(object.message.ends_with("..."));
+    }
+
+    #[test]
     fn missing_credentials_are_dependency_errors() {
         let client = PisteClient::new(OfficialApiConfig::for_environment(
-            PisteEnvironment::Production,
+            PisteEnvironment::Sandbox,
         ));
 
         let error = client.judilibre_search().unwrap_err();
-        assert!(matches!(error, OfficialApiError::MissingCredential { .. }));
+        let OfficialApiError::MissingCredential { names } = &error else {
+            panic!("expected missing credential error, got {error:?}");
+        };
+        assert!(names.contains(&"PISTE_SANDBOX_API_KEY"));
+        let object = error.to_error_object();
+        assert_eq!(object.code, ErrorCode::DependencyUnavailable);
+        assert!(object.suggestions[0].contains("PISTE_SANDBOX_API_KEY"));
+    }
+
+    #[test]
+    fn missing_legifrance_credentials_are_dependency_errors() {
+        let mut client = PisteClient::new(OfficialApiConfig::for_environment(
+            PisteEnvironment::Sandbox,
+        ));
+
+        let error = client
+            .legifrance_search(&json!({ "query": "test" }))
+            .unwrap_err();
+        let OfficialApiError::MissingCredential { names } = &error else {
+            panic!("expected missing credential error, got {error:?}");
+        };
+        assert!(names.contains(&"PISTE_SANDBOX_OAUTH_CLIENT_ID"));
+        let object = error.to_error_object();
+        assert_eq!(object.code, ErrorCode::DependencyUnavailable);
+        assert!(object.suggestions[0].contains("PISTE_SANDBOX_OAUTH_CLIENT_ID"));
+    }
+
+    #[test]
+    fn from_env_uses_sandbox_fallbacks_and_ignores_empty_base_overrides() {
+        let _env = EnvGuard::new(&[
+            ("JURISEARCH_PISTE_ENV", Some("sandbox")),
+            ("PISTE_ENV", Some("production")),
+            ("JURISEARCH_PISTE_API_BASE_URL", Some("")),
+            ("JURISEARCH_PISTE_OAUTH_BASE_URL", Some("")),
+            ("JURISEARCH_PISTE_JUDILIBRE_KEY_ID", Some("unified-key")),
+            ("PISTE_API_KEY", Some("prod-key")),
+            ("PISTE_SANDBOX_API_KEY", Some("sandbox-key")),
+            ("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID", Some("unified-id")),
+            ("PISTE_OAUTH_CLIENT_ID", Some("prod-client-id")),
+            ("PISTE_SANDBOX_OAUTH_CLIENT_ID", Some("sandbox-client-id")),
+            ("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET", None),
+            ("PISTE_OAUTH_CLIENT_SECRET", Some("prod-client-secret")),
+            (
+                "PISTE_SANDBOX_OAUTH_CLIENT_SECRET",
+                Some("sandbox-client-secret"),
+            ),
+        ]);
+
+        let config = OfficialApiConfig::from_env();
+
+        assert_eq!(config.environment, PisteEnvironment::Sandbox);
         assert_eq!(
-            error.to_error_object().code,
-            ErrorCode::DependencyUnavailable
+            config.api_base_url,
+            PisteEnvironment::Sandbox.api_base_url()
         );
+        assert_eq!(
+            config.oauth_base_url,
+            PisteEnvironment::Sandbox.oauth_base_url()
+        );
+        assert_eq!(config.judilibre_key_id.as_deref(), Some("unified-key"));
+        assert_eq!(config.legifrance_client_id.as_deref(), Some("unified-id"));
+        assert_eq!(
+            config.legifrance_client_secret.as_deref(),
+            Some("sandbox-client-secret")
+        );
+    }
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[(&'static str, Option<&str>)]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap();
+            let previous = vars
+                .iter()
+                .map(|(name, _)| (*name, std::env::var(name).ok()))
+                .collect::<Vec<_>>();
+            for (name, value) in vars {
+                set_env_var(name, *value);
+            }
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.previous.iter().rev() {
+                set_env_var(name, value.as_deref());
+            }
+        }
+    }
+
+    fn set_env_var(name: &str, value: Option<&str>) {
+        // SAFETY: Environment-mutating tests take ENV_LOCK for the full mutation/read/restore
+        // window, and this crate's other tests do not access these PISTE variables.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 
     fn spawn_server(
