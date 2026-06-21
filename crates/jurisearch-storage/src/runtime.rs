@@ -78,9 +78,9 @@ impl PgConfig {
 }
 
 pub struct ManagedPostgres {
-    _tmp: Option<TempDir>,
+    _temp_dir: Option<TempDir>,
     _startup_lock: Option<StartupLock>,
-    _advisory_lock: Option<DataDirLock>,
+    advisory_lock: Option<DataDirLock>,
     pub pg_config: PgConfig,
     pub data_dir: PathBuf,
     pub socket_dir: PathBuf,
@@ -142,9 +142,9 @@ impl ManagedPostgres {
         }
 
         Ok(Self {
-            _tmp: Some(tmp),
+            _temp_dir: Some(tmp),
             _startup_lock: None,
-            _advisory_lock: None,
+            advisory_lock: None,
             pg_config,
             data_dir,
             socket_dir,
@@ -192,9 +192,9 @@ impl ManagedPostgres {
         ensure_database(&pg_config, port, APP_DATABASE)?;
 
         let mut postgres = Self {
-            _tmp: None,
+            _temp_dir: None,
             _startup_lock: Some(startup_lock),
-            _advisory_lock: None,
+            advisory_lock: None,
             pg_config,
             data_dir,
             socket_dir,
@@ -209,7 +209,7 @@ impl ManagedPostgres {
             .data_dir
             .canonicalize()
             .unwrap_or_else(|_| postgres.data_dir.clone());
-        postgres._advisory_lock = Some(DataDirLock::acquire(
+        postgres.advisory_lock = Some(DataDirLock::acquire(
             &postgres.connection_string(),
             &lock_path,
         )?);
@@ -312,6 +312,7 @@ impl Drop for DataDirLock {
 
 impl Drop for ManagedPostgres {
     fn drop(&mut self) {
+        drop(self.advisory_lock.take());
         let _ = self.stop();
     }
 }
@@ -621,7 +622,36 @@ pub enum StorageError {
 
 #[cfg(test)]
 mod tests {
-    use super::{data_dir_lock_key, sql_identifier, sql_string_literal, version_key};
+    use super::{
+        DataDirLock, ManagedPostgres, PgConfig, StorageError, data_dir_lock_key, sql_identifier,
+        sql_string_literal, version_key,
+    };
+
+    fn discover_pg_config_for_storage_tests() -> Result<Option<PgConfig>, StorageError> {
+        let pg_config = match PgConfig::discover() {
+            Ok(pg_config) => pg_config,
+            Err(error @ StorageError::MissingPgConfig { .. }) => {
+                if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
+                    return Err(error);
+                }
+                eprintln!("skipping storage runtime test: {error}");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+
+        for extension in ["pg_search", "vector"] {
+            if let Err(error) = pg_config.require_extension_assets(extension) {
+                if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
+                    return Err(error);
+                }
+                eprintln!("skipping storage runtime test: {error}");
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(pg_config))
+    }
 
     #[test]
     fn pgrx_version_key_keeps_numeric_minor_order() {
@@ -646,5 +676,52 @@ mod tests {
         assert_eq!(sql_identifier("jurisearch"), "\"jurisearch\"");
         assert_eq!(sql_identifier("bad\"name"), "\"bad\"\"name\"");
         assert_eq!(sql_string_literal("sock's"), "'sock''s'");
+    }
+
+    #[test]
+    fn advisory_lock_rejects_duplicate_session_for_same_data_dir() -> Result<(), StorageError> {
+        let Some(pg_config) = discover_pg_config_for_storage_tests()? else {
+            return Ok(());
+        };
+        let root = tempfile::Builder::new()
+            .prefix("jurisearch-advisory-lock.")
+            .tempdir()
+            .map_err(StorageError::Io)?;
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        let lock_path = postgres
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| postgres.data_dir.clone());
+
+        let duplicate = DataDirLock::acquire(&postgres.connection_string(), &lock_path);
+        assert!(matches!(
+            duplicate,
+            Err(StorageError::AdvisoryLockBusy { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn durable_start_reclaims_dead_postmaster_pidfile() -> Result<(), StorageError> {
+        let Some(pg_config) = discover_pg_config_for_storage_tests()? else {
+            return Ok(());
+        };
+        let root = tempfile::Builder::new()
+            .prefix("jurisearch-stale-pid.")
+            .tempdir()
+            .map_err(StorageError::Io)?;
+        let postgres = ManagedPostgres::start_durable(pg_config.clone(), root.path())?;
+        let data_dir = postgres.data_dir.clone();
+        drop(postgres);
+
+        let stale_pid = "99999999";
+        std::fs::write(data_dir.join("postmaster.pid"), format!("{stale_pid}\n"))
+            .map_err(StorageError::Io)?;
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        let pidfile = std::fs::read_to_string(postgres.data_dir.join("postmaster.pid"))
+            .map_err(StorageError::Io)?;
+        assert_ne!(pidfile.lines().next(), Some(stale_pid));
+        assert_eq!(postgres.execute_sql("SELECT 1;")?, "1");
+        Ok(())
     }
 }
