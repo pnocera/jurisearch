@@ -3,8 +3,8 @@ mod common;
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     retrieval::{
-        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, context_documents_json,
-        fetch_documents_json, hybrid_candidates_json,
+        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalMode,
+        context_documents_json, fetch_documents_json, hybrid_candidates_json,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -131,8 +131,9 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
         &postgres,
         &HybridCandidateQuery {
             query_text: "code civil",
-            query_embedding: &legal_vector,
-            embedding_fingerprint: "bge-m3:1024:normalize:true",
+            query_embedding: Some(&legal_vector),
+            embedding_fingerprint: Some("bge-m3:1024:normalize:true"),
+            retrieval_mode: RetrievalMode::Hybrid,
             as_of: "2024-01-01",
             kind_filter: None,
             lexical_limit: 10,
@@ -143,6 +144,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     let candidates: serde_json::Value =
         serde_json::from_str(&candidates).expect("retrieval response is stable JSON");
     assert_eq!(candidates["query"], "code civil");
+    assert_eq!(candidates["retrieval_mode"], "hybrid");
     assert_eq!(candidates["candidates"][0]["chunk_id"], "chunk:1240:0");
     assert_eq!(
         candidates["candidates"][0]["scores"]["lexical_rank"].as_u64(),
@@ -156,6 +158,57 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
         candidates["candidates"][0]["cursor"]
             .as_str()
             .is_some_and(|cursor| cursor.ends_with(":chunk:1240:0"))
+    );
+
+    let bm25_candidates = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "code civil",
+            query_embedding: None,
+            embedding_fingerprint: None,
+            retrieval_mode: RetrievalMode::Bm25,
+            as_of: "2024-01-01",
+            kind_filter: None,
+            lexical_limit: 10,
+            dense_limit: 10,
+            limit: 3,
+        },
+    )?;
+    let bm25_candidates: serde_json::Value =
+        serde_json::from_str(&bm25_candidates).expect("BM25 response is stable JSON");
+    assert_eq!(bm25_candidates["retrieval_mode"], "bm25");
+    assert_eq!(bm25_candidates["candidates"][0]["chunk_id"], "chunk:1240:0");
+    assert_eq!(
+        bm25_candidates["candidates"][0]["scores"]["lexical_rank"].as_u64(),
+        Some(1)
+    );
+    assert!(bm25_candidates["candidates"][0]["scores"]["dense_rank"].is_null());
+
+    let dense_candidates = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "semantic-only query",
+            query_embedding: Some(&legal_vector),
+            embedding_fingerprint: Some("bge-m3:1024:normalize:true"),
+            retrieval_mode: RetrievalMode::Dense,
+            as_of: "2024-01-01",
+            kind_filter: None,
+            lexical_limit: 10,
+            dense_limit: 10,
+            limit: 3,
+        },
+    )?;
+    let dense_candidates: serde_json::Value =
+        serde_json::from_str(&dense_candidates).expect("dense response is stable JSON");
+    assert_eq!(dense_candidates["retrieval_mode"], "dense");
+    assert_eq!(
+        dense_candidates["candidates"][0]["chunk_id"],
+        "chunk:1240:0"
+    );
+    assert!(dense_candidates["candidates"][0]["scores"]["lexical_rank"].is_null());
+    assert_eq!(
+        dense_candidates["candidates"][0]["scores"]["dense_rank"].as_u64(),
+        Some(1)
     );
 
     let empty_fetch = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &[] })?;

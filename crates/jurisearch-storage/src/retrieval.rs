@@ -8,13 +8,39 @@ const DEFAULT_CONTEXT_SIBLING_LIMIT: u32 = 50;
 #[derive(Debug, Clone, Copy)]
 pub struct HybridCandidateQuery<'a> {
     pub query_text: &'a str,
-    pub query_embedding: &'a str,
-    pub embedding_fingerprint: &'a str,
+    pub query_embedding: Option<&'a str>,
+    pub embedding_fingerprint: Option<&'a str>,
+    pub retrieval_mode: RetrievalMode,
     pub as_of: &'a str,
     pub kind_filter: Option<&'a str>,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalMode {
+    Hybrid,
+    Bm25,
+    Dense,
+}
+
+impl RetrievalMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hybrid => "hybrid",
+            Self::Bm25 => "bm25",
+            Self::Dense => "dense",
+        }
+    }
+
+    pub fn uses_lexical(self) -> bool {
+        matches!(self, Self::Hybrid | Self::Bm25)
+    }
+
+    pub fn uses_dense(self) -> bool {
+        matches!(self, Self::Hybrid | Self::Dense)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,23 +60,101 @@ pub fn hybrid_candidates_json(
     query: &HybridCandidateQuery<'_>,
 ) -> Result<String, StorageError> {
     let query_text = sql_string_literal(query.query_text);
-    let query_embedding = sql_string_literal(query.query_embedding);
-    let embedding_fingerprint = sql_string_literal(query.embedding_fingerprint);
     let as_of = sql_string_literal(query.as_of);
+    let retrieval_mode = sql_string_literal(query.retrieval_mode.as_str());
     let kind_predicate = query
         .kind_filter
         .map(|kind| format!("AND d.kind = {}", sql_string_literal(kind)))
         .unwrap_or_default();
-    let dense_pool_limit = query
-        .dense_limit
-        .saturating_mul(DENSE_TEMPORAL_OVERFETCH_FACTOR)
-        .max(query.dense_limit);
+    let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &kind_predicate)?;
+    let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
+        "SET ivfflat.probes = 4;\n\n"
+    } else {
+        ""
+    };
 
     postgres.execute_sql(&format!(
         r#"
-SET ivfflat.probes = 4;
+{set_ivfflat_probes}WITH {ranked_ctes},
+limited AS (
+    SELECT
+        r.chunk_id,
+        c.document_id,
+        d.source,
+        d.kind,
+        d.citation,
+        d.title,
+        d.source_url,
+        d.valid_from::text AS valid_from,
+        d.valid_to::text AS valid_to,
+        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
+        r.lexical_rank,
+        r.dense_rank,
+        r.fused_score
+    FROM ranked r
+    JOIN chunks c ON c.chunk_id = r.chunk_id
+    JOIN documents d ON d.document_id = c.document_id
+    ORDER BY r.fused_score DESC, r.chunk_id
+    LIMIT {limit}
+)
+SELECT jsonb_build_object(
+    'query', {query_text},
+    'retrieval_mode', {retrieval_mode},
+    'as_of', {as_of},
+    'limit', {limit},
+    'candidates', COALESCE((
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'chunk_id', chunk_id,
+                'document_id', document_id,
+                'source', source,
+                'kind', kind,
+                'citation', citation,
+                'title', title,
+                'source_url', source_url,
+                'snippet', snippet,
+                'validity', jsonb_build_object(
+                    'from', valid_from,
+                    'to', valid_to,
+                    'to_exclusive', true
+                ),
+                'scores', jsonb_build_object(
+                    'rrf', round(fused_score::numeric, 8),
+                    'lexical_rank', lexical_rank,
+                    'dense_rank', dense_rank
+                ),
+                'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
+            )
+            ORDER BY fused_score DESC, chunk_id
+        )
+        FROM limited
+    ), '[]'::jsonb)
+)::text;
+"#,
+        set_ivfflat_probes = set_ivfflat_probes,
+        ranked_ctes = ranked_ctes,
+        query_text = query_text,
+        retrieval_mode = retrieval_mode,
+        as_of = as_of,
+        limit = query.limit
+    ))
+}
 
-WITH lexical AS (
+fn ranked_candidate_ctes(
+    query: &HybridCandidateQuery<'_>,
+    query_text: &str,
+    as_of: &str,
+    kind_predicate: &str,
+) -> Result<String, StorageError> {
+    match query.retrieval_mode {
+        RetrievalMode::Hybrid => {
+            let (query_embedding, embedding_fingerprint) = dense_query_inputs(query)?;
+            let query_embedding = sql_string_literal(query_embedding);
+            let embedding_fingerprint = sql_string_literal(embedding_fingerprint);
+            let dense_pool_limit = dense_pool_limit(query.dense_limit);
+            Ok(format!(
+                r#"
+lexical AS (
     SELECT
         c.chunk_id,
         row_number() OVER (ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id) AS lexical_rank
@@ -112,71 +216,125 @@ ranked AS (
             + CASE WHEN f.dense_rank IS NULL THEN 0.0 ELSE 1.0 / (60.0 + f.dense_rank) END
         ) AS fused_score
     FROM fused f
-),
-limited AS (
+)"#,
+                query_text = query_text,
+                as_of = as_of,
+                kind_predicate = kind_predicate,
+                lexical_limit = query.lexical_limit,
+                query_embedding = query_embedding,
+                embedding_fingerprint = embedding_fingerprint,
+                dense_pool_limit = dense_pool_limit,
+                dense_limit = query.dense_limit,
+            ))
+        }
+        RetrievalMode::Bm25 => Ok(format!(
+            r#"
+lexical AS (
     SELECT
-        r.chunk_id,
-        c.document_id,
-        d.source,
-        d.kind,
-        d.citation,
-        d.title,
-        d.source_url,
-        d.valid_from::text AS valid_from,
-        d.valid_to::text AS valid_to,
-        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
-        r.lexical_rank,
-        r.dense_rank,
-        r.fused_score
-    FROM ranked r
-    JOIN chunks c ON c.chunk_id = r.chunk_id
+        c.chunk_id,
+        row_number() OVER (ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id) AS lexical_rank
+    FROM chunks c
     JOIN documents d ON d.document_id = c.document_id
-    ORDER BY r.fused_score DESC, r.chunk_id
-    LIMIT {limit}
-)
-SELECT jsonb_build_object(
-    'query', {query_text},
-    'as_of', {as_of},
-    'limit', {limit},
-    'candidates', COALESCE((
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'chunk_id', chunk_id,
-                'document_id', document_id,
-                'source', source,
-                'kind', kind,
-                'citation', citation,
-                'title', title,
-                'source_url', source_url,
-                'snippet', snippet,
-                'validity', jsonb_build_object(
-                    'from', valid_from,
-                    'to', valid_to,
-                    'to_exclusive', true
+    WHERE c.contextualized_body @@@ {query_text}
+      AND (d.valid_from IS NULL OR d.valid_from <= {as_of}::date)
+      AND (d.valid_to IS NULL OR d.valid_to > {as_of}::date)
+      {kind_predicate}
+    ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id
+    LIMIT {lexical_limit}
+),
+ranked AS (
+    SELECT
+        l.chunk_id,
+        l.lexical_rank,
+        NULL::bigint AS dense_rank,
+        1.0 / (60.0 + l.lexical_rank) AS fused_score
+    FROM lexical l
+)"#,
+            query_text = query_text,
+            as_of = as_of,
+            kind_predicate = kind_predicate,
+            lexical_limit = query.lexical_limit,
+        )),
+        RetrievalMode::Dense => {
+            let (query_embedding, embedding_fingerprint) = dense_query_inputs(query)?;
+            let query_embedding = sql_string_literal(query_embedding);
+            let embedding_fingerprint = sql_string_literal(embedding_fingerprint);
+            let dense_pool_limit = dense_pool_limit(query.dense_limit);
+            Ok(format!(
+                r#"
+dense_pool AS (
+    SELECT
+        scored.chunk_id,
+        row_number() OVER (ORDER BY scored.distance) AS dense_rank
+    FROM (
+        SELECT
+            ce.chunk_id,
+            ce.embedding <-> {query_embedding}::vector AS distance
+        FROM chunk_embeddings ce
+        WHERE ce.embedding_fingerprint = {embedding_fingerprint}
+    ) scored
+    ORDER BY scored.distance
+    LIMIT {dense_pool_limit}
+),
+dense AS (
+    SELECT
+        dp.chunk_id,
+        row_number() OVER (ORDER BY dp.dense_rank, dp.chunk_id) AS dense_rank
+    FROM dense_pool dp
+    JOIN chunks c ON c.chunk_id = dp.chunk_id
+    JOIN documents d ON d.document_id = c.document_id
+    WHERE (d.valid_from IS NULL OR d.valid_from <= {as_of}::date)
+      AND (d.valid_to IS NULL OR d.valid_to > {as_of}::date)
+      {kind_predicate}
+    ORDER BY dp.dense_rank, dp.chunk_id
+    LIMIT {dense_limit}
+),
+ranked AS (
+    SELECT
+        d.chunk_id,
+        NULL::bigint AS lexical_rank,
+        d.dense_rank,
+        1.0 / (60.0 + d.dense_rank) AS fused_score
+    FROM dense d
+)"#,
+                query_embedding = query_embedding,
+                embedding_fingerprint = embedding_fingerprint,
+                dense_pool_limit = dense_pool_limit,
+                as_of = as_of,
+                kind_predicate = kind_predicate,
+                dense_limit = query.dense_limit,
+            ))
+        }
+    }
+}
+
+fn dense_query_inputs<'a>(
+    query: &'a HybridCandidateQuery<'a>,
+) -> Result<(&'a str, &'a str), StorageError> {
+    let query_embedding = query
+        .query_embedding
+        .ok_or_else(|| StorageError::Retrieval {
+            message: format!(
+                "{} retrieval requires a query embedding",
+                query.retrieval_mode.as_str()
+            ),
+        })?;
+    let embedding_fingerprint =
+        query
+            .embedding_fingerprint
+            .ok_or_else(|| StorageError::Retrieval {
+                message: format!(
+                    "{} retrieval requires an embedding fingerprint",
+                    query.retrieval_mode.as_str()
                 ),
-                'scores', jsonb_build_object(
-                    'rrf', round(fused_score::numeric, 8),
-                    'lexical_rank', lexical_rank,
-                    'dense_rank', dense_rank
-                ),
-                'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
-            )
-            ORDER BY fused_score DESC, chunk_id
-        )
-        FROM limited
-    ), '[]'::jsonb)
-)::text;
-"#,
-        query_text = query_text,
-        query_embedding = query_embedding,
-        embedding_fingerprint = embedding_fingerprint,
-        as_of = as_of,
-        kind_predicate = kind_predicate,
-        lexical_limit = query.lexical_limit,
-        dense_limit = query.dense_limit,
-        dense_pool_limit = dense_pool_limit,
-        limit = query.limit
-    ))
+            })?;
+    Ok((query_embedding, embedding_fingerprint))
+}
+
+fn dense_pool_limit(dense_limit: u32) -> u32 {
+    dense_limit
+        .saturating_mul(DENSE_TEMPORAL_OVERFETCH_FACTOR)
+        .max(dense_limit)
 }
 
 pub fn fetch_documents_json(

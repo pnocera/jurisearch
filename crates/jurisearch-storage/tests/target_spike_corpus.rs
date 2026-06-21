@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
-    retrieval::{HybridCandidateQuery, hybrid_candidates_json},
+    retrieval::{HybridCandidateQuery, RetrievalMode, hybrid_candidates_json},
     runtime::{ManagedPostgres, StorageError},
 };
 
@@ -39,8 +39,9 @@ fn target_spike_corpus_retrieval_stays_under_latency_budget() -> Result<(), Stor
 
     let request = HybridCandidateQuery {
         query_text: QUERY_TEXT,
-        query_embedding: &target_vector,
-        embedding_fingerprint: EMBEDDING_FINGERPRINT,
+        query_embedding: Some(&target_vector),
+        embedding_fingerprint: Some(EMBEDDING_FINGERPRINT),
+        retrieval_mode: RetrievalMode::Hybrid,
         as_of: "2024-06-01",
         kind_filter: None,
         lexical_limit: 50,

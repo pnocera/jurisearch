@@ -608,8 +608,10 @@ Current status (2026-06-21):
 - Operator note: migration `9` drops and rebuilds the `pg_search` BM25 index; on a corpus-scale populated index this can take time and temporarily removes the lexical index while the migration runs.
 - Done: retrieval smoke covers accent-insensitive and stemmed French legal lexical matching (`responsabilité`/`réparations`/`créancier`/`procédure`/`arrêté` vs unaccented queries), elision matching (`l'auteur` vs `auteur`), and exact statutory reference matching with reciprocal `Article 1240` and `Article 1241` assertions.
 - Already present from earlier retrieval slices: temporal validity predicates are applied independently to lexical and dense candidate pools before RRF fusion.
+- Done: retrieval-mode ablation controls are now first-class. `jurisearch search --mode hybrid|bm25|dense` and session JSON `mode` default to `hybrid`; `help schema --json` advertises the same enum; search responses include `retrieval_mode`. BM25-only search requires only projection coverage and skips query embedding/embedding coverage, while dense and hybrid keep the embedding gate and endpoint call.
+- Done: `hybrid_candidates_json` supports `RetrievalMode::Hybrid`, `RetrievalMode::Bm25`, and `RetrievalMode::Dense` without passing fake vectors through BM25-only queries. Storage smoke asserts hybrid rank fusion plus BM25-only `dense_rank: null` and dense-only `lexical_rank: null`.
 - Follow-up for W5/W2 ranking evidence: include the French analyzer change in the planned before/after BM25 ranking check, and run a legal-vocabulary pass over the French stopword behavior before treating the analyzer as quality-neutral at scale.
-- Remaining: BM25/dense/hybrid ablation controls and reporting, vocabulary expansion seed lexicon plus `expand`, legal term/field boosters, authority prior, pagination/truncation guidance, and `--format concise|detailed`.
+- Remaining: hybrid+authority ablation reporting once the authority prior exists, vocabulary expansion seed lexicon plus `expand`, legal term/field boosters, authority prior, pagination/truncation guidance, and `--format concise|detailed`.
 
 ### 1.4 Citation Verification for Statutes
 

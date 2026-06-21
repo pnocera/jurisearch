@@ -67,6 +67,10 @@ pub fn compiled_schema() -> Value {
                 "description": "CLI kind `code` maps to result kind `article`.",
                 "values": ["code", "decision", "all"]
             },
+            "search_mode": {
+                "description": "Retrieval ablation mode. `hybrid` fuses BM25 and dense candidates.",
+                "values": ["hybrid", "bm25", "dense"]
+            },
             "citation_state": ["exact", "normalized", "ambiguous", "stale_version", "not_found", "source_unavailable"],
             "response_format": ["concise", "detailed"]
         },
@@ -76,6 +80,7 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "query": { "type": "string" },
                     "kind": { "enum": ["code", "decision", "all"], "default": "all" },
+                    "mode": { "enum": ["hybrid", "bm25", "dense"], "default": "hybrid" },
                     "top_k": { "type": "integer", "minimum": 1, "default": 10 },
                     "as_of": { "type": "string", "format": "date" }
                 }
@@ -83,6 +88,7 @@ pub fn compiled_schema() -> Value {
             "SearchResponse": {
                 "properties": {
                     "query": { "type": "string" },
+                    "retrieval_mode": { "enum": ["hybrid", "bm25", "dense"] },
                     "as_of": { "type": "string", "format": "date" },
                     "limit": { "type": "integer" },
                     "candidates": {

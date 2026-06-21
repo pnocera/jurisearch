@@ -625,6 +625,8 @@ pub enum StorageError {
     Projection { message: String },
     #[error("dense rebuild failed: {message}")]
     DenseRebuild { message: String },
+    #[error("retrieval failed: {message}")]
+    Retrieval { message: String },
     #[error("ingest accounting failed: {message}")]
     IngestAccounting { message: String },
     #[error("json serialization failed: {0}")]

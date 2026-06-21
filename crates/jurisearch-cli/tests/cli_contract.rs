@@ -49,6 +49,11 @@ fn help_schema_json_is_valid_and_lists_commands() {
             && command["request_schema"] == "SearchRequest"
     }));
     assert_eq!(json["common_enums"]["kind"]["values"][0], "code");
+    assert_eq!(json["common_enums"]["search_mode"]["values"][0], "hybrid");
+    assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["mode"]["default"],
+        "hybrid"
+    );
 }
 
 #[test]
@@ -413,6 +418,25 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
             .unwrap()
             .contains("embedding coverage gate is incomplete")
     );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .args(["search", "responsabilite civile", "--mode", "bm25"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["retrieval_mode"], "bm25");
+    assert_eq!(
+        json["candidates"][0]["document_id"],
+        "legi:LEGIARTI000006419320@1804-02-21"
+    );
+    assert!(json["candidates"][0]["scores"]["dense_rank"].is_null());
     Ok(())
 }
 
@@ -543,6 +567,27 @@ fn bad_input_is_json_and_uses_exit_code_2() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "bad_input");
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["search", "!!!", "--mode", "dense"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at least one searchable token")
+    );
 }
 
 #[test]
@@ -1687,7 +1732,7 @@ fn ingest_embed_chunks_uses_live_endpoint_and_finalizes_dense_index()
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
         .env("JURISEARCH_INDEX_DIR", root.path())
-        .env("JURISEARCH_EMBED_BASE_URL", embedding_base_url)
+        .env("JURISEARCH_EMBED_BASE_URL", &embedding_base_url)
         .args(["ingest", "embed-chunks", "--index-lists", "1"])
         .assert()
         .success()
@@ -1781,7 +1826,7 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
         .env("JURISEARCH_INDEX_DIR", root.path())
-        .env("JURISEARCH_EMBED_BASE_URL", embedding_base_url)
+        .env("JURISEARCH_EMBED_BASE_URL", &embedding_base_url)
         .args(["search", query, "--as-of", "2024-01-01", "--top-k", "3"])
         .assert()
         .success()
@@ -1791,7 +1836,35 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
         .clone();
 
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["retrieval_mode"], "hybrid");
     assert_eq!(json["candidates"][0]["document_id"], document_id);
+    assert_eq!(json["candidates"][0]["scores"]["dense_rank"], 1);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", embedding_base_url)
+        .args([
+            "search",
+            query,
+            "--as-of",
+            "2024-01-01",
+            "--top-k",
+            "3",
+            "--mode",
+            "dense",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["retrieval_mode"], "dense");
+    assert_eq!(json["candidates"][0]["document_id"], document_id);
+    assert!(json["candidates"][0]["scores"]["lexical_rank"].is_null());
     assert_eq!(json["candidates"][0]["scores"]["dense_rank"], 1);
     Ok(())
 }

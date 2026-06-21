@@ -307,7 +307,7 @@ This is the heart of the tool: a **stable, documented, token-frugal interface** 
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `jurisearch search "<query>"` | Hybrid ranked search. Returns IDs + citation + snippet (concise). | `--kind code\|decision\|all` `--court` `--chamber` `--code "Code civil"` `--as-of YYYY-MM-DD` `--date-from/--date-to` `--top-k` `--cursor` `--expand` `--format` |
+| `jurisearch search "<query>"` | Hybrid ranked search. Returns IDs + citation + snippet (concise). | `--kind code\|decision\|all` `--mode hybrid\|bm25\|dense` `--court` `--chamber` `--code "Code civil"` `--as-of YYYY-MM-DD` `--date-from/--date-to` `--top-k` `--cursor` `--expand` `--format` |
 | `jurisearch fetch <id…>` | Full text of one/more documents by stable ID. Step 2 of search→fetch. | `--part motivations\|dispositif\|moyens\|visa\|summary\|…` (zone names per §6; `motifs` accepted as an alias for `motivations`) `--with-context` (parent section / siblings) `--as-of` |
 | `jurisearch cite <id \| "free-text citation">` | **Verify/resolve** a citation: confirm it exists, return canonical form + official URL, flag mismatches. | `--strict` `--as-of` |
 | `jurisearch related <id>` | Graph traversal (Pillar 4). Returns **ranked candidate** neighbours with authority signals — never a settled-law verdict (§8). | `--rel cites\|interpreted-by\|appeals\|applies-article\|rapprochements` `--depth 1\|2` |

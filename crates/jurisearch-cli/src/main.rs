@@ -44,8 +44,8 @@ use jurisearch_storage::{
         insert_legi_documents, insert_legi_metadata_roots,
     },
     retrieval::{
-        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, context_documents_json,
-        fetch_documents_json, hybrid_candidates_json,
+        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalMode,
+        context_documents_json, fetch_documents_json, hybrid_candidates_json,
     },
     runtime::{ManagedPostgres, PgConfig, StorageError},
 };
@@ -104,6 +104,8 @@ struct SearchArgs {
     query: String,
     #[arg(long, default_value = "all")]
     kind: CliKind,
+    #[arg(long, default_value = "hybrid")]
+    mode: CliSearchMode,
     #[arg(long, default_value_t = 10)]
     top_k: u32,
     #[arg(long)]
@@ -124,6 +126,8 @@ struct SessionSearchArgs {
     query: String,
     #[serde(default = "default_cli_kind")]
     kind: CliKind,
+    #[serde(default = "default_search_mode")]
+    mode: CliSearchMode,
     #[serde(default = "default_top_k")]
     top_k: u32,
     #[serde(default)]
@@ -297,6 +301,24 @@ impl From<CliKind> for LegalKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum CliSearchMode {
+    Hybrid,
+    Bm25,
+    Dense,
+}
+
+impl From<CliSearchMode> for RetrievalMode {
+    fn from(mode: CliSearchMode) -> Self {
+        match mode {
+            CliSearchMode::Hybrid => Self::Hybrid,
+            CliSearchMode::Bm25 => Self::Bm25,
+            CliSearchMode::Dense => Self::Dense,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliArchiveSource {
     Legi,
@@ -411,9 +433,19 @@ fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()>
 }
 
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    let query_text = parade_query_text(&args.query).ok_or_else(|| {
-        ErrorObject::bad_input("search query must contain at least one searchable token")
-    })?;
+    let retrieval_mode: RetrievalMode = args.mode.into();
+    let normalized_query_text = parade_query_text(&args.query);
+    let query_text = if retrieval_mode.uses_lexical() {
+        normalized_query_text.ok_or_else(|| {
+            ErrorObject::bad_input("search query must contain at least one searchable token")
+        })?
+    } else if normalized_query_text.is_none() {
+        return Err(ErrorObject::bad_input(
+            "search query must contain at least one searchable token",
+        ));
+    } else {
+        args.query.trim().to_owned()
+    };
     let index_dir = require_existing_index_dir(index_dir)?;
     let kind: LegalKind = args.kind.into();
     if matches!(kind, LegalKind::Decision) {
@@ -423,22 +455,36 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     }
 
     let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
-    let embedding_config = embedding_config_from_env();
-    let expected_fingerprint = embedding_config.fingerprint();
-    let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
-    let client = OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
-    let embedding = client
-        .embed_query(args.query.as_str(), &expected_fingerprint)
-        .map_err(embedding_error_object)?;
-    let query_embedding = pgvector_literal(&embedding.values);
+    let readiness_gate = if retrieval_mode.uses_dense() {
+        QueryReadinessGate::Search
+    } else {
+        QueryReadinessGate::SearchLexical
+    };
+    ensure_query_readiness(&postgres, readiness_gate)?;
+    let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
+        let embedding_config = embedding_config_from_env();
+        let expected_fingerprint = embedding_config.fingerprint();
+        let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
+        let client =
+            OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
+        let embedding = client
+            .embed_query(args.query.as_str(), &expected_fingerprint)
+            .map_err(embedding_error_object)?;
+        (
+            Some(pgvector_literal(&embedding.values)),
+            Some(embedding_fingerprint),
+        )
+    } else {
+        (None, None)
+    };
     let as_of = args.as_of.unwrap_or_else(today_utc);
     let response = hybrid_candidates_json(
         &postgres,
         &HybridCandidateQuery {
             query_text: query_text.as_str(),
-            query_embedding: query_embedding.as_str(),
-            embedding_fingerprint: embedding_fingerprint.as_str(),
+            query_embedding: query_embedding.as_deref(),
+            embedding_fingerprint: embedding_fingerprint.as_deref(),
+            retrieval_mode,
             as_of: as_of.as_str(),
             kind_filter: if matches!(kind, LegalKind::Code) {
                 Some("article")
@@ -542,6 +588,7 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
         SearchArgs {
             query: args.query,
             kind: args.kind,
+            mode: args.mode,
             top_k: args.top_k,
             as_of: args.as_of,
         },
@@ -1761,6 +1808,7 @@ fn coverage_complete(covered: i64, total: i64) -> bool {
 #[derive(Debug, Clone, Copy)]
 enum QueryReadinessGate {
     Fetch,
+    SearchLexical,
     Search,
 }
 
@@ -1768,6 +1816,7 @@ impl QueryReadinessGate {
     fn command(self) -> &'static str {
         match self {
             Self::Fetch => "fetch",
+            Self::SearchLexical => "search --mode bm25",
             Self::Search => "search",
         }
     }
@@ -1790,7 +1839,10 @@ fn ensure_query_readiness(
         ));
     }
 
-    if matches!(gate, QueryReadinessGate::Fetch) {
+    if matches!(
+        gate,
+        QueryReadinessGate::Fetch | QueryReadinessGate::SearchLexical
+    ) {
         return Ok(());
     }
 
@@ -2012,6 +2064,10 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 
 fn default_cli_kind() -> CliKind {
     CliKind::All
+}
+
+fn default_search_mode() -> CliSearchMode {
+    CliSearchMode::Hybrid
 }
 
 fn default_top_k() -> u32 {
