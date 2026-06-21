@@ -3,8 +3,8 @@ mod common;
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     retrieval::{
-        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalMode,
-        context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
+        RetrievalMode, context_documents_json, fetch_documents_json, hybrid_candidates_json,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -134,6 +134,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
             query_embedding: Some(&legal_vector),
             embedding_fingerprint: Some("bge-m3:1024:normalize:true"),
             retrieval_mode: RetrievalMode::Hybrid,
+            after_cursor: None,
             as_of: "2024-01-01",
             kind_filter: None,
             lexical_limit: 10,
@@ -167,6 +168,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
             query_embedding: None,
             embedding_fingerprint: None,
             retrieval_mode: RetrievalMode::Bm25,
+            after_cursor: None,
             as_of: "2024-01-01",
             kind_filter: None,
             lexical_limit: 10,
@@ -184,6 +186,106 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     );
     assert!(bm25_candidates["candidates"][0]["scores"]["dense_rank"].is_null());
 
+    let first_article_page = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "article",
+            query_embedding: None,
+            embedding_fingerprint: None,
+            retrieval_mode: RetrievalMode::Bm25,
+            after_cursor: None,
+            as_of: "2024-01-01",
+            kind_filter: None,
+            lexical_limit: 10,
+            dense_limit: 10,
+            limit: 1,
+        },
+    )?;
+    let first_article_page: serde_json::Value =
+        serde_json::from_str(&first_article_page).expect("first page response is stable JSON");
+    let first_cursor = first_article_page["candidates"][0]["cursor"]
+        .as_str()
+        .expect("first candidate has a cursor");
+    let (cursor_score, cursor_chunk_id) = first_cursor
+        .split_once(':')
+        .expect("cursor is score followed by chunk id");
+    let second_article_page = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "article",
+            query_embedding: None,
+            embedding_fingerprint: None,
+            retrieval_mode: RetrievalMode::Bm25,
+            after_cursor: Some(RetrievalCursor {
+                score: cursor_score,
+                chunk_id: cursor_chunk_id,
+            }),
+            as_of: "2024-01-01",
+            kind_filter: None,
+            lexical_limit: 10,
+            dense_limit: 10,
+            limit: 1,
+        },
+    )?;
+    let second_article_page: serde_json::Value =
+        serde_json::from_str(&second_article_page).expect("second page response is stable JSON");
+    assert_ne!(
+        second_article_page["candidates"][0]["chunk_id"],
+        first_article_page["candidates"][0]["chunk_id"]
+    );
+
+    let first_hybrid_tie_page = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "code civil",
+            query_embedding: Some(&unrelated_vector),
+            embedding_fingerprint: Some("bge-m3:1024:normalize:true"),
+            retrieval_mode: RetrievalMode::Hybrid,
+            after_cursor: None,
+            as_of: "2024-01-01",
+            kind_filter: None,
+            lexical_limit: 1,
+            dense_limit: 1,
+            limit: 1,
+        },
+    )?;
+    let first_hybrid_tie_page: serde_json::Value =
+        serde_json::from_str(&first_hybrid_tie_page).expect("hybrid tie page is stable JSON");
+    assert_eq!(
+        first_hybrid_tie_page["candidates"][0]["chunk_id"],
+        "chunk:1240:0"
+    );
+    let first_hybrid_tie_cursor = first_hybrid_tie_page["candidates"][0]["cursor"]
+        .as_str()
+        .expect("hybrid tie candidate has a cursor");
+    let (hybrid_tie_cursor_score, hybrid_tie_cursor_chunk_id) = first_hybrid_tie_cursor
+        .split_once(':')
+        .expect("cursor is score followed by chunk id");
+    let second_hybrid_tie_page = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "code civil",
+            query_embedding: Some(&unrelated_vector),
+            embedding_fingerprint: Some("bge-m3:1024:normalize:true"),
+            retrieval_mode: RetrievalMode::Hybrid,
+            after_cursor: Some(RetrievalCursor {
+                score: hybrid_tie_cursor_score,
+                chunk_id: hybrid_tie_cursor_chunk_id,
+            }),
+            as_of: "2024-01-01",
+            kind_filter: None,
+            lexical_limit: 1,
+            dense_limit: 1,
+            limit: 1,
+        },
+    )?;
+    let second_hybrid_tie_page: serde_json::Value =
+        serde_json::from_str(&second_hybrid_tie_page).expect("hybrid tie page is stable JSON");
+    assert_eq!(
+        second_hybrid_tie_page["candidates"][0]["chunk_id"],
+        "chunk:recipe:0"
+    );
+
     let dense_candidates = hybrid_candidates_json(
         &postgres,
         &HybridCandidateQuery {
@@ -191,6 +293,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
             query_embedding: Some(&legal_vector),
             embedding_fingerprint: Some("bge-m3:1024:normalize:true"),
             retrieval_mode: RetrievalMode::Dense,
+            after_cursor: None,
             as_of: "2024-01-01",
             kind_filter: None,
             lexical_limit: 10,

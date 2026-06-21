@@ -45,8 +45,8 @@ use jurisearch_storage::{
         insert_legi_documents, insert_legi_metadata_roots,
     },
     retrieval::{
-        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalMode,
-        context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
+        RetrievalMode, context_documents_json, fetch_documents_json, hybrid_candidates_json,
     },
     runtime::{ManagedPostgres, PgConfig, StorageError},
 };
@@ -112,6 +112,8 @@ struct SearchArgs {
     #[arg(long, default_value_t = 10)]
     top_k: u32,
     #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long)]
     as_of: Option<String>,
 }
 
@@ -135,6 +137,8 @@ struct SessionSearchArgs {
     format: CliOutputFormat,
     #[serde(default = "default_top_k")]
     top_k: u32,
+    #[serde(default)]
+    cursor: Option<String>,
     #[serde(default)]
     as_of: Option<String>,
     #[serde(default)]
@@ -456,6 +460,11 @@ fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()>
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let retrieval_mode: RetrievalMode = args.mode.into();
     let output_format: OutputFormat = args.format.into();
+    let after_cursor = args
+        .cursor
+        .as_deref()
+        .map(parse_search_cursor)
+        .transpose()?;
     let normalized_query_text = parade_query_text(&args.query);
     let query_text = if retrieval_mode.uses_lexical() {
         normalized_query_text.ok_or_else(|| {
@@ -507,6 +516,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     };
     let lexical_limit = args.top_k.saturating_mul(4);
     let dense_limit = args.top_k.saturating_mul(4);
+    let query_limit = args.top_k.saturating_add(1);
     let response = hybrid_candidates_json(
         &postgres,
         &HybridCandidateQuery {
@@ -514,11 +524,15 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
             query_embedding: query_embedding.as_deref(),
             embedding_fingerprint: embedding_fingerprint.as_deref(),
             retrieval_mode,
+            after_cursor: after_cursor.as_ref().map(|cursor| RetrievalCursor {
+                score: cursor.score.as_str(),
+                chunk_id: cursor.chunk_id.as_str(),
+            }),
             as_of: as_of.as_str(),
             kind_filter,
             lexical_limit,
             dense_limit,
-            limit: args.top_k,
+            limit: query_limit,
         },
     )
     .map_err(storage_error_object)?;
@@ -526,19 +540,32 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
         .map_err(|error| dependency_unavailable(error.to_string()))?;
     let expansion = expand_query(&args.query);
     response["format"] = json!(output_format.as_str());
+    response["limit"] = json!(args.top_k);
     response["expansion_seed_version"] = json!(expansion.seed_version);
     response["expanded_terms"] = json!(expansion.expanded_terms);
+    let mut next_cursor = None;
+    let top_k = args.top_k as usize;
+    if let Some(candidates) = response["candidates"].as_array_mut()
+        && candidates.len() > top_k
+    {
+        candidates.truncate(top_k);
+        // Storage always projects a cursor; keep next_cursor tied to the last displayed row.
+        next_cursor = candidates
+            .last()
+            .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
+    }
     let returned = response["candidates"].as_array().map_or(0, Vec::len);
-    let possibly_truncated = returned as u32 >= args.top_k;
+    let has_more = next_cursor.is_some();
     response["pagination"] = json!({
         "requested_top_k": args.top_k,
+        "after_cursor": args.cursor.as_deref(),
         "returned": returned,
-        "possibly_truncated": possibly_truncated,
-        "cursor_supported": false,
-        "next_cursor": null,
-        "cursor_note": "Candidate cursor values are reserved for future cursor pagination; search does not accept cursor input yet.",
-        "guidance": if possibly_truncated {
-            Some("The result window is full. Increase top_k (or --top-k on the CLI) to inspect more candidates; cursor pagination is not implemented yet.")
+        "possibly_truncated": has_more,
+        "cursor_supported": true,
+        "next_cursor": next_cursor.as_deref(),
+        "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+        "guidance": if has_more {
+            Some("Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.")
         } else {
             None
         }
@@ -557,8 +584,10 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
                 "uses_dense": retrieval_mode.uses_dense(),
                 "lexical_limit": lexical_limit,
                 "dense_limit": dense_limit,
+                "query_limit": query_limit,
                 "embedding_fingerprint": embedding_fingerprint.as_deref(),
                 "kind_filter": kind_filter,
+                "after_cursor": args.cursor.as_deref(),
             }
         });
     }
@@ -669,6 +698,7 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
             mode: args.mode,
             format: args.format,
             top_k: args.top_k,
+            cursor: args.cursor,
             as_of: args.as_of,
         },
         index_dir.as_deref(),
@@ -2017,6 +2047,34 @@ fn validate_as_of(as_of: Option<&str>) -> Result<(), ErrorObject> {
         )));
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct ParsedSearchCursor {
+    score: String,
+    chunk_id: String,
+}
+
+fn parse_search_cursor(cursor: &str) -> Result<ParsedSearchCursor, ErrorObject> {
+    let (score, chunk_id) = cursor.split_once(':').ok_or_else(|| {
+        ErrorObject::bad_input(
+            "search --cursor must use the cursor value returned by a previous search candidate",
+        )
+    })?;
+    let parsed_score = score.parse::<f64>().map_err(|_| {
+        ErrorObject::bad_input(
+            "search --cursor must start with a numeric score followed by ':' and a chunk id",
+        )
+    })?;
+    if !parsed_score.is_finite() || parsed_score < 0.0 || chunk_id.trim().is_empty() {
+        return Err(ErrorObject::bad_input(
+            "search --cursor must start with a finite non-negative score followed by ':' and a chunk id",
+        ));
+    }
+    Ok(ParsedSearchCursor {
+        score: score.to_owned(),
+        chunk_id: chunk_id.to_owned(),
+    })
 }
 
 fn is_valid_iso_date(value: &str) -> bool {

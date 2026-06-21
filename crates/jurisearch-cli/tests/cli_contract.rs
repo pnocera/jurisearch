@@ -64,6 +64,10 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "concise"
     );
     assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["cursor"]["type"],
+        "string"
+    );
+    assert_eq!(
         json["schemas"]["SearchResponse"]["properties"]["format"]["enum"][1],
         "detailed"
     );
@@ -491,7 +495,11 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
                 ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
                  'LEGIARTI000006419320', 'Code civil article 1240', \
                  'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
-                 '1804-02-21', 'sha256:article-1240', '{\"official\":true}'); \
+                 '1804-02-21', 'sha256:article-1240', '{\"official\":true}'), \
+                ('legi:LEGIARTI000000000124@2024-01-01', 'legi', 'article', \
+                 'LEGIARTI000000000124', 'Code civil article 1241', \
+                 'Article 1241', 'Responsabilite civile complementaire pour le dommage.', \
+                 '2024-01-01', 'sha256:article-1241', '{\"official\":true}'); \
              INSERT INTO chunks \
                 (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
@@ -499,7 +507,11 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                  'responsabilite civile faute reparation dommage article 1240', \
                  'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
-                 'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true');",
+                 'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'), \
+                ('chunk:1241:0', 'legi:LEGIARTI000000000124@2024-01-01', 0, \
+                 'responsabilite civile dommage article 1241', \
+                 'Code civil > Article 1241\nresponsabilite civile dommage article 1241', \
+                 'sha256:article-1241', 'chunker:v0', 'bge-m3:1024:normalize:true');",
         )?;
     }
 
@@ -517,10 +529,10 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["index"]["state"], "ready");
     assert_eq!(json["index"]["query_ready"], false);
-    assert_eq!(json["ingest_health"]["projection_coverage"]["covered"], 1);
-    assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 1);
+    assert_eq!(json["ingest_health"]["projection_coverage"]["covered"], 2);
+    assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 2);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 0);
-    assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 2);
 
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
@@ -565,9 +577,16 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
     assert_eq!(json["format"], "concise");
     assert!(json["diagnostics"].is_null());
     assert_eq!(json["retrieval_mode"], "bm25");
-    assert_eq!(
-        json["candidates"][0]["document_id"],
-        "legi:LEGIARTI000006419320@1804-02-21"
+    let first_page_document_id = json["candidates"][0]["document_id"]
+        .as_str()
+        .expect("first page candidate has a document id")
+        .to_owned();
+    assert!(
+        [
+            "legi:LEGIARTI000006419320@1804-02-21",
+            "legi:LEGIARTI000000000124@2024-01-01",
+        ]
+        .contains(&first_page_document_id.as_str())
     );
     assert!(json["candidates"][0]["scores"]["dense_rank"].is_null());
     assert_eq!(json["expansion_seed_version"], "legal-vocabulary-seed:v1");
@@ -582,17 +601,48 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
     assert_eq!(json["pagination"]["requested_top_k"], 1);
     assert_eq!(json["pagination"]["returned"], 1);
     assert_eq!(json["pagination"]["possibly_truncated"], true);
-    assert_eq!(json["pagination"]["cursor_supported"], false);
-    assert!(json["pagination"]["next_cursor"].is_null());
+    assert_eq!(json["pagination"]["cursor_supported"], true);
+    let next_cursor = json["pagination"]["next_cursor"]
+        .as_str()
+        .expect("full first page returns a next cursor")
+        .to_owned();
     assert!(
         json["pagination"]["cursor_note"]
             .as_str()
-            .is_some_and(|note| note.contains("reserved for future cursor pagination"))
+            .is_some_and(|note| note.contains("Use next_cursor"))
     );
     assert!(
         json["pagination"]["guidance"]
             .as_str()
-            .is_some_and(|guidance| guidance.contains("Increase top_k"))
+            .is_some_and(|guidance| guidance.contains("Use next_cursor"))
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .args([
+            "search",
+            "responsabilite civile",
+            "--mode",
+            "bm25",
+            "--top-k",
+            "1",
+            "--cursor",
+            &next_cursor,
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let second_page: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(second_page["pagination"]["after_cursor"], next_cursor);
+    assert_eq!(second_page["pagination"]["returned"], 1);
+    assert_ne!(
+        second_page["candidates"][0]["document_id"],
+        first_page_document_id
     );
 
     let output = Command::cargo_bin("jurisearch")
@@ -618,7 +668,7 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["format"], "detailed");
     assert_eq!(json["pagination"]["requested_top_k"], 10);
-    assert_eq!(json["pagination"]["returned"], 1);
+    assert_eq!(json["pagination"]["returned"], 2);
     assert_eq!(json["pagination"]["possibly_truncated"], false);
     assert!(json["pagination"]["guidance"].is_null());
     assert_eq!(json["diagnostics"]["query_input"], "responsabilite civile");
@@ -629,6 +679,7 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
     assert_eq!(json["diagnostics"]["retrieval"]["mode"], "bm25");
     assert_eq!(json["diagnostics"]["retrieval"]["uses_dense"], false);
     assert_eq!(json["diagnostics"]["retrieval"]["lexical_limit"], 40);
+    assert_eq!(json["diagnostics"]["retrieval"]["query_limit"], 11);
     assert!(json["diagnostics"]["retrieval"]["embedding_fingerprint"].is_null());
 
     let input = format!(
@@ -820,6 +871,31 @@ fn bad_input_is_json_and_uses_exit_code_2() {
             .as_str()
             .unwrap()
             .contains("at least one searchable token")
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "search",
+            "responsabilite civile",
+            "--cursor",
+            "not-a-cursor",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cursor value returned by a previous search candidate")
     );
 }
 

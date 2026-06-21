@@ -83,6 +83,7 @@ pub fn compiled_schema() -> Value {
                     "mode": { "enum": ["hybrid", "bm25", "dense"], "default": "hybrid" },
                     "format": { "enum": ["concise", "detailed"], "default": "concise" },
                     "top_k": { "type": "integer", "minimum": 1, "default": 10 },
+                    "cursor": { "type": "string" },
                     "as_of": { "type": "string", "format": "date" }
                 }
             },
@@ -117,6 +118,7 @@ pub fn compiled_schema() -> Value {
                         "type": "object",
                         "properties": {
                             "requested_top_k": { "type": "integer" },
+                            "after_cursor": { "type": ["string", "null"] },
                             "returned": { "type": "integer" },
                             "possibly_truncated": { "type": "boolean" },
                             "cursor_supported": { "type": "boolean" },
@@ -138,8 +140,10 @@ pub fn compiled_schema() -> Value {
                                     "uses_dense": { "type": "boolean" },
                                     "lexical_limit": { "type": "integer" },
                                     "dense_limit": { "type": "integer" },
+                                    "query_limit": { "type": "integer" },
                                     "embedding_fingerprint": { "type": ["string", "null"] },
-                                    "kind_filter": { "type": ["string", "null"] }
+                                    "kind_filter": { "type": ["string", "null"] },
+                                    "after_cursor": { "type": ["string", "null"] }
                                 }
                             }
                         }

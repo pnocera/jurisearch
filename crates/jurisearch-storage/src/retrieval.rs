@@ -11,11 +11,18 @@ pub struct HybridCandidateQuery<'a> {
     pub query_embedding: Option<&'a str>,
     pub embedding_fingerprint: Option<&'a str>,
     pub retrieval_mode: RetrievalMode,
+    pub after_cursor: Option<RetrievalCursor<'a>>,
     pub as_of: &'a str,
     pub kind_filter: Option<&'a str>,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RetrievalCursor<'a> {
+    pub score: &'a str,
+    pub chunk_id: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +73,7 @@ pub fn hybrid_candidates_json(
         .kind_filter
         .map(|kind| format!("AND d.kind = {}", sql_string_literal(kind)))
         .unwrap_or_default();
+    let cursor_predicate = cursor_predicate(query.after_cursor);
     let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &kind_predicate)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
         "SET ivfflat.probes = 4;\n\n"
@@ -94,7 +102,8 @@ limited AS (
     FROM ranked r
     JOIN chunks c ON c.chunk_id = r.chunk_id
     JOIN documents d ON d.document_id = c.document_id
-    ORDER BY r.fused_score DESC, r.chunk_id
+    {cursor_predicate}
+    ORDER BY round(r.fused_score::numeric, 8) DESC, r.chunk_id
     LIMIT {limit}
 )
 SELECT jsonb_build_object(
@@ -125,7 +134,7 @@ SELECT jsonb_build_object(
                 ),
                 'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
             )
-            ORDER BY fused_score DESC, chunk_id
+            ORDER BY round(fused_score::numeric, 8) DESC, chunk_id
         )
         FROM limited
     ), '[]'::jsonb)
@@ -136,8 +145,23 @@ SELECT jsonb_build_object(
         query_text = query_text,
         retrieval_mode = retrieval_mode,
         as_of = as_of,
+        cursor_predicate = cursor_predicate,
         limit = query.limit
     ))
+}
+
+fn cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
+    cursor
+        .map(|cursor| {
+            let score = sql_string_literal(cursor.score);
+            let chunk_id = sql_string_literal(cursor.chunk_id);
+            format!(
+                "WHERE (round(r.fused_score::numeric, 8) < {score}::numeric \
+                 OR (round(r.fused_score::numeric, 8) = {score}::numeric \
+                 AND r.chunk_id > {chunk_id}))"
+            )
+        })
+        .unwrap_or_default()
 }
 
 fn ranked_candidate_ctes(
