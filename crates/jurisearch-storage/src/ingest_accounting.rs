@@ -611,7 +611,11 @@ fn load_embedding_coverage<C: GenericClient>(
     let embedding = client
         .query_one(
             "SELECT count(*)::bigint, \
-                    count(*) FILTER (WHERE ce.chunk_id IS NOT NULL)::bigint \
+                    count(*) FILTER ( \
+                        WHERE c.embedding_fingerprint IS NOT NULL \
+                          AND ce.chunk_id IS NOT NULL \
+                          AND ce.embedding_fingerprint = c.embedding_fingerprint \
+                    )::bigint \
              FROM chunks c \
              LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id;",
             &[],

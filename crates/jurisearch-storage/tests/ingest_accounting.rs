@@ -259,6 +259,14 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
         load_ingest_health(&postgres)?.replay_snapshot.signature,
         replay_signature
     );
+    postgres.execute_sql(
+        "UPDATE chunk_embeddings \
+         SET embedding_fingerprint = 'stale-fingerprint' \
+         WHERE chunk_id = 'chunk:1240:1';",
+    )?;
+    let stale_embedding_readiness = load_ingest_readiness(&postgres)?;
+    assert_eq!(stale_embedding_readiness.embedding_coverage.covered, 1);
+    assert_eq!(stale_embedding_readiness.embedding_coverage.total, 2);
     assert!(
         health
             .recovery_warnings
