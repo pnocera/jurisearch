@@ -107,7 +107,9 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
   </META>
   <STRUCT>
     <LIEN_TXT cid="LEGITEXT999999999999" debut="1804-03-21" id="LEGITEXT000006070721"/>
+    <LIEN_ART debut="1804-03-21" id="LEGIARTI000052000004"/>
     <LIEN_SECTION_TA cid="LEGISCTA000006089696" debut="1804-03-21" id="LEGISCTA000006089696" niv="1">Titre preliminaire</LIEN_SECTION_TA>
+    <LIEN_ART debut="2020-01-01" id="LEGIARTI000006419320"/>
     <LIEN_ART debut="1804-03-21" id="LEGIARTI000052000003"/>
   </STRUCT>
 </TEXTELR>
@@ -238,6 +240,15 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
                 \"hierarchy_path\":[\"Code civil\"],\
                 \"chunks\":[{{\"body\":\"Article seulement relie par TEXTELR...\",\
                               \"contextualized_body\":\"Code civil > Article 1242\\n\\nArticle seulement relie par TEXTELR...\",\
+                              \"hierarchy_path\":[\"Code civil\"]}}]}}'), \
+            ('legi:LEGIARTI000052000004@1804-03-21', 'legi', 'article', \
+             'LEGIARTI000052000004', 'LEGIARTI000052000004', 'Code civil article 1243', \
+             'Article 1243', 'Article avant section TEXTELR...', '1804-03-21', \
+             'sha256:article-textelr-no-section', \
+             '{{\"title\":\"Article 1243\",\"body\":\"Article avant section TEXTELR...\",\
+                \"hierarchy_path\":[\"Code civil\"],\
+                \"chunks\":[{{\"body\":\"Article avant section TEXTELR...\",\
+                              \"contextualized_body\":\"Code civil > Article 1243\\n\\nArticle avant section TEXTELR...\",\
                               \"hierarchy_path\":[\"Code civil\"]}}]}}'); \
          INSERT INTO chunks \
             (chunk_id, document_id, chunk_index, body, source_payload_hash, \
@@ -258,6 +269,10 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             ('chunk:legi:LEGIARTI000052000003@1804-03-21:0', \
              'legi:LEGIARTI000052000003@1804-03-21', 0, \
              'Article seulement relie par TEXTELR...', 'sha256:article-textelr-linked', \
+             'chunker:v0', NULL), \
+            ('chunk:legi:LEGIARTI000052000004@1804-03-21:0', \
+             'legi:LEGIARTI000052000004@1804-03-21', 0, \
+             'Article avant section TEXTELR...', 'sha256:article-textelr-no-section', \
              'chunker:v0', NULL); \
          INSERT INTO chunk_embeddings \
             (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -345,6 +360,14 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         )?,
         "absent"
     );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT coalesce(canonical_json->'hierarchy_path'->>1, 'absent') \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000052000004@1804-03-21';",
+        )?,
+        "absent"
+    );
     let text_struct_backfill = backfill_legi_article_hierarchy_from_metadata_scoped(
         &postgres,
         &LegiHierarchyBackfillScope {
@@ -362,6 +385,14 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              WHERE document_id = 'legi:LEGIARTI000052000003@1804-03-21';",
         )?,
         "Titre preliminaire"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT coalesce(canonical_json->'hierarchy_path'->>1, 'absent') \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000052000004@1804-03-21';",
+        )?,
+        "absent"
     );
     let repeated_text_struct_backfill = backfill_legi_article_hierarchy_from_metadata_scoped(
         &postgres,

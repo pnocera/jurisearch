@@ -286,7 +286,8 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
             // nearest preceding LIEN_SECTION_TA in the same flat STRUCT sequence.
             // Candidate selection below then chooses the section version whose
             // validity contains the link/document anchor, falling back to the
-            // latest section row when source dates are incomplete.
+            // latest section row when source dates are incomplete. TEXTELR
+            // anchors intentionally reuse the preserved raw attributes[] `debut`.
             "WITH hierarchy_candidates AS ( \
                 SELECT d.document_id, d.canonical_json::text AS document_json, \
                        d.valid_from::text AS document_valid_from, \
@@ -319,6 +320,8 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
                        section.valid_from::text AS section_valid_from, \
                        section.valid_to::text AS section_valid_to, \
                        1 AS source_rank, section.metadata_key AS section_metadata_key, \
+                       /* Branch-local deterministic tiebreaker; source_rank keeps it separate \
+                          from graph edge ids in the direct branch. */ \
                        text_struct.metadata_key || ':' || article_link.ordinality::text AS tie_breaker \
                 FROM documents d \
                 JOIN legi_metadata_roots text_struct \

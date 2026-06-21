@@ -36,6 +36,16 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         assert!(migrations.contains("2:chunk_bm25_index"));
         assert!(migrations.contains("3:ingest_operational_accounting"));
         assert!(migrations.contains("4:legi_metadata_roots"));
+        assert!(migrations.contains("5:documents_source_uid_index"));
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT count(*)::text \
+                 FROM pg_indexes \
+                 WHERE schemaname = current_schema() \
+                   AND indexname = 'documents_source_uid_idx';",
+            )?,
+            "1"
+        );
 
         postgres.execute_sql(&format!(
             "INSERT INTO documents \
