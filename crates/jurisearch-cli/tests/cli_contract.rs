@@ -845,6 +845,16 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     );
     assert_eq!(
         postgres.execute_sql(
+            "SELECT contextualized_body LIKE '%Titre preliminaire%Article 1240%', \
+                    hierarchy_path->>3, \
+                    chunking || ':' || boundary \
+             FROM chunks \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "t|Titre preliminaire|structural:article"
+    );
+    assert_eq!(
+        postgres.execute_sql(
             "SELECT string_agg(error_code, ',' ORDER BY error_code) FROM ingest_error;"
         )?,
         "validation_missing_required_field"

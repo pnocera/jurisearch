@@ -567,6 +567,12 @@ Acceptance:
 - A structural-survival test proves `Code -> Livre -> Titre -> Chapitre -> Section -> Article` remains intact after ingestion, chunking, and context reconstruction.
 - Eval includes long-article and hierarchy-sensitive cases.
 
+Current status (2026-06-21):
+
+- Done: storage schema migration `6` materializes emitted chunk provenance on `chunks` with `contextualized_body`, `chunking`, `boundary`, and `hierarchy_path`. Canonical LEGI document insertion writes these fields directly from `CanonicalChunk`, hierarchy backfill refreshes chunk context/provenance columns when it enriches document hierarchy, `ingest embed-chunks` reads stored `chunks.contextualized_body` instead of reparsing document JSON, and `fetch` returns the stored chunk provenance fields.
+- Operator note: migration `6` rewrites existing `chunks` rows once to materialize provenance from `documents.canonical_json`; on a corpus-scale populated index this startup migration may take time and hold write locks, but it preserves existing embedding fingerprints because it copies the text the previous embedding path already used.
+- Remaining for later 1.2 slices: long-article structural sub-splitting, tokenizer-backed embedding preflight, `context` reconstruction, structural-survival tests, hierarchy-sensitive eval cases, and a search-ranking decision on whether BM25 should index `contextualized_body` instead of raw `body`.
+
 ### 1.3 Search Pipeline Hardening
 
 Tasks:

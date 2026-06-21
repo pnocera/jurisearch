@@ -134,21 +134,23 @@ fn chunk_embedding_inputs_prefer_contextualized_body_and_honor_limit() -> Result
             'LEGIARTI000000000001', 'Code civil article 1', \
             'Article 1', 'Disposition generale.', \
             '2024-01-01', 'sha256:article-1', \
-            '{\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1\\nDisposition generale contextualisee.\"}]}'), \
+            '{\"chunks\":[{\"contextualized_body\":\"ignored document-level context\"}]}'), \
            ('legi:LEGIARTI000000000002@2024-01-01', 'legi', 'article', \
             'LEGIARTI000000000002', 'Code civil article 2', \
             'Article 2', 'Fallback body.', \
             '2024-01-01', 'sha256:article-2', \
             '{\"chunks\":[{}]}'); \
          INSERT INTO chunks \
-           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, \
+            source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('chunk:article-1:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
             'plain body should not be embedded first', \
+            'Code civil > Article 1\nDisposition generale contextualisee.', \
             'sha256:article-1', 'chunker:v0', NULL), \
            ('chunk:article-2:0', 'legi:LEGIARTI000000000002@2024-01-01', 0, \
-            'fallback body should be embedded', \
+            'fallback body should be embedded', NULL, \
             'sha256:article-2', 'chunker:v0', NULL);",
     )?;
 

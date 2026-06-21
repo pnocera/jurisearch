@@ -37,6 +37,7 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         assert!(migrations.contains("3:ingest_operational_accounting"));
         assert!(migrations.contains("4:legi_metadata_roots"));
         assert!(migrations.contains("5:documents_source_uid_index"));
+        assert!(migrations.contains("6:chunk_provenance_columns"));
         assert_eq!(
             postgres.execute_sql(
                 "SELECT count(*)::text \
@@ -45,6 +46,21 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
                    AND indexname = 'documents_source_uid_idx';",
             )?,
             "1"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT string_agg(column_name, ',' ORDER BY column_name) \
+                 FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = 'chunks' \
+                   AND column_name IN ( \
+                       'boundary', \
+                       'chunking', \
+                       'contextualized_body', \
+                       'hierarchy_path' \
+                   );",
+            )?,
+            "boundary,chunking,contextualized_body,hierarchy_path"
         );
 
         postgres.execute_sql(&format!(
@@ -99,7 +115,81 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
             "SELECT value->>'schema_version' FROM index_manifest WHERE key = 'schema';",
         )?;
         assert_eq!(manifest_version, CURRENT_SCHEMA_VERSION.to_string());
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT chunking || ':' || boundary || ':' || hierarchy_path::text \
+                 FROM chunks \
+                 WHERE chunk_id = 'chunk:1240:0';",
+            )?,
+            "structural:unknown:[]"
+        );
     }
+
+    Ok(())
+}
+
+#[test]
+fn chunk_provenance_backfill_sql_materializes_existing_canonical_json() -> Result<(), StorageError>
+{
+    let Some(pg_config) = discover_pg_config("chunk provenance migration backfill")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-chunk-provenance-migration.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    postgres.execute_sql(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, version_group, citation, title, body, \
+            valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+           ('legi:LEGIARTI000000000001@2024-01-01', 'legi', 'article', \
+            'LEGIARTI000000000001', 'LEGIARTI000000000001', 'Code civil article 1', \
+            'Article 1', 'Disposition generale.', '2024-01-01', \
+            'sha256:article-1', \
+            '{\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1\\nDisposition generale.\",\"chunking\":\"structural\",\"boundary\":\"article\",\"hierarchy_path\":[\"Code civil\",\"Titre preliminaire\"]}]}'); \
+         INSERT INTO chunks \
+           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+            chunk_builder_version, contextualized_body, chunking, boundary, hierarchy_path) \
+         VALUES \
+           ('chunk:article-1:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
+            'Disposition generale.', 'sha256:article-1', 'chunker:v0', \
+            NULL, 'structural', 'unknown', '[]'::jsonb);",
+    )?;
+
+    postgres.execute_sql(
+        "UPDATE chunks c \
+         SET contextualized_body = COALESCE( \
+                 NULLIF(d.canonical_json->'chunks'->c.chunk_index->>'contextualized_body', ''), \
+                 c.contextualized_body \
+             ), \
+             chunking = COALESCE( \
+                 NULLIF(d.canonical_json->'chunks'->c.chunk_index->>'chunking', ''), \
+                 c.chunking \
+             ), \
+             boundary = COALESCE( \
+                 NULLIF(d.canonical_json->'chunks'->c.chunk_index->>'boundary', ''), \
+                 c.boundary \
+             ), \
+             hierarchy_path = COALESCE( \
+                 d.canonical_json->'chunks'->c.chunk_index->'hierarchy_path', \
+                 c.hierarchy_path \
+             ) \
+         FROM documents d \
+         WHERE d.document_id = c.document_id \
+           AND jsonb_typeof(d.canonical_json->'chunks') = 'array';",
+    )?;
+
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT contextualized_body, chunking, boundary, hierarchy_path->>1 \
+             FROM chunks \
+             WHERE chunk_id = 'chunk:article-1:0';",
+        )?,
+        "Code civil > Article 1\nDisposition generale.|structural|article|Titre preliminaire"
+    );
 
     Ok(())
 }

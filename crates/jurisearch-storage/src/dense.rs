@@ -41,9 +41,8 @@ pub fn load_chunk_embedding_inputs(
         let limit = i64::from(limit);
         client
             .query(
-                "SELECT c.chunk_id, c.chunk_index, c.body, d.canonical_json::text \
+                "SELECT c.chunk_id, c.body, c.contextualized_body \
                  FROM chunks c \
-                 JOIN documents d ON d.document_id = c.document_id \
                  ORDER BY c.document_id, c.chunk_index, c.chunk_id \
                  LIMIT $1;",
                 &[&limit],
@@ -52,31 +51,30 @@ pub fn load_chunk_embedding_inputs(
     } else {
         client
             .query(
-                "SELECT c.chunk_id, c.chunk_index, c.body, d.canonical_json::text \
+                "SELECT c.chunk_id, c.body, c.contextualized_body \
                  FROM chunks c \
-                 JOIN documents d ON d.document_id = c.document_id \
                  ORDER BY c.document_id, c.chunk_index, c.chunk_id;",
                 &[],
             )
             .map_err(StorageError::PostgresClient)?
     };
 
-    rows.into_iter()
+    Ok(rows
+        .into_iter()
         .map(|row| {
             let chunk_id: String = row.get(0);
-            let chunk_index: i32 = row.get(1);
-            let body: String = row.get(2);
-            let canonical_json: String = row.get(3);
-            let embedding_text = contextualized_body(&canonical_json, chunk_index)?
+            let body: String = row.get(1);
+            let contextualized_body: Option<String> = row.get(2);
+            let embedding_text = contextualized_body
                 .filter(|text| !text.trim().is_empty())
                 .unwrap_or(body);
 
-            Ok(ChunkEmbeddingInput {
+            ChunkEmbeddingInput {
                 chunk_id,
                 embedding_text,
-            })
+            }
         })
-        .collect()
+        .collect())
 }
 
 pub fn finalize_dense_rebuild(
@@ -226,23 +224,6 @@ fn validate_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageError> 
         });
     }
     Ok(())
-}
-
-fn contextualized_body(
-    canonical_json: &str,
-    chunk_index: i32,
-) -> Result<Option<String>, StorageError> {
-    if chunk_index < 0 {
-        return Ok(None);
-    }
-    let canonical: serde_json::Value = serde_json::from_str(canonical_json)?;
-    Ok(canonical
-        .get("chunks")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|chunks| chunks.get(chunk_index as usize))
-        .and_then(|chunk| chunk.get("contextualized_body"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned))
 }
 
 #[cfg(test)]

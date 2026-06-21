@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 5;
+pub const CURRENT_SCHEMA_VERSION: i32 = 6;
 
 struct Migration {
     version: i32,
@@ -235,6 +235,44 @@ ON documents (source_uid);
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 5), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 6,
+        name: "chunk_provenance_columns",
+        sql: r#"
+ALTER TABLE chunks
+    ADD COLUMN IF NOT EXISTS contextualized_body text,
+    ADD COLUMN IF NOT EXISTS chunking text NOT NULL DEFAULT 'structural',
+    ADD COLUMN IF NOT EXISTS boundary text NOT NULL DEFAULT 'unknown',
+    ADD COLUMN IF NOT EXISTS hierarchy_path jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+UPDATE chunks c
+SET contextualized_body = COALESCE(
+        NULLIF(d.canonical_json->'chunks'->c.chunk_index->>'contextualized_body', ''),
+        c.contextualized_body
+    ),
+    chunking = COALESCE(
+        NULLIF(d.canonical_json->'chunks'->c.chunk_index->>'chunking', ''),
+        c.chunking
+    ),
+    boundary = COALESCE(
+        NULLIF(d.canonical_json->'chunks'->c.chunk_index->>'boundary', ''),
+        c.boundary
+    ),
+    hierarchy_path = COALESCE(
+        d.canonical_json->'chunks'->c.chunk_index->'hierarchy_path',
+        c.hierarchy_path
+    )
+FROM documents d
+WHERE d.document_id = c.document_id
+  AND jsonb_typeof(d.canonical_json->'chunks') = 'array';
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 6), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

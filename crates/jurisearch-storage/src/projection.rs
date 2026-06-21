@@ -91,18 +91,24 @@ pub fn insert_legi_documents(
     let chunk_statement = transaction
         .prepare(
             "INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, chunk_kind, source_fields, \
-                 source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, chunk_kind, \
+                 chunking, boundary, source_fields, source_payload_hash, \
+                 chunk_builder_version, hierarchy_path, embedding_fingerprint) \
              VALUES \
-                ($1, $2, $3, $4, $5, $6::text::jsonb, $7, $8, $9) \
+                ($1, $2, $3, $4, $5, $6, \
+                 $7, $8, $9::text::jsonb, $10, $11, $12::text::jsonb, $13) \
              ON CONFLICT (chunk_id) DO UPDATE SET \
                 document_id = EXCLUDED.document_id, \
                 chunk_index = EXCLUDED.chunk_index, \
                 body = EXCLUDED.body, \
+                contextualized_body = EXCLUDED.contextualized_body, \
                 chunk_kind = EXCLUDED.chunk_kind, \
+                chunking = EXCLUDED.chunking, \
+                boundary = EXCLUDED.boundary, \
                 source_fields = EXCLUDED.source_fields, \
                 source_payload_hash = EXCLUDED.source_payload_hash, \
                 chunk_builder_version = EXCLUDED.chunk_builder_version, \
+                hierarchy_path = EXCLUDED.hierarchy_path, \
                 embedding_fingerprint = EXCLUDED.embedding_fingerprint;",
         )
         .map_err(StorageError::PostgresClient)?;
@@ -156,6 +162,7 @@ pub fn insert_legi_documents(
 
         for chunk in &document.chunks {
             let source_fields = serde_json::to_string(&chunk.source_fields)?;
+            let hierarchy_path = serde_json::to_string(&chunk.hierarchy_path)?;
             let chunk_index =
                 i32::try_from(chunk.chunk_index).map_err(|_| StorageError::Projection {
                     message: format!(
@@ -171,10 +178,14 @@ pub fn insert_legi_documents(
                         &chunk.document_id,
                         &chunk_index,
                         &chunk.body,
+                        &chunk.contextualized_body,
                         &chunk.chunk_kind,
+                        &chunk.chunking,
+                        &chunk.boundary,
                         &source_fields,
                         &chunk.source_payload_hash,
                         &chunk.chunk_builder_version,
+                        &hierarchy_path,
                         &chunk_embedding_fingerprint,
                     ],
                 )
@@ -428,6 +439,19 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
              WHERE document_id = $1;",
         )
         .map_err(StorageError::PostgresClient)?;
+    let update_chunks = transaction
+        .prepare(
+            "UPDATE chunks c \
+             SET contextualized_body = chunk_payload.chunk->>'contextualized_body', \
+                 chunking = COALESCE(NULLIF(chunk_payload.chunk->>'chunking', ''), c.chunking), \
+                 boundary = COALESCE(NULLIF(chunk_payload.chunk->>'boundary', ''), c.boundary), \
+                 hierarchy_path = COALESCE(chunk_payload.chunk->'hierarchy_path', c.hierarchy_path) \
+             FROM jsonb_array_elements(coalesce($2::text::jsonb->'chunks', '[]'::jsonb)) \
+                  WITH ORDINALITY AS chunk_payload(chunk, ordinality) \
+             WHERE c.document_id = $1 \
+               AND c.chunk_index = (chunk_payload.ordinality - 1)::integer;",
+        )
+        .map_err(StorageError::PostgresClient)?;
     let clear_chunk_fingerprints = transaction
         .prepare(
             "UPDATE chunks \
@@ -460,6 +484,9 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
             .map_err(StorageError::PostgresClient)?;
         transaction
             .execute(&update_document, &[document_id, canonical_json])
+            .map_err(StorageError::PostgresClient)?;
+        transaction
+            .execute(&update_chunks, &[document_id, canonical_json])
             .map_err(StorageError::PostgresClient)?;
     }
 
