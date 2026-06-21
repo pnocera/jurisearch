@@ -1,12 +1,18 @@
 use std::{
-    fs, io,
+    fs::{self, File, OpenOptions},
+    io,
     net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
 };
 
+use fs2::FileExt;
 use tempfile::TempDir;
 use thiserror::Error;
+
+const APP_DATABASE: &str = "jurisearch";
+const BOOTSTRAP_DATABASE: &str = "postgres";
+const SUPERUSER: &str = "postgres";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgConfig {
@@ -71,14 +77,16 @@ impl PgConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct ManagedPostgres {
-    _tmp: TempDir,
+    _tmp: Option<TempDir>,
+    _startup_lock: Option<StartupLock>,
+    _advisory_lock: Option<DataDirLock>,
     pub pg_config: PgConfig,
     pub data_dir: PathBuf,
     pub socket_dir: PathBuf,
     pub log_path: PathBuf,
     pub port: u16,
+    pub database: String,
 }
 
 impl ManagedPostgres {
@@ -134,42 +142,87 @@ impl ManagedPostgres {
         }
 
         Ok(Self {
-            _tmp: tmp,
+            _tmp: Some(tmp),
+            _startup_lock: None,
+            _advisory_lock: None,
             pg_config,
             data_dir,
             socket_dir,
             log_path,
             port,
+            database: BOOTSTRAP_DATABASE.to_owned(),
         })
     }
 
-    pub fn execute_sql(&self, sql: &str) -> Result<String, StorageError> {
-        let port = self.port.to_string();
-        let output = Command::new(self.pg_config.bindir.join("psql"))
-            .args([
-                "-h",
-                "127.0.0.1",
-                "-p",
-                &port,
-                "-U",
-                "postgres",
-                "-d",
-                "postgres",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-qAt",
-                "-c",
-                sql,
-            ])
-            .output()
-            .map_err(StorageError::Io)?;
-        if !output.status.success() {
-            return Err(StorageError::Psql {
-                status: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
+    pub fn start_durable(
+        pg_config: PgConfig,
+        index_dir: impl Into<PathBuf>,
+    ) -> Result<Self, StorageError> {
+        pg_config.require_extension_assets("pg_search")?;
+        pg_config.require_extension_assets("vector")?;
+
+        let index_dir = index_dir.into();
+        fs::create_dir_all(&index_dir).map_err(StorageError::Io)?;
+        let startup_lock = StartupLock::acquire(index_dir.join("jurisearch-storage.lock"))?;
+
+        let pg_root = index_dir.join("pg");
+        let data_dir = pg_root.join("data");
+        let socket_dir = pg_root.join("sock");
+        let log_path = pg_root.join("postgres.log");
+        fs::create_dir_all(&socket_dir).map_err(StorageError::Io)?;
+        fs::create_dir_all(&data_dir).map_err(StorageError::Io)?;
+        ensure_private_data_dir(&data_dir)?;
+
+        if !data_dir.join("PG_VERSION").is_file() {
+            run_checked(
+                pg_config.bindir.join("initdb"),
+                vec![
+                    "-D".into(),
+                    data_dir.to_string_lossy().into_owned(),
+                    "--auth=trust".into(),
+                    "--username=postgres".into(),
+                ],
+            )?;
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+
+        let port = free_loopback_port()?;
+        write_runtime_conf(&data_dir, &socket_dir, port)?;
+        reclaim_data_dir(&pg_config.bindir, &data_dir);
+        start_pg_ctl(&pg_config, &data_dir, &log_path)?;
+        ensure_database(&pg_config, port, APP_DATABASE)?;
+
+        let mut postgres = Self {
+            _tmp: None,
+            _startup_lock: Some(startup_lock),
+            _advisory_lock: None,
+            pg_config,
+            data_dir,
+            socket_dir,
+            log_path,
+            port,
+            database: APP_DATABASE.to_owned(),
+        };
+        postgres.execute_sql(
+            "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search;",
+        )?;
+        let lock_path = postgres
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| postgres.data_dir.clone());
+        postgres._advisory_lock = Some(DataDirLock::acquire(
+            &postgres.connection_string(),
+            &lock_path,
+        )?);
+        Ok(postgres)
+    }
+
+    #[must_use]
+    pub fn connection_string(&self) -> String {
+        connection_string(self.port, &self.database)
+    }
+
+    pub fn execute_sql(&self, sql: &str) -> Result<String, StorageError> {
+        psql(&self.pg_config, self.port, &self.database, sql)
     }
 
     pub fn stop(&self) -> Result<(), StorageError> {
@@ -189,6 +242,71 @@ impl ManagedPostgres {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             })
         }
+    }
+}
+
+struct StartupLock {
+    file: File,
+}
+
+impl StartupLock {
+    fn acquire(path: PathBuf) -> Result<Self, StorageError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(StorageError::Io)?;
+        }
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(StorageError::Io)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Self { file }),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(StorageError::StorageLockBusy { path })
+            }
+            Err(error) => Err(StorageError::Io(error)),
+        }
+    }
+}
+
+impl Drop for StartupLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+struct DataDirLock {
+    client: postgres::Client,
+    key: i64,
+}
+
+impl DataDirLock {
+    fn acquire(connection_string: &str, data_dir: &Path) -> Result<Self, StorageError> {
+        let mut client = postgres::Client::connect(connection_string, postgres::NoTls)
+            .map_err(StorageError::PostgresClient)?;
+        let key = data_dir_lock_key(&data_dir.to_string_lossy());
+        let locked: bool = client
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&key])
+            .map_err(StorageError::PostgresClient)?
+            .get(0);
+        if locked {
+            Ok(Self { client, key })
+        } else {
+            Err(StorageError::AdvisoryLockBusy {
+                data_dir: data_dir.to_path_buf(),
+                key,
+            })
+        }
+    }
+}
+
+impl Drop for DataDirLock {
+    fn drop(&mut self) {
+        let _ = self
+            .client
+            .execute("SELECT pg_advisory_unlock($1)", &[&self.key]);
     }
 }
 
@@ -214,6 +332,114 @@ fn command_stdout<const N: usize>(
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn psql(
+    pg_config: &PgConfig,
+    port: u16,
+    database: &str,
+    sql: &str,
+) -> Result<String, StorageError> {
+    let port = port.to_string();
+    let output = Command::new(pg_config.bindir.join("psql"))
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port,
+            "-U",
+            SUPERUSER,
+            "-d",
+            database,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-qAt",
+            "-c",
+            sql,
+        ])
+        .output()
+        .map_err(StorageError::Io)?;
+    if !output.status.success() {
+        return Err(StorageError::Psql {
+            status: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn start_pg_ctl(
+    pg_config: &PgConfig,
+    data_dir: &Path,
+    log_path: &Path,
+) -> Result<(), StorageError> {
+    let start = Command::new(pg_config.bindir.join("pg_ctl"))
+        .arg("-D")
+        .arg(data_dir)
+        .arg("-l")
+        .arg(log_path)
+        .arg("start")
+        .arg("-w")
+        .output()
+        .map_err(StorageError::Io)?;
+    if start.status.success() {
+        Ok(())
+    } else {
+        Err(StorageError::PostgresStart {
+            status: start.status.code(),
+            stderr: String::from_utf8_lossy(&start.stderr).trim().to_owned(),
+            log: read_log(log_path),
+        })
+    }
+}
+
+fn ensure_database(pg_config: &PgConfig, port: u16, database: &str) -> Result<(), StorageError> {
+    let exists = psql(
+        pg_config,
+        port,
+        BOOTSTRAP_DATABASE,
+        &format!(
+            "SELECT 1 FROM pg_database WHERE datname = {};",
+            sql_string_literal(database)
+        ),
+    )?;
+    if exists.trim() == "1" {
+        return Ok(());
+    }
+    psql(
+        pg_config,
+        port,
+        BOOTSTRAP_DATABASE,
+        &format!("CREATE DATABASE {};", sql_identifier(database)),
+    )?;
+    Ok(())
+}
+
+fn write_runtime_conf(data_dir: &Path, socket_dir: &Path, port: u16) -> Result<(), StorageError> {
+    let postgresql_conf_path = data_dir.join("postgresql.conf");
+    let include_line = "include_if_exists = 'jurisearch.conf'";
+    let mut postgresql_conf =
+        fs::read_to_string(&postgresql_conf_path).map_err(StorageError::Io)?;
+    if !postgresql_conf
+        .lines()
+        .any(|line| line.trim() == include_line)
+    {
+        if !postgresql_conf.ends_with('\n') {
+            postgresql_conf.push('\n');
+        }
+        postgresql_conf.push_str(include_line);
+        postgresql_conf.push('\n');
+        fs::write(&postgresql_conf_path, postgresql_conf).map_err(StorageError::Io)?;
+    }
+
+    fs::write(
+        data_dir.join("jurisearch.conf"),
+        format!(
+            "shared_preload_libraries = 'pg_search'\nlisten_addresses = '127.0.0.1'\nport = {port}\nunix_socket_directories = {}\n",
+            sql_string_literal(&socket_dir.to_string_lossy())
+        ),
+    )
+    .map_err(StorageError::Io)
 }
 
 fn discover_pgrx_pg_config() -> Result<PathBuf, StorageError> {
@@ -272,6 +498,76 @@ fn run_checked(command: PathBuf, args: Vec<String>) -> Result<(), StorageError> 
     }
 }
 
+fn reclaim_data_dir(bindir: &Path, data_dir: &Path) {
+    let pidfile = data_dir.join("postmaster.pid");
+    if !pidfile.exists() {
+        return;
+    }
+    let _ = Command::new(bindir.join("pg_ctl"))
+        .arg("-D")
+        .arg(data_dir)
+        .args(["stop", "-m", "fast", "-t", "20"])
+        .output();
+    if pidfile.exists() && !postmaster_alive(&pidfile) {
+        let _ = fs::remove_file(pidfile);
+    }
+}
+
+fn postmaster_alive(pidfile: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(pidfile) else {
+        return false;
+    };
+    let Some(pid) = contents
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    {
+        match fs::read(Path::new("/proc").join(pid.to_string()).join("cmdline")) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).contains("postgres"),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+fn ensure_private_data_dir(path: &Path) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(StorageError::Io)?;
+    }
+    Ok(())
+}
+
+fn data_dir_lock_key(path: &str) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash as i64
+}
+
+fn connection_string(port: u16, database: &str) -> String {
+    format!("host=127.0.0.1 port={port} user={SUPERUSER} dbname={database} connect_timeout=5")
+}
+
+fn sql_identifier(identifier: &str) -> String {
+    format!("\"{}\"", identifier.replace('"', "\"\""))
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 fn free_loopback_port() -> Result<u16, StorageError> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(StorageError::Io)?;
     let port = listener.local_addr().map_err(StorageError::Io)?.port();
@@ -289,6 +585,10 @@ pub enum StorageError {
     MissingHome,
     #[error("pg_config does not exist: {path}")]
     MissingPgConfig { path: PathBuf },
+    #[error("another jurisearch process is using this storage root: {path}")]
+    StorageLockBusy { path: PathBuf },
+    #[error("another session owns the Postgres data-dir advisory lock for {data_dir} ({key})")]
+    AdvisoryLockBusy { data_dir: PathBuf, key: i64 },
     #[error(
         "missing extension assets for `{extension}` in pkglibdir={pkglibdir} extension_dir={extension_dir}"
     )]
@@ -313,17 +613,38 @@ pub enum StorageError {
     PostgresStop { status: Option<i32>, stderr: String },
     #[error("psql failed with status {status:?}: {stderr}")]
     Psql { status: Option<i32>, stderr: String },
+    #[error("postgres client error: {0}")]
+    PostgresClient(postgres::Error),
     #[error(transparent)]
     Io(io::Error),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::version_key;
+    use super::{data_dir_lock_key, sql_identifier, sql_string_literal, version_key};
 
     #[test]
     fn pgrx_version_key_keeps_numeric_minor_order() {
         assert!(version_key("18.10") > version_key("18.4"));
         assert!(version_key("19") > version_key("18.10"));
+    }
+
+    #[test]
+    fn data_dir_lock_key_is_stable() {
+        assert_eq!(
+            data_dir_lock_key("/tmp/jurisearch/index/pg/data"),
+            data_dir_lock_key("/tmp/jurisearch/index/pg/data")
+        );
+        assert_ne!(
+            data_dir_lock_key("/tmp/jurisearch/index/pg/data"),
+            data_dir_lock_key("/tmp/jurisearch/other/pg/data")
+        );
+    }
+
+    #[test]
+    fn sql_quoting_escapes_identifiers_and_literals() {
+        assert_eq!(sql_identifier("jurisearch"), "\"jurisearch\"");
+        assert_eq!(sql_identifier("bad\"name"), "\"bad\"\"name\"");
+        assert_eq!(sql_string_literal("sock's"), "'sock''s'");
     }
 }

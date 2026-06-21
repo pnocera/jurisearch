@@ -272,7 +272,8 @@ Tasks:
 Current status (2026-06-21):
 
 - Done: the disposable extension smoke is codified in `jurisearch-storage`. It starts a pgrx-managed local PostgreSQL, preloads `pg_search`, creates `vector` and `pg_search`, and verifies a pgvector nearest-neighbor query.
-- Remaining before 0.3 is complete: durable embedded lifecycle using the `gciauto2` pattern, bundled/downloaded binary policy and offline-install story, single-writer lock, crash recovery/orphan reclaim, schema and extension migrations, platform policy, and the target spike-corpus latency check.
+- Done: the first durable lifecycle slice is codified in `jurisearch-storage`: persistent index-root PGDATA, process-lifetime storage lock before touching PGDATA, conservative orphan reclaim under that lock, app database bootstrap, extension bootstrap, session advisory lock, clean stop, and restart/concurrent-owner smoke coverage.
+- Remaining before 0.3 is complete: bundled/downloaded embedded-binary policy and offline-install story, schema and extension migrations, platform policy, and the target spike-corpus latency check.
 
 Acceptance:
 

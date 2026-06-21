@@ -270,7 +270,7 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 
 - [ ] Pin Rust toolchain (`rust-toolchain.toml`); install C toolchain, `pkg-config`, `psql`.
 - [ ] Decide embedded-Postgres binary source; obtain Postgres + `pgvector` + `pg_search` builds that match; prove `CREATE EXTENSION vector` and `pg_search` in a throwaway data dir.
-  - 2026-06-21 proof: `work/03-implementation/00-setup/smoke-pg-extensions.sh` and `crates/jurisearch-storage/tests/extension_smoke.rs` prove the throwaway-data-dir extension path against the current pgrx-managed PG 18 prefix. Remaining for this checkbox: the actual embedded binary source, offline-install story, and durable lifecycle policy.
+  - 2026-06-21 proof: `work/03-implementation/00-setup/smoke-pg-extensions.sh` and `crates/jurisearch-storage/tests/extension_smoke.rs` prove the throwaway-data-dir extension path against the current pgrx-managed PG 18 prefix. `crates/jurisearch-storage/tests/durable_lifecycle.rs` now proves persistent PGDATA restart, concurrent-owner rejection, extension bootstrap, and vector query behavior. Remaining for this checkbox: the actual embedded binary source, offline-install story, and platform policy.
 - [ ] Stand up a `bge-m3` OpenAI-compatible endpoint (local `llama.cpp` or hosted) and confirm a 1024-dim vector with mean pooling.
 - [ ] Download a representative LEGI XML subset + the matching official DTDs.
 - [ ] Fetch ≥1 baseline + ≥1 delta LEGI archive for ordering tests.
