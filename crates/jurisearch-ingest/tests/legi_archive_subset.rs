@@ -1,15 +1,18 @@
+//! Ignored smoke over a local official LEGI archive.
+//!
+//! Run with `JURISEARCH_LEGI_ARCHIVE=/path/to/Freemium_legi_global_*.tar.gz cargo test -p jurisearch-ingest --test legi_archive_subset -- --ignored --nocapture`.
+//! When the env var is absent, the test tries Pierre's local juridocs baseline and skips if it is not present.
+
 use std::{
     collections::BTreeSet,
     env,
-    fmt::Write as _,
     path::{Path, PathBuf},
 };
 
 use jurisearch_ingest::{
     archive::{ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT, for_each_xml_member_until},
-    legi::{ParsedLegiXml, parse_legi_member},
+    legi::{ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
-use sha2::{Digest, Sha256};
 
 const DEFAULT_LEGI_ARCHIVE: &str =
     "/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz";
@@ -52,7 +55,10 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
                         document.source_member_path.as_deref(),
                         Some(member_path.as_str())
                     );
-                    assert_eq!(document.source_payload_hash, sha256_hex(&member.bytes));
+                    assert_eq!(
+                        document.source_payload_hash,
+                        source_payload_hash(&member.bytes)
+                    );
                     document.validate().unwrap_or_else(|error| {
                         panic!("{member_path} produced an invalid canonical document: {error}")
                     });
@@ -87,6 +93,9 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
         parse_errors.join("\n")
     );
     assert_eq!(parsed_articles, ARTICLE_SAMPLE_TARGET);
+    // The default baseline currently starts with text-version XML before articles. This keeps
+    // unsupported-root classification visible in the smoke, but the test remains ignored because
+    // tar member ordering is source-archive-specific.
     assert!(
         unsupported_roots.contains("TEXTELR"),
         "expected the sample to classify at least one TEXTELR root before articles; visited {visited_xml} XML members, unsupported roots: {unsupported_roots:?}"
@@ -105,14 +114,4 @@ fn archive_path() -> PathBuf {
 
 fn archive_file_name(path: &Path) -> Option<&str> {
     path.file_name().and_then(|name| name.to_str())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
-    encoded.push_str("sha256:");
-    for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
-    }
-    encoded
 }

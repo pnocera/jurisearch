@@ -23,12 +23,19 @@ impl SourceProvenance {
             .archive_path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .or_else(|| Some(member.archive_path.display().to_string()));
+            .or_else(|| {
+                let displayed = member.archive_path.display().to_string();
+                if displayed.is_empty() {
+                    None
+                } else {
+                    Some(displayed)
+                }
+            });
 
         Self {
             archive_name,
             member_path: Some(member.member_path.clone()),
-            payload_hash: Some(sha256_hex(&member.bytes)),
+            payload_hash: Some(source_payload_hash(&member.bytes)),
         }
     }
 }
@@ -316,7 +323,7 @@ impl RawArticle {
         let body = required_non_empty("article", "BLOC_TEXTUEL/CONTENU", self.body)?;
         let source_payload_hash = provenance
             .payload_hash
-            .unwrap_or_else(|| sha256_hex(xml.as_bytes()));
+            .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
         let title = format!("Article {num}");
         let citation_prefix = self
             .hierarchy_path
@@ -540,7 +547,7 @@ fn local_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub fn source_payload_hash(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
     encoded.push_str("sha256:");
@@ -558,7 +565,7 @@ mod tests {
 
     use super::{
         CanonicalDocument, LegiParseError, ParsedLegiXml, SourceProvenance, parse_legi_member,
-        parse_legi_xml, sha256_hex,
+        parse_legi_xml, source_payload_hash,
     };
 
     #[test]
@@ -635,7 +642,31 @@ mod tests {
             document.source_member_path.as_deref(),
             Some("legi/articles/LEGIARTI000006419320.xml")
         );
-        assert_eq!(document.source_payload_hash, sha256_hex(&member.bytes));
+        assert_eq!(
+            document.source_payload_hash,
+            source_payload_hash(&member.bytes)
+        );
+    }
+
+    #[test]
+    fn provenance_from_member_handles_missing_archive_file_name() {
+        let member = ArchiveMember {
+            archive_path: PathBuf::new(),
+            member_path: "legi/articles/LEGIARTI000006419320.xml".to_owned(),
+            bytes: article_fixture().into_bytes(),
+        };
+
+        let provenance = SourceProvenance::from_archive_member(&member);
+
+        assert_eq!(provenance.archive_name, None);
+        assert_eq!(
+            provenance.member_path.as_deref(),
+            Some("legi/articles/LEGIARTI000006419320.xml")
+        );
+        assert_eq!(
+            provenance.payload_hash.as_deref(),
+            Some(source_payload_hash(&member.bytes).as_str())
+        );
     }
 
     #[test]
@@ -647,6 +678,20 @@ mod tests {
         assert_eq!(document.source_status, None);
         assert!(document.canonical_version.contains("etat=absent"));
         assert!(document.validate().is_ok());
+    }
+
+    #[test]
+    fn accepts_empty_status_elements_as_absent() {
+        for xml in [
+            article_fixture().replace("<ETAT>VIGUEUR</ETAT>", "<ETAT></ETAT>"),
+            article_fixture().replace("<ETAT>VIGUEUR</ETAT>", "<ETAT/>"),
+        ] {
+            let document = parse_article_fixture(&xml).unwrap();
+
+            assert_eq!(document.source_status, None);
+            assert!(document.canonical_version.contains("etat=absent"));
+            assert!(document.validate().is_ok());
+        }
     }
 
     #[test]
