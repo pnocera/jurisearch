@@ -700,6 +700,7 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["visited_members"], 4);
     assert_eq!(json["inserted_documents"], 1);
     assert_eq!(json["parsed_metadata_members"], 2);
+    assert_eq!(json["persisted_metadata_members"], 2);
     assert_eq!(json["skipped_members"], 2);
     assert_eq!(json["failed_members"], 1);
     assert_eq!(json["quarantined_payloads"], 1);
@@ -736,6 +737,21 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
              WHERE member_path = 'legi/textes/LEGITEXT000049371154.xml';",
         )?,
         "LEGITEXT000049371154"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT string_agg(root_kind || ':' || source_uid, ',' ORDER BY root_kind, source_uid) \
+             FROM legi_metadata_roots;",
+        )?,
+        "SECTION_TA:LEGISCTA000006089696,TEXTE_VERSION:LEGITEXT000049371154"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT coalesce(canonical_json->>'nature', 'absent') \
+             FROM legi_metadata_roots \
+             WHERE root_kind = 'TEXTE_VERSION';",
+        )?,
+        "absent"
     );
     assert_eq!(
         postgres.execute_sql(

@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 3;
+pub const CURRENT_SCHEMA_VERSION: i32 = 4;
 
 struct Migration {
     version: i32,
@@ -180,6 +180,47 @@ ON ingest_error (run_id, error_class, error_code);
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 3), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 4,
+        name: "legi_metadata_roots",
+        sql: r#"
+CREATE TABLE IF NOT EXISTS legi_metadata_roots (
+    metadata_key text PRIMARY KEY,
+    root_kind text NOT NULL CHECK (root_kind IN ('TEXTE_VERSION', 'SECTION_TA', 'TEXTELR')),
+    source_uid text,
+    parent_source_uid text,
+    title text,
+    valid_from date,
+    valid_to date,
+    valid_to_raw text,
+    source_payload_hash text NOT NULL,
+    source_archive text,
+    source_member_path text,
+    canonical_version text NOT NULL,
+    canonical_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS legi_metadata_roots_kind_source_idx
+ON legi_metadata_roots (root_kind, source_uid);
+
+CREATE INDEX IF NOT EXISTS legi_metadata_roots_parent_idx
+ON legi_metadata_roots (parent_source_uid);
+
+CREATE INDEX IF NOT EXISTS legi_metadata_roots_validity_idx
+ON legi_metadata_roots (valid_from, valid_to);
+
+CREATE INDEX IF NOT EXISTS legi_metadata_roots_payload_idx
+ON legi_metadata_roots (source_payload_hash);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 4), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

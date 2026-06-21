@@ -36,7 +36,10 @@ use jurisearch_storage::{
         load_ingest_health, load_ingest_projection_coverage, record_ingest_error,
         record_ingest_member, start_ingest_run, update_ingest_member_status,
     },
-    projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_legi_documents},
+    projection::{
+        ChunkEmbeddingInsert, LegiMetadataRoot, insert_chunk_embeddings, insert_legi_documents,
+        insert_legi_metadata_roots,
+    },
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
     },
@@ -46,7 +49,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v2";
-const CANONICAL_SCHEMA_VERSION: &str = "canonical_document:v1";
+const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v2";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Parser)]
@@ -614,6 +617,7 @@ struct LegiArchiveIngestCounters {
     inserted_chunks: usize,
     inserted_publisher_edges: usize,
     parsed_metadata_members: usize,
+    persisted_metadata_members: usize,
     skipped_members: usize,
     skipped_compatible_members: usize,
     failed_members: usize,
@@ -734,6 +738,7 @@ fn ingest_legi_archives_payload(
         "inserted_chunks": counters.inserted_chunks,
         "inserted_publisher_edges": counters.inserted_publisher_edges,
         "parsed_metadata_members": counters.parsed_metadata_members,
+        "persisted_metadata_members": counters.persisted_metadata_members,
         "skipped_members": counters.skipped_members,
         "skipped_compatible_members": counters.skipped_compatible_members,
         "failed_members": counters.failed_members,
@@ -851,6 +856,23 @@ fn process_legi_archive_member(
             | ParsedLegiXml::TextStruct(_)),
         ) => {
             let root = parsed.root_name().to_owned();
+            let report = match &parsed {
+                ParsedLegiXml::TextVersion(text) => insert_legi_metadata_roots(
+                    postgres,
+                    &[LegiMetadataRoot::TextVersion(text.as_ref())],
+                )?,
+                ParsedLegiXml::SectionTa(section) => insert_legi_metadata_roots(
+                    postgres,
+                    &[LegiMetadataRoot::SectionTa(section.as_ref())],
+                )?,
+                ParsedLegiXml::TextStruct(text_struct) => insert_legi_metadata_roots(
+                    postgres,
+                    &[LegiMetadataRoot::TextStruct(text_struct.as_ref())],
+                )?,
+                ParsedLegiXml::Article(_) | ParsedLegiXml::UnsupportedRoot { .. } => {
+                    unreachable!("metadata branch only handles metadata roots")
+                }
+            };
             *counters
                 .parsed_metadata_roots
                 .entry(root.clone())
@@ -868,6 +890,7 @@ fn process_legi_archive_member(
                 },
             )?;
             counters.parsed_metadata_members += 1;
+            counters.persisted_metadata_members += report.metadata_roots;
             counters.skipped_members += 1;
         }
         Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
