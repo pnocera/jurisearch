@@ -57,6 +57,9 @@ fn status_returns_json_without_index() {
     assert_eq!(json["embedding"]["model"], "bge-m3");
     assert_eq!(json["embedding"]["dimension"], 1024);
     assert_eq!(json["embedding"]["pooling"], "cls");
+    assert_eq!(json["embedding"]["max_input_chars"], 24_000);
+    assert_eq!(json["embedding"]["max_estimated_tokens"], 8_192);
+    assert_eq!(json["embedding"]["estimated_chars_per_token"], 4);
     assert_eq!(json["embedding"]["provisional"], true);
     assert_eq!(json["embedding"]["reembeddable"], true);
 }

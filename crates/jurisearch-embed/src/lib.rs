@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -8,6 +8,9 @@ use url::Host;
 pub const PHASE0_EMBEDDING_MODEL: &str = "bge-m3";
 pub const PHASE0_EMBEDDING_DIMENSION: usize = 1024;
 pub const PHASE0_EMBEDDING_POOLING: &str = "cls";
+pub const PHASE0_EMBEDDING_MAX_INPUT_CHARS: usize = 24_000;
+pub const PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS: usize = 8_192;
+pub const PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const NORMALIZED_L2_TOLERANCE: f32 = 0.01;
@@ -54,6 +57,9 @@ pub struct EmbeddingConfig {
     pub dimension: usize,
     pub normalize: bool,
     pub pooling: String,
+    pub max_input_chars: Option<usize>,
+    pub max_estimated_tokens: Option<usize>,
+    pub estimated_chars_per_token: usize,
     pub provisional: bool,
     pub reembeddable: bool,
 }
@@ -75,6 +81,9 @@ impl EmbeddingConfig {
             dimension,
             normalize,
             pooling: pooling.into(),
+            max_input_chars: Some(PHASE0_EMBEDDING_MAX_INPUT_CHARS),
+            max_estimated_tokens: Some(PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS),
+            estimated_chars_per_token: PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN,
             provisional: false,
             reembeddable: true,
         }
@@ -89,6 +98,9 @@ impl EmbeddingConfig {
             dimension: PHASE0_EMBEDDING_DIMENSION,
             normalize: true,
             pooling: PHASE0_EMBEDDING_POOLING.to_owned(),
+            max_input_chars: Some(PHASE0_EMBEDDING_MAX_INPUT_CHARS),
+            max_estimated_tokens: Some(PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS),
+            estimated_chars_per_token: PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN,
             provisional: true,
             reembeddable: true,
         }
@@ -103,6 +115,9 @@ impl EmbeddingConfig {
             dimension,
             normalize: true,
             pooling: PHASE0_EMBEDDING_POOLING.to_owned(),
+            max_input_chars: Some(PHASE0_EMBEDDING_MAX_INPUT_CHARS),
+            max_estimated_tokens: Some(PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS),
+            estimated_chars_per_token: PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN,
             provisional: true,
             reembeddable: true,
         }
@@ -166,6 +181,29 @@ impl EmbeddingConfig {
             model: self.model.clone(),
         })
     }
+
+    pub fn preflight_input(&self, input: &str) -> Result<EmbeddingInputStats, EmbeddingError> {
+        let chars = input.chars().count();
+        let chars_per_token = self.estimated_chars_per_token.max(1);
+        let estimated_tokens = chars.div_ceil(chars_per_token);
+        let stats = EmbeddingInputStats {
+            chars,
+            estimated_tokens,
+            chars_per_token,
+            max_chars: self.max_input_chars,
+            max_estimated_tokens: self.max_estimated_tokens,
+        };
+        if self
+            .max_input_chars
+            .is_some_and(|max_chars| chars > max_chars)
+            || self
+                .max_estimated_tokens
+                .is_some_and(|max_tokens| estimated_tokens > max_tokens)
+        {
+            return Err(EmbeddingError::InputTooLong(stats));
+        }
+        Ok(stats)
+    }
 }
 
 impl EmbeddingFingerprint {
@@ -192,6 +230,32 @@ impl EmbeddingVector {
             .map(|value| value * value)
             .sum::<f32>()
             .sqrt()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingInputStats {
+    pub chars: usize,
+    pub estimated_tokens: usize,
+    pub chars_per_token: usize,
+    pub max_chars: Option<usize>,
+    pub max_estimated_tokens: Option<usize>,
+}
+
+impl fmt::Display for EmbeddingInputStats {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} chars, estimated {} tokens using {} chars/token",
+            self.chars, self.estimated_tokens, self.chars_per_token
+        )?;
+        if let Some(max_chars) = self.max_chars {
+            write!(formatter, ", max chars {max_chars}")?;
+        }
+        if let Some(max_tokens) = self.max_estimated_tokens {
+            write!(formatter, ", max estimated tokens {max_tokens}")?;
+        }
+        Ok(())
     }
 }
 
@@ -230,6 +294,7 @@ impl OpenAiCompatibleClient {
         expected: &EmbeddingFingerprint,
     ) -> Result<EmbeddingVector, EmbeddingError> {
         self.config.ensure_matches_index(expected)?;
+        self.config.preflight_input(input)?;
         let url = format!(
             "{}/embeddings",
             self.config
@@ -342,6 +407,10 @@ pub enum EmbeddingError {
     #[error("embedding endpoint returned no embeddings")]
     EmptyResponse,
     #[error(
+        "embedding input is too long: {0}; split the document chunk or adjust JURISEARCH_EMBED_MAX_INPUT_CHARS/JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS for this endpoint"
+    )]
+    InputTooLong(EmbeddingInputStats),
+    #[error(
         "embedding endpoint returned {actual} dimensions for model `{model}`, expected {expected}; use an endpoint/model matching the index fingerprint or rebuild/re-embed the index"
     )]
     DimensionMismatch {
@@ -446,6 +515,56 @@ mod tests {
             error,
             EmbeddingError::NormalizationMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn oversized_input_is_rejected_before_endpoint_call() {
+        let mut config = EmbeddingConfig::openai_compatible(
+            "http://127.0.0.1:9/v1",
+            None,
+            "bge-m3",
+            3,
+            true,
+            "cls",
+        );
+        config.max_input_chars = Some(4);
+        config.max_estimated_tokens = None;
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let error = client.embed_query("abcde", &expected).unwrap_err();
+        match &error {
+            EmbeddingError::InputTooLong(stats) => {
+                assert_eq!(stats.chars, 5);
+                assert_eq!(stats.max_chars, Some(4));
+            }
+            other => panic!("expected input-too-long error, got {other:?}"),
+        }
+        assert!(error.to_string().contains("5 chars"));
+    }
+
+    #[test]
+    fn estimated_token_budget_is_enforced() {
+        let mut config = EmbeddingConfig::openai_compatible(
+            "http://127.0.0.1:9/v1",
+            None,
+            "bge-m3",
+            3,
+            true,
+            "cls",
+        );
+        config.max_input_chars = None;
+        config.max_estimated_tokens = Some(2);
+        config.estimated_chars_per_token = 2;
+
+        let error = config.preflight_input("abcde").unwrap_err();
+        match error {
+            EmbeddingError::InputTooLong(stats) => {
+                assert_eq!(stats.estimated_tokens, 3);
+                assert_eq!(stats.max_estimated_tokens, Some(2));
+            }
+            other => panic!("expected input-too-long error, got {other:?}"),
+        }
     }
 
     #[test]

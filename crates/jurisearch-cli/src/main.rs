@@ -611,6 +611,9 @@ fn embed_chunks_payload(
             "dimension": embedding_config.dimension,
             "normalize": embedding_config.normalize,
             "pooling": embedding_config.pooling,
+            "max_input_chars": embedding_config.max_input_chars,
+            "max_estimated_tokens": embedding_config.max_estimated_tokens,
+            "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
             "fingerprint": embedding_fingerprint,
             "provisional": embedding_config.provisional,
             "reembeddable": embedding_config.reembeddable
@@ -666,6 +669,20 @@ fn embedding_config_from_env() -> EmbeddingConfig {
     }
     if let Ok(pooling) = std::env::var("JURISEARCH_EMBED_POOLING") {
         embedding_config.pooling = pooling;
+    }
+    if let Ok(max_chars) = std::env::var("JURISEARCH_EMBED_MAX_INPUT_CHARS") {
+        embedding_config.max_input_chars =
+            parse_optional_usize(&max_chars).unwrap_or(embedding_config.max_input_chars);
+    }
+    if let Ok(max_tokens) = std::env::var("JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS") {
+        embedding_config.max_estimated_tokens =
+            parse_optional_usize(&max_tokens).unwrap_or(embedding_config.max_estimated_tokens);
+    }
+    if let Ok(chars_per_token) = std::env::var("JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN")
+        && let Ok(parsed) = chars_per_token.parse::<usize>()
+        && parsed != 0
+    {
+        embedding_config.estimated_chars_per_token = parsed;
     }
     embedding_config
 }
@@ -750,6 +767,9 @@ fn status_payload() -> Value {
             "dimension": embedding_fingerprint.dimension,
             "normalize": embedding_fingerprint.normalize,
             "pooling": embedding_fingerprint.pooling,
+            "max_input_chars": embedding_config.max_input_chars,
+            "max_estimated_tokens": embedding_config.max_estimated_tokens,
+            "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
             "provisional": embedding_manifest.provisional,
             "reembeddable": embedding_manifest.reembeddable
         },
@@ -813,6 +833,7 @@ fn storage_error_object(error: StorageError) -> ErrorObject {
 fn embedding_error_object(error: jurisearch_embed::EmbeddingError) -> ErrorObject {
     let message = error.to_string();
     match &error {
+        jurisearch_embed::EmbeddingError::InputTooLong(_) => ErrorObject::bad_input(message),
         jurisearch_embed::EmbeddingError::Endpoint(_)
         | jurisearch_embed::EmbeddingError::InvalidResponse(_)
         | jurisearch_embed::EmbeddingError::EmptyResponse => upstream_unavailable(message),
@@ -840,6 +861,14 @@ fn pgvector_literal(values: &[f32]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!("[{values}]")
+}
+
+fn parse_optional_usize(value: &str) -> Option<Option<usize>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") || value == "0" {
+        return Some(None);
+    }
+    value.parse::<usize>().ok().map(Some)
 }
 
 fn today_utc() -> String {

@@ -388,7 +388,8 @@ Tasks:
 - Done: `jurisearch ingest embed-chunks` opens an existing durable index, loads canonical chunk embedding inputs, calls the configured OpenAI-compatible endpoint, inserts `chunk_embeddings`, and feeds the dense rebuild finalizer; `--limit` supports smoke runs and `--index-lists` controls the rebuilt ivfflat index.
 - Done: live chunk embeddings use canonical `contextualized_body` recovered from `documents.canonical_json` when present, falling back to `chunks.body` until chunk provenance gets first-class storage columns.
 - Done: ignored live CLI embed smoke creates a tiny durable index without dense rows, invokes `jurisearch ingest embed-chunks`, and verifies one endpoint-produced embedding plus the dense manifest/index coverage.
-- Remaining: add tokenizer or endpoint-specific token-budget preflight before running the embedding loop on larger corpora.
+- Done: the embedding client preflights input size before network calls using configurable endpoint ceilings (`JURISEARCH_EMBED_MAX_INPUT_CHARS`, `JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS`, `JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN`); `status` and `ingest embed-chunks` output record the active budget.
+- Remaining for Phase 1.2 hardening: replace the conservative estimated-token guard with tokenizer-grade splitting/preflight for long statutory chunks.
 
 Acceptance:
 
