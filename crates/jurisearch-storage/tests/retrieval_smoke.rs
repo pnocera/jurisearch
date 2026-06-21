@@ -2,7 +2,9 @@ mod common;
 
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
-    retrieval::{HybridCandidateQuery, hybrid_candidates_json},
+    retrieval::{
+        FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
+    },
     runtime::{ManagedPostgres, StorageError},
 };
 
@@ -94,10 +96,40 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     assert_eq!(candidates["query"], "responsabilite faute dommage");
     assert_eq!(candidates["candidates"][0]["chunk_id"], "chunk:1240:0");
     assert_eq!(
-        candidates["candidates"][0]["lexical_rank"].as_u64(),
+        candidates["candidates"][0]["scores"]["lexical_rank"].as_u64(),
         Some(1)
     );
-    assert_eq!(candidates["candidates"][0]["dense_rank"].as_u64(), Some(1));
+    assert_eq!(
+        candidates["candidates"][0]["scores"]["dense_rank"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        candidates["candidates"][0]["cursor"]
+            .as_str()
+            .is_some_and(|cursor| cursor.ends_with(":chunk:1240:0"))
+    );
+
+    let empty_fetch = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &[] })?;
+    let empty_fetch: serde_json::Value =
+        serde_json::from_str(&empty_fetch).expect("empty fetch response is stable JSON");
+    assert_eq!(empty_fetch["documents"].as_array().unwrap().len(), 0);
+
+    let fetch = fetch_documents_json(
+        &postgres,
+        &FetchDocumentsQuery {
+            document_ids: &["legi:LEGIARTI000006419320@1804-02-21"],
+        },
+    )?;
+    let fetch: serde_json::Value =
+        serde_json::from_str(&fetch).expect("fetch response is stable JSON");
+    assert_eq!(
+        fetch["documents"][0]["document_id"],
+        "legi:LEGIARTI000006419320@1804-02-21"
+    );
+    assert_eq!(
+        fetch["documents"][0]["chunks"][0]["embedding_fingerprint"],
+        "bge-m3:1024:normalize:true"
+    );
 
     Ok(())
 }

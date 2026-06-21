@@ -291,7 +291,7 @@ fn choose_target_document(
     documents
         .iter()
         .find(|document| {
-            !document.chunks.is_empty()
+            document.chunks.len() == 1
                 && document.valid_from[0..4].parse::<i32>().unwrap_or_default() > 1
                 && !query_terms_from_body(&document.body).is_empty()
         })

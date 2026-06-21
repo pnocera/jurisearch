@@ -179,6 +179,14 @@ pub fn insert_chunk_embeddings(
                 dimension = EXCLUDED.dimension;",
         )
         .map_err(StorageError::PostgresClient)?;
+    let chunk_fingerprint_statement = transaction
+        .prepare(
+            "UPDATE chunks \
+             SET embedding_fingerprint = $2 \
+             WHERE chunk_id = $1 \
+               AND (embedding_fingerprint IS NULL OR embedding_fingerprint = $2);",
+        )
+        .map_err(StorageError::PostgresClient)?;
 
     for embedding in embeddings {
         let dimension =
@@ -188,6 +196,20 @@ pub fn insert_chunk_embeddings(
                     embedding.chunk_id, embedding.dimension
                 ),
             })?;
+        let updated = transaction
+            .execute(
+                &chunk_fingerprint_statement,
+                &[&embedding.chunk_id, &embedding.embedding_fingerprint],
+            )
+            .map_err(StorageError::PostgresClient)?;
+        if updated != 1 {
+            return Err(StorageError::Projection {
+                message: format!(
+                    "chunk `{}` is missing or has a different embedding fingerprint than `{}`",
+                    embedding.chunk_id, embedding.embedding_fingerprint
+                ),
+            });
+        }
         transaction
             .execute(
                 &statement,

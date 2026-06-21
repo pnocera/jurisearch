@@ -380,8 +380,9 @@ Tasks:
 - Done: `fetch_documents_json` returns full document text plus chunk bodies/provenance for selected document IDs.
 - Done: ignored real-data storage smoke uses `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz` by default; local run on 2026-06-21 inserted 12 official LEGI articles, 12 chunks, and 53 publisher edges, then verified BM25/dense hybrid search, `--as-of` prefiltering before `valid_from`, and fetch full text.
 - Remaining: wire CLI `search` and `fetch` commands to the storage helpers with index-path/config loading.
-- Remaining: replace deterministic test vectors with live embedding endpoint calls in an ignored integration path once the CLI/index build path owns endpoint configuration.
-- Remaining: add full dense-index rebuild/re-embed command mechanics and manifest updates beyond the current reprojectable storage primitives.
+- Remaining: replace deterministic test vectors with live embedding endpoint calls in an ignored integration path once the CLI/index build path owns endpoint configuration; sanitize or escape arbitrary CLI query text before handing it to ParadeDB's query parser.
+- Remaining: add full dense-index rebuild/re-embed command mechanics, ANN index creation, and manifest updates beyond the current reprojectable storage primitives.
+- Remaining: decide whether live embeddings read `chunks.body` or chunk `contextualized_body` recovered from `documents.canonical_json` until chunk provenance gets first-class storage columns.
 
 Acceptance:
 

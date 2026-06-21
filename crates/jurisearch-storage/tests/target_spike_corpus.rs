@@ -237,8 +237,14 @@ fn assert_top_candidate(response: &str) {
         serde_json::from_str(response).expect("target spike response is stable JSON");
     assert_eq!(response["query"], QUERY_TEXT);
     assert_eq!(response["candidates"][0]["chunk_id"], TARGET_CHUNK_ID);
-    assert_eq!(response["candidates"][0]["lexical_rank"].as_u64(), Some(1));
-    assert_eq!(response["candidates"][0]["dense_rank"].as_u64(), Some(1));
+    assert_eq!(
+        response["candidates"][0]["scores"]["lexical_rank"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        response["candidates"][0]["scores"]["dense_rank"].as_u64(),
+        Some(1)
+    );
 
     let candidates = response["candidates"]
         .as_array()

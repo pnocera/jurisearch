@@ -139,15 +139,12 @@ SELECT jsonb_build_object(
                     'to', valid_to,
                     'to_exclusive', true
                 ),
-                'lexical_rank', lexical_rank,
-                'dense_rank', dense_rank,
-                'fused_score', round(fused_score::numeric, 8),
                 'scores', jsonb_build_object(
                     'rrf', round(fused_score::numeric, 8),
                     'lexical_rank', lexical_rank,
                     'dense_rank', dense_rank
                 ),
-                'cursor', chunk_id
+                'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
             )
             ORDER BY fused_score DESC, chunk_id
         )
