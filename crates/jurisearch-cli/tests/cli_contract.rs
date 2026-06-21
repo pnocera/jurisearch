@@ -47,6 +47,7 @@ fn help_schema_json_is_valid_and_lists_commands() {
 fn status_returns_json_without_index() {
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
         .arg("status")
         .assert()
         .success()
@@ -57,7 +58,9 @@ fn status_returns_json_without_index() {
 
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["schema_version"], "1");
+    assert_eq!(json["index"]["state"], "not_configured");
     assert_eq!(json["index"]["query_ready"], false);
+    assert_eq!(json["ingest_health"]["state"], "pending");
     assert_eq!(json["embedding"]["provider"], "openai_compatible");
     assert_eq!(json["embedding"]["base_url_class"], "local_loopback");
     assert_eq!(json["embedding"]["model"], "bge-m3");
@@ -74,6 +77,7 @@ fn status_returns_json_without_index() {
 fn status_reports_embedding_budget_env_overrides() {
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
         .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "0")
         .env("JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS", "none")
         .env("JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN", "3")
@@ -89,6 +93,31 @@ fn status_reports_embedding_budget_env_overrides() {
     assert!(json["embedding"]["max_input_chars"].is_null());
     assert!(json["embedding"]["max_estimated_tokens"].is_null());
     assert_eq!(json["embedding"]["estimated_chars_per_token"], 3);
+}
+
+#[test]
+fn status_reports_not_initialized_index_without_opening_postgres() -> Result<(), StorageError> {
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-status-empty.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["index"]["state"], "not_initialized");
+    assert_eq!(json["index"]["query_ready"], false);
+    assert_eq!(json["ingest_health"]["state"], "pending");
+    Ok(())
 }
 
 #[test]
@@ -195,6 +224,81 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
             .unwrap()
             .is_empty()
     );
+
+    let input = format!(
+        "{{\"id\":\"status-index\",\"command\":\"status\",\"args\":{{\"index_dir\":\"{}\"}}}}\n",
+        root.path().to_string_lossy()
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["id"], "status-index");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["result"]["index"]["query_ready"], true);
+    assert_eq!(json["result"]["ingest_health"]["state"], "available");
+    Ok(())
+}
+
+#[test]
+fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplete()
+-> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI status incomplete coverage")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-status-incomplete.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
+                 '1804-02-21', 'sha256:article-1240', '{\"official\":true}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'responsabilite civile faute reparation dommage article 1240', \
+                 'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true');",
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["index"]["state"], "ready");
+    assert_eq!(json["index"]["query_ready"], false);
+    assert_eq!(json["ingest_health"]["projection_coverage"]["covered"], 1);
+    assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 1);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 0);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
     Ok(())
 }
 

@@ -132,6 +132,7 @@ pub struct IngestResumeDecision {
 pub struct IngestHealthReport {
     pub latest_run_id: Option<String>,
     pub latest_run_status: Option<String>,
+    pub latest_completed_run_id: Option<String>,
     pub total_members: i64,
     pub inserted_members: i64,
     pub skipped_members: i64,
@@ -437,6 +438,17 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         .map_err(StorageError::PostgresClient)?;
     let latest_run_id = latest.as_ref().map(|row| row.get::<_, String>(0));
     let latest_run_status = latest.as_ref().map(|row| row.get::<_, String>(1));
+    let latest_completed_run_id = client
+        .query_opt(
+            "SELECT run_id \
+             FROM ingest_run \
+             WHERE status = 'completed' \
+             ORDER BY completed_at DESC NULLS LAST, started_at DESC, run_id DESC \
+             LIMIT 1;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .map(|row| row.get::<_, String>(0));
 
     let counts = client
         .query_one(
@@ -511,6 +523,7 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
     Ok(IngestHealthReport {
         latest_run_id,
         latest_run_status,
+        latest_completed_run_id,
         total_members,
         inserted_members,
         skipped_members,

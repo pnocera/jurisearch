@@ -212,6 +212,7 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     let health = load_ingest_health(&postgres)?;
     assert_eq!(health.latest_run_id.as_deref(), Some("run-1"));
     assert_eq!(health.latest_run_status.as_deref(), Some("completed"));
+    assert_eq!(health.latest_completed_run_id.as_deref(), Some("run-1"));
     assert_eq!(health.total_members, 3);
     assert_eq!(health.inserted_members, 1);
     assert_eq!(health.failed_members, 1);

@@ -21,7 +21,7 @@ use jurisearch_storage::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
     },
-    ingest_accounting::load_ingest_health,
+    ingest_accounting::{IngestHealthReport, load_ingest_health},
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
@@ -114,6 +114,12 @@ struct SessionFetchArgs {
     as_of: Option<String>,
     #[serde(default)]
     part: Option<String>,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionStatusArgs {
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -472,6 +478,16 @@ fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
     )
 }
 
+fn session_status_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = if args.is_null() {
+        SessionStatusArgs::default()
+    } else {
+        serde_json::from_value::<SessionStatusArgs>(args)
+            .map_err(|error| ErrorObject::bad_input(format!("invalid status args: {error}")))?
+    };
+    Ok(status_payload(args.index_dir.as_deref()))
+}
+
 fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
     match help.command.unwrap_or(HelpSubcommand::Agent) {
         HelpSubcommand::Agent => {
@@ -734,7 +750,7 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
     let result = match command {
         "help" | "help agent" => Ok(json!({ "text": agent_help() })),
         "help schema" | "schema" => Ok(compiled_schema()),
-        "status" => Ok(status_payload(None)),
+        "status" => session_status_payload(args),
         "search" => session_search_payload(args),
         "fetch" => session_fetch_payload(args),
         "cite" | "related" | "context" | "expand" | "model fetch" | "setup" | "ingest" | "sync" => {
@@ -791,12 +807,13 @@ fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
         );
     };
 
+    let index_path = index_dir.to_string_lossy().into_owned();
     if !index_dir.join("pg/data/PG_VERSION").is_file() {
         return (
             json!({
                 "state": "not_initialized",
                 "query_ready": false,
-                "path": index_dir,
+                "path": index_path,
                 "message": "The configured index directory is not initialized."
             }),
             pending_ingest_health(),
@@ -822,7 +839,7 @@ fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
                     json!({
                         "state": "ready",
                         "query_ready": query_ready,
-                        "path": index_dir,
+                        "path": index_path,
                         "message": message
                     }),
                     ingest_health_payload(report),
@@ -834,7 +851,7 @@ fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
                     json!({
                         "state": "unavailable",
                         "query_ready": false,
-                        "path": index_dir,
+                        "path": index_path,
                         "message": "Index exists but ingest health could not be loaded.",
                         "error": error
                     }),
@@ -846,7 +863,7 @@ fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
             json!({
                 "state": "unavailable",
                 "query_ready": false,
-                "path": index_dir,
+                "path": index_path,
                 "message": "Index exists but could not be opened.",
                 "error": error
             }),
@@ -855,31 +872,27 @@ fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
     }
 }
 
-fn ingest_health_payload(
-    report: jurisearch_storage::ingest_accounting::IngestHealthReport,
-) -> Value {
-    let latest_completed_run = if report.latest_run_status.as_deref() == Some("completed") {
-        report.latest_run_id.clone()
-    } else {
-        None
-    };
-    let mut value = serde_json::to_value(report).unwrap_or_else(|error| {
-        json!({
+fn ingest_health_payload(report: IngestHealthReport) -> Value {
+    let latest_completed_run = report.latest_completed_run_id.clone();
+    match serde_json::to_value(report) {
+        Ok(mut value) => {
+            if let Value::Object(map) = &mut value {
+                map.insert("state".to_owned(), json!("available"));
+                map.insert(
+                    "latest_completed_run".to_owned(),
+                    json!(latest_completed_run),
+                );
+            }
+            value
+        }
+        Err(error) => json!({
             "state": "unavailable",
             "latest_completed_run": null,
             "projection_coverage": null,
             "embedding_coverage": null,
             "recovery_warnings": [format!("failed to serialize ingest health: {error}")]
-        })
-    });
-    if let Value::Object(map) = &mut value {
-        map.insert("state".to_owned(), json!("available"));
-        map.insert(
-            "latest_completed_run".to_owned(),
-            json!(latest_completed_run),
-        );
+        }),
     }
-    value
 }
 
 fn pending_ingest_health() -> Value {
