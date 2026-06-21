@@ -26,12 +26,15 @@ pub struct LegiHierarchyBackfillReport {
 pub struct LegiHierarchyBackfillScope {
     pub document_ids: Vec<String>,
     pub section_source_uids: Vec<String>,
+    pub text_source_uids: Vec<String>,
 }
 
 impl LegiHierarchyBackfillScope {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.document_ids.is_empty() && self.section_source_uids.is_empty()
+        self.document_ids.is_empty()
+            && self.section_source_uids.is_empty()
+            && self.text_source_uids.is_empty()
     }
 }
 
@@ -278,33 +281,87 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
     let full_scope = scope.is_empty();
     let rows = client
         .query(
-            // Prefer the section version whose validity contains the publisher
-            // edge `debut` date, falling back to article validity and then to the
-            // latest section row when source dates are incomplete or no section
-            // validity window contains the available anchor.
-            // Section-UID scoping matches the current single-section enrichment
-            // model; multi-link hierarchy assembly must revisit this predicate.
-            "SELECT d.document_id, d.canonical_json::text, d.valid_from::text, \
-                    edge.payload::text, section.canonical_json::text, \
-                    section.valid_from::text, section.valid_to::text \
-             FROM documents d \
-             JOIN graph_edges edge \
-               ON edge.from_document_id = d.document_id \
-              AND edge.edge_source = 'publisher' \
-              AND edge.payload->>'source_tag' = 'LIEN_SECTION_TA' \
-             JOIN legi_metadata_roots section \
-               ON section.root_kind = 'SECTION_TA' \
-              AND section.source_uid = edge.payload->>'to_source_uid' \
-             WHERE d.source = 'legi' \
-               AND d.kind = 'article' \
-               AND ( \
-                    $1::boolean \
-                    OR d.document_id = ANY($2::text[]) \
-                    OR edge.payload->>'to_source_uid' = ANY($3::text[]) \
-               ) \
-             ORDER BY d.document_id, section.valid_from DESC NULLS LAST, \
-                      section.metadata_key, edge.edge_id;",
-            &[&full_scope, &scope.document_ids, &scope.section_source_uids],
+            // Prefer direct article publisher section edges when present. TEXTELR
+            // supplies a fallback candidate by pairing each LIEN_ART with the
+            // nearest preceding LIEN_SECTION_TA in the same flat STRUCT sequence.
+            // Candidate selection below then chooses the section version whose
+            // validity contains the link/document anchor, falling back to the
+            // latest section row when source dates are incomplete.
+            "WITH hierarchy_candidates AS ( \
+                SELECT d.document_id, d.canonical_json::text AS document_json, \
+                       d.valid_from::text AS document_valid_from, \
+                       edge.payload::text AS edge_payload, \
+                       section.canonical_json::text AS section_json, \
+                       section.valid_from::text AS section_valid_from, \
+                       section.valid_to::text AS section_valid_to, \
+                       0 AS source_rank, section.metadata_key AS section_metadata_key, \
+                       edge.edge_id AS tie_breaker \
+                FROM documents d \
+                JOIN graph_edges edge \
+                  ON edge.from_document_id = d.document_id \
+                 AND edge.edge_source = 'publisher' \
+                 AND edge.payload->>'source_tag' = 'LIEN_SECTION_TA' \
+                JOIN legi_metadata_roots section \
+                  ON section.root_kind = 'SECTION_TA' \
+                 AND section.source_uid = edge.payload->>'to_source_uid' \
+                WHERE d.source = 'legi' \
+                  AND d.kind = 'article' \
+                  AND ( \
+                       $1::boolean \
+                       OR d.document_id = ANY($2::text[]) \
+                       OR edge.payload->>'to_source_uid' = ANY($3::text[]) \
+                  ) \
+                UNION ALL \
+                SELECT d.document_id, d.canonical_json::text AS document_json, \
+                       d.valid_from::text AS document_valid_from, \
+                       article_link.link::text AS edge_payload, \
+                       section.canonical_json::text AS section_json, \
+                       section.valid_from::text AS section_valid_from, \
+                       section.valid_to::text AS section_valid_to, \
+                       1 AS source_rank, section.metadata_key AS section_metadata_key, \
+                       text_struct.metadata_key || ':' || article_link.ordinality::text AS tie_breaker \
+                FROM documents d \
+                JOIN legi_metadata_roots text_struct \
+                  ON text_struct.root_kind = 'TEXTELR' \
+                JOIN LATERAL jsonb_array_elements( \
+                       coalesce(text_struct.canonical_json->'structure_links', '[]'::jsonb) \
+                     ) WITH ORDINALITY AS article_link(link, ordinality) \
+                  ON article_link.link->>'source_tag' = 'LIEN_ART' \
+                 AND article_link.link->>'target_source_uid' = d.source_uid \
+                JOIN LATERAL ( \
+                    SELECT section_link.link \
+                    FROM jsonb_array_elements( \
+                           coalesce(text_struct.canonical_json->'structure_links', '[]'::jsonb) \
+                         ) WITH ORDINALITY AS section_link(link, ordinality) \
+                    WHERE section_link.ordinality < article_link.ordinality \
+                      AND section_link.link->>'source_tag' = 'LIEN_SECTION_TA' \
+                      AND section_link.link->>'target_source_uid' IS NOT NULL \
+                    ORDER BY section_link.ordinality DESC \
+                    LIMIT 1 \
+                ) text_section ON true \
+                JOIN legi_metadata_roots section \
+                  ON section.root_kind = 'SECTION_TA' \
+                 AND section.source_uid = text_section.link->>'target_source_uid' \
+                WHERE d.source = 'legi' \
+                  AND d.kind = 'article' \
+                  AND ( \
+                       $1::boolean \
+                       OR d.document_id = ANY($2::text[]) \
+                       OR text_section.link->>'target_source_uid' = ANY($3::text[]) \
+                       OR text_struct.source_uid = ANY($4::text[]) \
+                  ) \
+            ) \
+             SELECT document_id, document_json, document_valid_from, edge_payload, \
+                    section_json, section_valid_from, section_valid_to \
+             FROM hierarchy_candidates \
+             ORDER BY document_id, source_rank, section_valid_from DESC NULLS LAST, \
+                      section_metadata_key, tie_breaker;",
+            &[
+                &full_scope,
+                &scope.document_ids,
+                &scope.section_source_uids,
+                &scope.text_source_uids,
+            ],
         )
         .map_err(StorageError::PostgresClient)?;
 

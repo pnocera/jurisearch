@@ -640,6 +640,7 @@ struct LegiArchiveIngestCounters {
     unsupported_roots: BTreeMap<String, usize>,
     processed_article_document_ids: BTreeSet<String>,
     processed_section_source_uids: BTreeSet<String>,
+    processed_text_source_uids: BTreeSet<String>,
 }
 
 fn legi_archive_manifest(
@@ -678,6 +679,7 @@ fn legi_archive_manifest(
             "persisted_metadata_members": counters.persisted_metadata_members,
             "hierarchy_backfill_scoped_documents": counters.processed_article_document_ids.len(),
             "hierarchy_backfill_scoped_sections": counters.processed_section_source_uids.len(),
+            "hierarchy_backfill_scoped_texts": counters.processed_text_source_uids.len(),
             "hierarchy_backfilled_documents": counters.hierarchy_backfilled_documents,
             "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
             "skipped_members": counters.skipped_members,
@@ -799,6 +801,11 @@ fn ingest_legi_archives_payload(
                 .iter()
                 .cloned()
                 .collect(),
+            text_source_uids: counters
+                .processed_text_source_uids
+                .iter()
+                .cloned()
+                .collect(),
         };
         if !backfill_scope.is_empty() {
             match backfill_legi_article_hierarchy_from_metadata_scoped(&postgres, &backfill_scope) {
@@ -862,6 +869,7 @@ fn ingest_legi_archives_payload(
         "persisted_metadata_members": counters.persisted_metadata_members,
         "hierarchy_backfill_scoped_documents": counters.processed_article_document_ids.len(),
         "hierarchy_backfill_scoped_sections": counters.processed_section_source_uids.len(),
+        "hierarchy_backfill_scoped_texts": counters.processed_text_source_uids.len(),
         "hierarchy_backfilled_documents": counters.hierarchy_backfilled_documents,
         "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
         "skipped_members": counters.skipped_members,
@@ -1013,6 +1021,7 @@ fn process_legi_archive_member(
             }
         }
         Ok(ParsedLegiXml::TextStruct(text_struct)) => {
+            let text_source_uid = text_struct.text_id.clone();
             process_legi_metadata_root(
                 postgres,
                 run_id,
@@ -1025,6 +1034,7 @@ fn process_legi_archive_member(
                 text_struct.source_date_debut_hint.as_deref(),
                 LegiMetadataRoot::TextStruct(text_struct.as_ref()),
             )?;
+            counters.processed_text_source_uids.insert(text_source_uid);
         }
         Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
             *counters.unsupported_roots.entry(root.clone()).or_default() += 1;
