@@ -35,6 +35,7 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     let mut article_attempts = 0usize;
     let mut parsed_articles = 0usize;
     let mut publisher_edges = 0usize;
+    let mut articles_with_block_boundaries = 0usize;
     let mut unsupported_roots = BTreeSet::new();
     let mut parse_errors = Vec::new();
 
@@ -67,6 +68,9 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
                     assert_eq!(document.chunks[0].body, document.body);
                     assert_eq!(document.chunks[0].chunking, "structural");
                     assert_eq!(document.chunks[0].boundary, "article");
+                    if document.body.contains('\n') {
+                        articles_with_block_boundaries += 1;
+                    }
                     publisher_edges += document.publisher_edges.len();
                     for edge in &document.publisher_edges {
                         assert_eq!(edge.from_document_id, document.document_id);
@@ -110,6 +114,10 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     assert!(
         publisher_edges > 0,
         "expected real LEGI article sample to emit publisher graph-edge candidates"
+    );
+    assert!(
+        articles_with_block_boundaries > 0,
+        "expected at least one sampled real article to preserve a structural body boundary"
     );
     // The default baseline currently starts with text-version XML before articles. This keeps
     // unsupported-root classification visible in the smoke, but the test remains ignored because

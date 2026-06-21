@@ -1,0 +1,28 @@
+# Claude Review: LEGI structural article chunks
+
+Verdict: GO
+
+## Findings
+- None (no correctness bugs or ingestion-contract regressions).
+
+Detail on the things specifically asked about:
+
+- Block-boundary handling is correct and does not corrupt inline text. `append_body_block_boundary_for_current_tag` (`crates/jurisearch-ingest/src/legi/mod.rs:386`) only fires for the closing/empty event of block tags in `is_body_block_boundary` (`mod.rs:770` — `p/br/li/div/blockquote/tr/table`, both cases) and only inside `BLOC_TEXTUEL/CONTENU`. Inline tags (`<i>`, inline `<a>` publisher anchors) are excluded, so intra-paragraph text stays continuous. `append_block_boundary` (`mod.rs:762`) trims trailing collapse-spaces and dedups consecutive `\n`, and `required_non_empty` (`mod.rs:508`) trims the final body, so single-paragraph bodies are byte-for-byte unchanged (no regression) and multi-block bodies get exactly one `\n` per boundary. Verified by `preserves_body_block_boundaries_for_structural_chunks` (`mod.rs:958`) and the unchanged `preserves_entities_and_inline_text_continuity` (`mod.rs:945`).
+- Emitted `CanonicalChunk` fields are useful for materialization and map onto the existing `chunks` table (`crates/jurisearch-storage/src/migrations.rs:46`): `chunk_id`, `document_id`, `chunk_index` (usize→`integer CHECK >= 0`), `body`, `chunk_kind` (`"article_body"`), `source_fields` (→jsonb array), `source_payload_hash`, `chunk_builder_version` all have destination columns; `embedding_fingerprint` is correctly left for the later embedding step. The article-grained "one chunk per version" shape satisfies the plan invariant "no chunk crosses legal hierarchy boundaries" (article is a leaf).
+- Provenance is captured: `source_fields = ["BLOC_TEXTUEL/CONTENU"]`, `source_payload_hash` reuses the raw archive-member hash (`mod.rs:480-481`), `chunk_builder_version = "legi_article_structural:v1"`, `chunking = "structural"` (matches the plan's chunk-origin enum, IMPLEMENTATION_PLAN.md:492/501), `boundary = "article"`, and `hierarchy_path`/`contextualized_body` carry full `Code > … > Titre > Article N` context (`mod.rs:466-491`).
+- The real-archive smoke (`crates/jurisearch-ingest/tests/legi_archive_subset.rs:66-69`) exercises chunk emission (count, body equality, `chunking`, `boundary`) and stays `#[ignore]` + skip-if-archive-absent (`legi_archive_subset.rs:22-32`), so normal CI is not made fragile.
+- Plan delta (IMPLEMENTATION_PLAN.md:346) accurately matches the code, and the corresponding item is correctly removed from "Remaining" (only `SECTION_TA`/`TEXTELR` and DTD re-verification remain).
+
+## Suggestions
+- Schema gap for the future materialization step (non-blocking): the chunk emits `contextualized_body`, `chunking` (chunk-origin provenance), `boundary`, and `hierarchy_path`, but `chunks` (`migrations.rs:46-58`) has no columns for them. The plan (IMPLEMENTATION_PLAN.md:492/501) requires chunk-origin provenance to be persisted and traceable, so the materialization slice will need a migration (dedicated columns or a chunk-level jsonb) or this provenance is silently dropped on insert. Worth a TODO/plan note now.
+- Dead fallback: `article_chunk_context`'s `unwrap_or_else(|| document.body.clone())` (`mod.rs:468`) is unreachable because `title` is always `Some(format!("Article {num}"))`, so `parts` is never empty. Harmless, but could be simplified or have a test that intentionally drives the no-context path.
+- Chunks are not covered by `CanonicalDocument::validate` (`mod.rs:76`); invariants like `chunk_id == chunk:{document_id}:{index}`, non-empty body, and `sha256:`-prefixed hash are only asserted in unit tests. They are deterministically derived from already-validated fields, so risk is low, but a small `validate` extension would harden the contract if chunk construction grows.
+- Body fidelity edge: table cells (`<td>`/`<th>`) are not boundaries, so adjacent cells with no source whitespace concatenate (e.g. `<td>A</td><td>B</td>` → `AB`); `<tr>`/`<table>` still break rows. Tables are rare in articles and out of the plan's stated scope (paragraph/list/line-break), so this is a fidelity note, not a defect.
+- The ignored smoke confirms a chunk is emitted but never asserts a sampled real body actually contains a `\n` boundary, so block-boundary handling is proven only by the unit fixture. Since the test is ignored, asserting "≥1 sampled article body contains a structural boundary" would strengthen real-data coverage without affecting CI.
+
+## Verification Notes
+- `git show --stat e8f4137` and `git show e8f4137`: change is scoped to `crates/jurisearch-ingest/src/legi/mod.rs` (+127), `tests/legi_archive_subset.rs` (+4), and `IMPLEMENTATION_PLAN.md` (+1/-1).
+- Read `legi/mod.rs` around the parser loop (`mod.rs:289-350`), body helpers (`assign_article_text:352`, `append_xml_content:745`, `append_block_boundary:762`, `is_body_block_boundary:770`, `path_contains:826`), `into_document`/`build_article_chunks` (`mod.rs:396-497`), and `validate` (`mod.rs:76`); hand-traced the multi-paragraph + `<br/>` fixture to the asserted `"Premier alinea.\nSecond alinea avec inline.\nTroisieme alinea."`.
+- `cargo test -p jurisearch-ingest --lib legi`: 16 passed / 0 failed, including the new `preserves_body_block_boundaries_for_structural_chunks` and the augmented `parses_official_article_to_canonical_document` chunk assertions.
+- `cargo test -p jurisearch-ingest --test legi_archive_subset -- --list`: integration target compiles; 1 test present and `#[ignore]`.
+- Cross-checked emitted chunk fields against the `chunks`/`chunk_embeddings` schema in `crates/jurisearch-storage/src/migrations.rs:46-67` and the chunk-provenance requirements in `IMPLEMENTATION_PLAN.md:79,492,501`.

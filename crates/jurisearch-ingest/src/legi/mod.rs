@@ -120,6 +120,9 @@ impl CanonicalDocument {
                 source_payload_hash: self.source_payload_hash.clone(),
             });
         }
+        for (expected_index, chunk) in self.chunks.iter().enumerate() {
+            chunk.validate_for_document(self, expected_index)?;
+        }
         Ok(())
     }
 }
@@ -186,6 +189,56 @@ pub enum CanonicalValidationError {
         "canonical document source_payload_hash must be sha256-prefixed: `{source_payload_hash}`"
     )]
     InvalidPayloadHash { source_payload_hash: String },
+    #[error("canonical chunk `{chunk_id}` is invalid: {message}")]
+    InvalidChunk { chunk_id: String, message: String },
+}
+
+impl CanonicalChunk {
+    fn validate_for_document(
+        &self,
+        document: &CanonicalDocument,
+        expected_index: usize,
+    ) -> Result<(), CanonicalValidationError> {
+        let expected_chunk_id = format!("chunk:{}:{}", document.document_id, self.chunk_index);
+        if self.document_id != document.document_id {
+            return Err(invalid_chunk(
+                self,
+                "document_id does not match parent document",
+            ));
+        }
+        if self.chunk_index != expected_index {
+            return Err(invalid_chunk(
+                self,
+                format!("chunk_index must be {expected_index}"),
+            ));
+        }
+        if self.chunk_id != expected_chunk_id {
+            return Err(invalid_chunk(
+                self,
+                format!("chunk_id must be `{expected_chunk_id}`"),
+            ));
+        }
+        if self.body.trim().is_empty() {
+            return Err(invalid_chunk(self, "body must not be empty"));
+        }
+        if !self.source_payload_hash.starts_with("sha256:") {
+            return Err(invalid_chunk(
+                self,
+                "source_payload_hash must be sha256-prefixed",
+            ));
+        }
+        if self.chunking != "structural" {
+            return Err(invalid_chunk(self, "chunking must be `structural`"));
+        }
+        Ok(())
+    }
+}
+
+fn invalid_chunk(chunk: &CanonicalChunk, message: impl Into<String>) -> CanonicalValidationError {
+    CanonicalValidationError::InvalidChunk {
+        chunk_id: chunk.chunk_id.clone(),
+        message: message.into(),
+    }
 }
 
 #[derive(Debug, Error)]
@@ -464,9 +517,12 @@ impl RawArticle {
 }
 
 fn build_article_chunks(document: &CanonicalDocument) -> Vec<CanonicalChunk> {
-    let contextualized_body = article_chunk_context(document)
-        .map(|context| format!("{context}\n\n{}", document.body))
-        .unwrap_or_else(|| document.body.clone());
+    let context = article_chunk_context(document);
+    let contextualized_body = if context.is_empty() {
+        document.body.clone()
+    } else {
+        format!("{context}\n\n{}", document.body)
+    };
 
     vec![CanonicalChunk {
         chunk_id: format!("chunk:{}:0", document.document_id),
@@ -484,16 +540,12 @@ fn build_article_chunks(document: &CanonicalDocument) -> Vec<CanonicalChunk> {
     }]
 }
 
-fn article_chunk_context(document: &CanonicalDocument) -> Option<String> {
+fn article_chunk_context(document: &CanonicalDocument) -> String {
     let mut parts = document.hierarchy_path.clone();
     if let Some(title) = &document.title {
         parts.push(title.clone());
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" > "))
-    }
+    parts.join(" > ")
 }
 
 fn required(
@@ -781,6 +833,10 @@ fn is_body_block_boundary(name: &str) -> bool {
             | "BLOCKQUOTE"
             | "tr"
             | "TR"
+            | "td"
+            | "TD"
+            | "th"
+            | "TH"
             | "table"
             | "TABLE"
     )
@@ -859,8 +915,9 @@ mod tests {
     use crate::archive::ArchiveMember;
 
     use super::{
-        CanonicalDocument, LegiParseError, ParsedLegiXml, SourceProvenance,
-        extract_known_source_uid, parse_legi_member, parse_legi_xml, source_payload_hash,
+        CanonicalDocument, CanonicalValidationError, LegiParseError, ParsedLegiXml,
+        SourceProvenance, extract_known_source_uid, parse_legi_member, parse_legi_xml,
+        source_payload_hash,
     };
 
     #[test]
@@ -971,6 +1028,17 @@ mod tests {
         assert_eq!(document.chunks[0].body, document.body);
         assert_eq!(document.chunks[0].chunking, "structural");
         assert_eq!(document.chunks[0].boundary, "article");
+    }
+
+    #[test]
+    fn validation_rejects_broken_chunk_contract() {
+        let mut document = parse_article_fixture(&article_fixture()).unwrap();
+        document.chunks[0].chunk_id = "chunk:wrong".to_owned();
+
+        assert!(matches!(
+            document.validate(),
+            Err(CanonicalValidationError::InvalidChunk { .. })
+        ));
     }
 
     #[test]
