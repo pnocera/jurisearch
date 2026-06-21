@@ -61,6 +61,7 @@ Deliverables:
 - Temporal edge tests.
 - Token/tool-call budget checks.
 - Ranking ablation framework: BM25-only, dense-only, hybrid, hybrid+authority, hybrid+rerank.
+- Reranker adoption gate linked to `work/03-implementation/02-evidence/2026-06-21-reranker-feasibility.md`, with BM25-only / dense-only / hybrid / hybrid+rerank measured before enabling rerank by default.
 - Held-out split to avoid tuning to the test set.
 - Curated vocabulary seed review process for `expand`.
 - Ingest-health gate harness and reports: latest completed run per source, failed-member/error thresholds, projection/embedding coverage, and replay-snapshot diffs.
@@ -422,6 +423,7 @@ Current status (2026-06-21):
 - Done: Phase 1 should implement a provider seam first (`disabled | http | local_onnx`), keep `disabled` as default, and use HTTP/TEI as the first shippable provider if legal eval proves a rerank gain.
 - Done: local ONNX through Rust `ort` is feasible enough for a benchmark spike, but not selected as default before latency, tokenizer, runtime packaging, and model-cache policy tests.
 - Done: local GPU acceleration is not a Phase 1 dependency; this workstation exposes AMD Radeon 8060S through ROCm, while the practical first measurements should be CPU and HTTP.
+- Remaining for Phase 1 benchmark: run empirical `http` and `local_onnx` latency tests, verify tokenizer/pair-contract compatibility, pin runtime packaging/model-cache policy, and measure hybrid+rerank quality before any default adoption.
 
 ### 0.8 Official API Client Foundation
 

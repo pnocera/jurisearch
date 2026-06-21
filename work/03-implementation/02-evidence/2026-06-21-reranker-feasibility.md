@@ -38,6 +38,8 @@ Recommended first implementation target.
 
 TEI supports reranker models as sequence-classification cross-encoders and documents a `/rerank` request shape with `query` plus `texts`. It also provides CPU x86_64 images and local CPU install instructions, which fits `jurisearch` better than embedding Python or model runtimes in the CLI. The HTTP provider can share the existing `JURISEARCH_` secret/env policy and the current "diagnostics on stderr, JSON on stdout" discipline.
 
+Tradeoff: HTTP is cheaper to build and benchmark, but heavier to operate because it requires a separate server process. TEI currently advertises an Apache-2.0 license, but redistribution, attribution, and service-management obligations still need a release checklist before bundling or documenting it as a supported dependency.
+
 Phase 1 provider sketch:
 
 ```json
@@ -67,6 +69,7 @@ Risks:
 
 - ONNX model provenance and exact tokenizer/pair input contract must be verified against the upstream BAAI tokenizer.
 - `ort` runtime packaging and execution-provider behavior must be measured in this project before shipping.
+- `ort = 2.0.0-rc.12` is a release candidate; the local path must pin a tested version and re-check API/runtime stability before promotion.
 - Reproducible model cache/download policy must be integrated with `model fetch` / setup before local inference can be user-facing.
 
 Sources:
@@ -104,11 +107,14 @@ Minimum Phase 1 benchmark matrix:
 - Metrics: latency p50/p95, timeout/failure rate, memory footprint, and legal retrieval quality delta.
 - Quality gates: known-article lookup, conceptual statutory retrieval, historical `--as-of`, and statute-to-jurisprudence tasks once decision corpora exist.
 
+Back-of-envelope expectation: a 50-candidate cross-encoder pass at 1024 tokens per query/document pair may be tens of seconds on CPU. Treat `top_n=50` and `timeout_ms=30000` as hypotheses to validate, not as accepted defaults.
+
 Recommended acceptance threshold for adoption:
 
 - Hybrid+rerank must improve legal eval quality enough to justify added latency and local/HTTP operational complexity.
 - Reranker failure must degrade to fused hybrid order, not fail the whole `search`.
 - Provider choice must be explicit in status and manifests.
+- Reranker scores must be reproducible for the same provider/model/config, or manifests must record the source of nondeterminism.
 
 ## Implementation Follow-Up
 
@@ -129,4 +135,4 @@ Do not couple reranking to `pg_search` or `pgvector`; run it after RRF over a bo
   - `nvidia-smi`: no NVIDIA device output.
   - `rocminfo`: AMD Radeon 8060S Graphics visible as `gfx1151`.
   - `cargo search ort --limit 3`: current `ort = 2.0.0-rc.12`.
-  - Hugging Face cache is effectively empty, so no local reranker weights are already present.
+  - Hugging Face cache resolves to `/mnt/models/huggingface` and contains unrelated models/datasets, but `find -L ~/.cache/huggingface -maxdepth 3 -type d -iname '*reranker*'` found no local reranker weights.
