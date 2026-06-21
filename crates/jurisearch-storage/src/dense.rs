@@ -3,12 +3,16 @@ use serde_json::json;
 use crate::runtime::{ManagedPostgres, StorageError};
 
 pub const DENSE_VECTOR_INDEX_NAME: &str = "chunk_embeddings_embedding_ivfflat_idx";
+pub const DENSE_VECTOR_DIMENSION: i32 = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DenseRebuildSpec<'a> {
     pub embedding_fingerprint: &'a str,
     pub model: &'a str,
     pub dimension: i32,
+    pub normalize: bool,
+    pub provisional: bool,
+    pub reembeddable: bool,
     pub index_lists: u32,
 }
 
@@ -34,6 +38,11 @@ pub fn finalize_dense_rebuild(
         .query_one("SELECT count(*) FROM chunks;", &[])
         .map_err(StorageError::PostgresClient)?
         .get(0);
+    if chunks == 0 {
+        return Err(StorageError::DenseRebuild {
+            message: "cannot finalize dense rebuild for an empty chunk corpus".to_owned(),
+        });
+    }
     let embeddings: i64 = transaction
         .query_one(
             "SELECT count(*) \
@@ -90,8 +99,9 @@ pub fn finalize_dense_rebuild(
         "embedding_fingerprint": spec.embedding_fingerprint,
         "model": spec.model,
         "dimension": spec.dimension,
-        "normalize": spec.embedding_fingerprint.contains(":normalize:true"),
-        "reembeddable": true,
+        "normalize": spec.normalize,
+        "provisional": spec.provisional,
+        "reembeddable": spec.reembeddable,
         "vector_index": {
             "name": DENSE_VECTOR_INDEX_NAME,
             "method": "ivfflat",
@@ -136,11 +146,23 @@ fn validate_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageError> 
             message: "model must not be empty".to_owned(),
         });
     }
-    if spec.dimension != 1024 {
+    if spec.dimension != DENSE_VECTOR_DIMENSION {
         return Err(StorageError::DenseRebuild {
             message: format!(
-                "dense rebuild dimension must match schema vector(1024), got {}",
-                spec.dimension
+                "dense rebuild dimension must match schema vector({}), got {}",
+                DENSE_VECTOR_DIMENSION, spec.dimension
+            ),
+        });
+    }
+    let expected_fingerprint = format!(
+        "{}:{}:normalize:{}",
+        spec.model, spec.dimension, spec.normalize
+    );
+    if spec.embedding_fingerprint != expected_fingerprint {
+        return Err(StorageError::DenseRebuild {
+            message: format!(
+                "embedding_fingerprint `{}` does not match model/dimension/normalize spec `{expected_fingerprint}`",
+                spec.embedding_fingerprint
             ),
         });
     }
@@ -150,4 +172,41 @@ fn validate_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageError> 
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DENSE_VECTOR_DIMENSION, DenseRebuildSpec, validate_dense_spec};
+
+    #[test]
+    fn dense_spec_validation_rejects_invalid_inputs() {
+        let valid = DenseRebuildSpec {
+            embedding_fingerprint: "bge-m3:1024:normalize:true",
+            model: "bge-m3",
+            dimension: DENSE_VECTOR_DIMENSION,
+            normalize: true,
+            provisional: true,
+            reembeddable: true,
+            index_lists: 1,
+        };
+        assert!(validate_dense_spec(&valid).is_ok());
+
+        let invalid_dimension = DenseRebuildSpec {
+            dimension: 768,
+            ..valid
+        };
+        assert!(validate_dense_spec(&invalid_dimension).is_err());
+
+        let invalid_lists = DenseRebuildSpec {
+            index_lists: 0,
+            ..valid
+        };
+        assert!(validate_dense_spec(&invalid_lists).is_err());
+
+        let inconsistent_fingerprint = DenseRebuildSpec {
+            embedding_fingerprint: "other:1024:normalize:true",
+            ..valid
+        };
+        assert!(validate_dense_spec(&inconsistent_fingerprint).is_err());
+    }
 }

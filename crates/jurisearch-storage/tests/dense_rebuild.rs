@@ -57,6 +57,9 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
         embedding_fingerprint: EMBEDDING_FINGERPRINT,
         model: "bge-m3",
         dimension: 1024,
+        normalize: true,
+        provisional: true,
+        reembeddable: true,
         index_lists: 1,
     };
     let incomplete = finalize_dense_rebuild(&postgres, &spec).unwrap_err();
@@ -97,6 +100,9 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
         manifest["embedding_fingerprint"],
         "bge-m3:1024:normalize:true"
     );
+    assert_eq!(manifest["normalize"], true);
+    assert_eq!(manifest["provisional"], true);
+    assert_eq!(manifest["reembeddable"], true);
     assert_eq!(manifest["coverage"]["chunks"], 2);
     assert_eq!(manifest["coverage"]["embeddings"], 2);
     assert_eq!(manifest["vector_index"]["name"], DENSE_VECTOR_INDEX_NAME);
