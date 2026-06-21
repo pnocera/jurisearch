@@ -66,6 +66,25 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         ParsedLegiXml::SectionTa(section) => section,
         _ => panic!("expected SECTION_TA"),
     };
+    let contemporary_section = match parse_legi_xml(
+        r#"
+<SECTION_TA>
+  <ID>LEGISCTA000006089696</ID>
+  <TITRE_TA>Titre contemporain</TITRE_TA>
+  <CONTEXTE>
+    <TEXTE cid="LEGITEXT000006070721">
+      <TITRE_TXT debut="2020-01-01" fin="2999-01-01">Code civil</TITRE_TXT>
+    </TEXTE>
+  </CONTEXTE>
+</SECTION_TA>
+"#,
+        provenance("legi/sections/LEGISCTA000006089696-contemporary.xml"),
+    )
+    .unwrap()
+    {
+        ParsedLegiXml::SectionTa(section) => section,
+        _ => panic!("expected SECTION_TA"),
+    };
     let text_struct = match parse_legi_xml(
         r#"
 <TEXTELR>
@@ -102,10 +121,11 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         &[
             LegiMetadataRoot::TextVersion(text.as_ref()),
             LegiMetadataRoot::SectionTa(section.as_ref()),
+            LegiMetadataRoot::SectionTa(contemporary_section.as_ref()),
             LegiMetadataRoot::TextStruct(text_struct.as_ref()),
         ],
     )?;
-    assert_eq!(report.metadata_roots, 3);
+    assert_eq!(report.metadata_roots, 4);
 
     let report =
         insert_legi_metadata_roots(&postgres, &[LegiMetadataRoot::TextVersion(text.as_ref())])?;
@@ -113,7 +133,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
 
     assert_eq!(
         postgres.execute_sql("SELECT count(*)::text FROM legi_metadata_roots;")?,
-        "3"
+        "4"
     );
     let text_struct_digest = text_struct
         .source_payload_hash
@@ -126,6 +146,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         )?,
         format!(
             "legi:SECTION_TA:LEGISCTA000006089696@1804-03-21,\
+             legi:SECTION_TA:LEGISCTA000006089696@2020-01-01,\
              legi:TEXTELR:LEGITEXT000006070721@1804-03-21:{text_struct_digest},\
              legi:TEXTE_VERSION:LEGITEXT000049371154@1956-04-12"
         )
@@ -134,9 +155,17 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         postgres.execute_sql(
             "SELECT parent_source_uid || ':' || (canonical_json->'hierarchy_path'->>0) \
              FROM legi_metadata_roots \
-             WHERE root_kind = 'SECTION_TA';",
+             WHERE metadata_key = 'legi:SECTION_TA:LEGISCTA000006089696@1804-03-21';",
         )?,
         "LEGITEXT000006070721:Code civil"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->>'title' \
+             FROM legi_metadata_roots \
+             WHERE metadata_key = 'legi:SECTION_TA:LEGISCTA000006089696@2020-01-01';",
+        )?,
+        "Titre contemporain"
     );
     assert_eq!(
         postgres.execute_sql(
@@ -180,7 +209,8 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             ('edge:article-section', 'legi:LEGIARTI000006419320@1804-02-21', \
              'refers_to', 'publisher', \
              '{{\"source_tag\":\"LIEN_SECTION_TA\",\
-                \"to_source_uid\":\"LEGISCTA000006089696\"}}');",
+                \"to_source_uid\":\"LEGISCTA000006089696\",\
+                \"attributes\":[{{\"key\":\"debut\",\"value\":\"1804-03-21\"}}]}}');",
         vector_literal(0)
     ))?;
 

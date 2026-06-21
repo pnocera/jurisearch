@@ -251,12 +251,12 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
         .map_err(StorageError::PostgresClient)?;
     let rows = client
         .query(
-            // Phase 1.1 deliberately chooses one section row per article: if several
-            // publisher section links or section versions match, the latest section
-            // metadata wins. Temporal disambiguation is deferred to the broader
-            // hierarchy-assembly slice.
-            "SELECT DISTINCT ON (d.document_id) \
-                d.document_id, d.canonical_json::text, section.canonical_json::text \
+            // Prefer the section version whose validity contains the publisher
+            // edge `debut` date, falling back to article validity and then to the
+            // latest section row when the source evidence is incomplete.
+            "SELECT d.document_id, d.canonical_json::text, d.valid_from::text, \
+                    edge.payload::text, section.canonical_json::text, \
+                    section.valid_from::text, section.valid_to::text \
              FROM documents d \
              JOIN graph_edges edge \
                ON edge.from_document_id = d.document_id \
@@ -267,18 +267,31 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
               AND section.source_uid = edge.payload->>'to_source_uid' \
              WHERE d.source = 'legi' \
                AND d.kind = 'article' \
-             ORDER BY d.document_id, section.valid_from DESC NULLS LAST, section.metadata_key;",
+             ORDER BY d.document_id, section.valid_from DESC NULLS LAST, \
+                      section.metadata_key, edge.edge_id;",
             &[],
         )
         .map_err(StorageError::PostgresClient)?;
 
     let mut updates = Vec::<(String, String)>::new();
+    let mut candidates = Vec::with_capacity(rows.len());
     for row in rows {
-        let document_id: String = row.get(0);
-        let document_json: String = row.get(1);
-        let section_json: String = row.get(2);
-        if let Some(enriched) = enriched_article_hierarchy_json(&document_json, &section_json)? {
-            updates.push((document_id, enriched));
+        candidates.push(HierarchyBackfillCandidate {
+            document_id: row.get(0),
+            document_json: row.get(1),
+            document_valid_from: row.get(2),
+            edge_payload: row.get(3),
+            section_json: row.get(4),
+            section_valid_from: row.get(5),
+            section_valid_to: row.get(6),
+        });
+    }
+
+    for candidate in select_hierarchy_backfill_candidates(candidates)? {
+        if let Some(enriched) =
+            enriched_article_hierarchy_json(&candidate.document_json, &candidate.section_json)?
+        {
+            updates.push((candidate.document_id, enriched));
         }
     }
 
@@ -338,6 +351,112 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
         documents_updated: updates.len(),
         embeddings_invalidated,
     })
+}
+
+#[derive(Debug)]
+struct HierarchyBackfillCandidate {
+    document_id: String,
+    document_json: String,
+    document_valid_from: Option<String>,
+    edge_payload: String,
+    section_json: String,
+    section_valid_from: Option<String>,
+    section_valid_to: Option<String>,
+}
+
+fn select_hierarchy_backfill_candidates(
+    candidates: Vec<HierarchyBackfillCandidate>,
+) -> Result<Vec<HierarchyBackfillCandidate>, StorageError> {
+    let mut selected = Vec::new();
+    let mut current = Vec::new();
+
+    for candidate in candidates {
+        if current
+            .first()
+            .is_some_and(|first: &HierarchyBackfillCandidate| {
+                first.document_id != candidate.document_id
+            })
+        {
+            selected.push(select_hierarchy_backfill_candidate(current)?);
+            current = Vec::new();
+        }
+        current.push(candidate);
+    }
+
+    if !current.is_empty() {
+        selected.push(select_hierarchy_backfill_candidate(current)?);
+    }
+
+    Ok(selected)
+}
+
+fn select_hierarchy_backfill_candidate(
+    mut candidates: Vec<HierarchyBackfillCandidate>,
+) -> Result<HierarchyBackfillCandidate, StorageError> {
+    for index in 0..candidates.len() {
+        let Some(anchor) = hierarchy_backfill_anchor(
+            candidates[index].edge_payload.as_str(),
+            candidates[index].document_valid_from.as_deref(),
+        )?
+        else {
+            continue;
+        };
+        if section_validity_contains(
+            anchor.as_str(),
+            candidates[index].section_valid_from.as_deref(),
+            candidates[index].section_valid_to.as_deref(),
+        ) {
+            return Ok(candidates.remove(index));
+        }
+    }
+
+    Ok(candidates.remove(0))
+}
+
+fn hierarchy_backfill_anchor(
+    edge_payload: &str,
+    document_valid_from: Option<&str>,
+) -> Result<Option<String>, StorageError> {
+    let payload: serde_json::Value = serde_json::from_str(edge_payload)?;
+    let edge_debut = payload
+        .get("attributes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|attribute| {
+            let key = attribute.get("key").and_then(serde_json::Value::as_str)?;
+            let value = attribute.get("value").and_then(serde_json::Value::as_str)?;
+            (key == "debut" && is_iso_date(value)).then(|| value.to_owned())
+        });
+
+    Ok(edge_debut.or_else(|| {
+        document_valid_from
+            .filter(|date| is_iso_date(date))
+            .map(str::to_owned)
+    }))
+}
+
+fn section_validity_contains(
+    anchor: &str,
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+) -> bool {
+    if !is_iso_date(anchor) {
+        return false;
+    }
+
+    valid_from.is_none_or(|date| is_iso_date(date) && date <= anchor)
+        && valid_to.is_none_or(|date| is_iso_date(date) && anchor < date)
+}
+
+fn is_iso_date(value: &str) -> bool {
+    value.as_bytes().iter().enumerate().all(|(index, byte)| {
+        if matches!(index, 4 | 7) {
+            *byte == b'-'
+        } else {
+            byte.is_ascii_digit()
+        }
+    }) && value.len() == 10
 }
 
 pub fn insert_chunk_embeddings(
