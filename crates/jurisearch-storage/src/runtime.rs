@@ -202,9 +202,6 @@ impl ManagedPostgres {
             port,
             database: APP_DATABASE.to_owned(),
         };
-        postgres.execute_sql(
-            "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_search;",
-        )?;
         let lock_path = postgres
             .data_dir
             .canonicalize()
@@ -213,6 +210,7 @@ impl ManagedPostgres {
             &postgres.connection_string(),
             &lock_path,
         )?);
+        postgres.run_migrations()?;
         Ok(postgres)
     }
 
@@ -561,11 +559,11 @@ fn connection_string(port: u16, database: &str) -> String {
     format!("host=127.0.0.1 port={port} user={SUPERUSER} dbname={database} connect_timeout=5")
 }
 
-fn sql_identifier(identifier: &str) -> String {
+pub(crate) fn sql_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn sql_string_literal(value: &str) -> String {
+pub(crate) fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
