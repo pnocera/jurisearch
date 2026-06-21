@@ -10,6 +10,9 @@ use thiserror::Error;
 
 use crate::archive::ArchiveMember;
 
+const LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS: usize = 6_000;
+const LEGI_ARTICLE_CHUNK_BUILDER_VERSION: &str = "legi_article_structural:v2";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceProvenance {
     pub archive_name: Option<String>,
@@ -942,7 +945,7 @@ impl RawArticle {
             publisher_edges: Vec::new(),
             chunks: Vec::new(),
             canonical_version: format!(
-                "legi_article:v1:nature={nature}:etat={}:type={}",
+                "legi_article:v2:nature={nature}:etat={}:type={}",
                 etat.as_deref().unwrap_or("absent"),
                 article_type.as_deref().unwrap_or("absent")
             ),
@@ -1085,26 +1088,79 @@ impl RawTextStruct {
 
 fn build_article_chunks(document: &CanonicalDocument) -> Vec<CanonicalChunk> {
     let context = article_chunk_context(document);
-    let contextualized_body = if context.is_empty() {
-        document.body.clone()
-    } else {
-        format!("{context}\n\n{}", document.body)
-    };
+    let contextualized_body = contextualized_article_body(&context, &document.body);
+    if contextualized_body.chars().count() <= LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS {
+        return vec![build_article_chunk(
+            document,
+            &context,
+            0,
+            document.body.clone(),
+            "article",
+            vec!["BLOC_TEXTUEL/CONTENU".to_owned()],
+        )];
+    }
 
-    vec![CanonicalChunk {
-        chunk_id: format!("chunk:{}:0", document.document_id),
-        document_id: document.document_id.clone(),
-        chunk_index: 0,
-        body: document.body.clone(),
-        contextualized_body,
-        chunk_kind: "article_body".to_owned(),
-        chunking: "structural".to_owned(),
-        boundary: "article".to_owned(),
-        source_fields: vec!["BLOC_TEXTUEL/CONTENU".to_owned()],
-        source_payload_hash: document.source_payload_hash.clone(),
-        chunk_builder_version: "legi_article_structural:v1".to_owned(),
-        hierarchy_path: document.hierarchy_path.clone(),
-    }]
+    let units = structural_article_body_units(&document.body);
+    if units.len() <= 1 {
+        return vec![build_article_chunk(
+            document,
+            &context,
+            0,
+            document.body.clone(),
+            "article",
+            vec!["BLOC_TEXTUEL/CONTENU".to_owned()],
+        )];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current_units = Vec::new();
+    let mut current_start = 1usize;
+
+    for (index, unit) in units.iter().enumerate() {
+        let candidate = join_article_body_units(&current_units, Some(unit));
+        if !current_units.is_empty()
+            && contextualized_article_body(&context, &candidate)
+                .chars()
+                .count()
+                > LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS
+        {
+            push_alinea_chunk(
+                document,
+                &context,
+                &mut chunks,
+                &current_units,
+                current_start,
+                index,
+            );
+            current_units.clear();
+            current_start = index + 1;
+        }
+        current_units.push(*unit);
+    }
+
+    if !current_units.is_empty() {
+        push_alinea_chunk(
+            document,
+            &context,
+            &mut chunks,
+            &current_units,
+            current_start,
+            units.len(),
+        );
+    }
+
+    if chunks.len() <= 1 {
+        vec![build_article_chunk(
+            document,
+            &context,
+            0,
+            document.body.clone(),
+            "article",
+            vec!["BLOC_TEXTUEL/CONTENU".to_owned()],
+        )]
+    } else {
+        chunks
+    }
 }
 
 fn article_chunk_context(document: &CanonicalDocument) -> String {
@@ -1113,6 +1169,86 @@ fn article_chunk_context(document: &CanonicalDocument) -> String {
         parts.push(title.clone());
     }
     parts.join(" > ")
+}
+
+fn contextualized_article_body(context: &str, body: &str) -> String {
+    if context.is_empty() {
+        body.to_owned()
+    } else {
+        format!("{context}\n\n{body}")
+    }
+}
+
+fn structural_article_body_units(body: &str) -> Vec<&str> {
+    // ARTICLE body assembly already collapses inline whitespace and emits one
+    // '\n' per block boundary; split chunks can trim/drop empty lines and
+    // rejoin units without changing the canonical text for current LEGI input.
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn join_article_body_units(units: &[&str], extra: Option<&str>) -> String {
+    let mut body = units.join("\n");
+    if let Some(extra) = extra {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(extra);
+    }
+    body
+}
+
+fn push_alinea_chunk(
+    document: &CanonicalDocument,
+    context: &str,
+    chunks: &mut Vec<CanonicalChunk>,
+    units: &[&str],
+    start: usize,
+    end: usize,
+) {
+    let boundary = if start == end {
+        "alinea"
+    } else {
+        "alinea_range"
+    };
+    let source_fields = vec![
+        "BLOC_TEXTUEL/CONTENU".to_owned(),
+        format!("BLOC_TEXTUEL/CONTENU/alinea:{start}-{end}"),
+    ];
+    chunks.push(build_article_chunk(
+        document,
+        context,
+        chunks.len(),
+        join_article_body_units(units, None),
+        boundary,
+        source_fields,
+    ));
+}
+
+fn build_article_chunk(
+    document: &CanonicalDocument,
+    context: &str,
+    chunk_index: usize,
+    body: String,
+    boundary: &str,
+    source_fields: Vec<String>,
+) -> CanonicalChunk {
+    CanonicalChunk {
+        chunk_id: format!("chunk:{}:{chunk_index}", document.document_id),
+        document_id: document.document_id.clone(),
+        chunk_index,
+        contextualized_body: contextualized_article_body(context, &body),
+        body,
+        chunk_kind: "article_body".to_owned(),
+        chunking: "structural".to_owned(),
+        boundary: boundary.to_owned(),
+        source_fields,
+        source_payload_hash: document.source_payload_hash.clone(),
+        chunk_builder_version: LEGI_ARTICLE_CHUNK_BUILDER_VERSION.to_owned(),
+        hierarchy_path: document.hierarchy_path.clone(),
+    }
 }
 
 fn required(
@@ -1559,9 +1695,9 @@ mod tests {
     use crate::archive::ArchiveMember;
 
     use super::{
-        CanonicalDocument, CanonicalValidationError, LegiParseError, ParsedLegiXml,
-        SourceProvenance, extract_known_source_uid, parse_legi_member, parse_legi_xml,
-        source_payload_hash,
+        CanonicalDocument, CanonicalValidationError, LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS,
+        LegiParseError, ParsedLegiXml, SourceProvenance, extract_known_source_uid,
+        parse_legi_member, parse_legi_xml, source_payload_hash,
     };
 
     #[test]
@@ -1607,7 +1743,7 @@ mod tests {
         assert_eq!(chunk.boundary, "article");
         assert_eq!(chunk.source_fields, vec!["BLOC_TEXTUEL/CONTENU"]);
         assert_eq!(chunk.source_payload_hash, document.source_payload_hash);
-        assert_eq!(chunk.chunk_builder_version, "legi_article_structural:v1");
+        assert_eq!(chunk.chunk_builder_version, "legi_article_structural:v2");
         assert_eq!(chunk.hierarchy_path, document.hierarchy_path);
         assert_eq!(document.publisher_edges.len(), 1);
         let edge = &document.publisher_edges[0];
@@ -1670,7 +1806,7 @@ mod tests {
             assert_eq!(document.valid_to_raw.as_deref(), Some(date_fin));
             assert_eq!(
                 document.canonical_version,
-                format!("legi_article:v1:nature=Article:etat={status}:type=AUTONOME")
+                format!("legi_article:v2:nature=Article:etat={status}:type=AUTONOME")
             );
         }
     }
@@ -1704,6 +1840,119 @@ mod tests {
         assert_eq!(document.chunks[0].body, document.body);
         assert_eq!(document.chunks[0].chunking, "structural");
         assert_eq!(document.chunks[0].boundary, "article");
+    }
+
+    #[test]
+    fn long_articles_split_only_on_structural_alinea_boundaries() {
+        let first = format!("Premier alinea. {}", vec!["alpha"; 550].join(" "));
+        let second = format!("Deuxieme alinea. {}", vec!["beta"; 550].join(" "));
+        let third = format!("Troisieme alinea. {}", vec!["gamma"; 550].join(" "));
+        let replacement = format!("<p>{first}</p><p>{second}</p><p>{third}</p>");
+        let xml = article_fixture().replace(
+            "<p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>",
+            &replacement,
+        );
+        let document = parse_article_fixture(&xml).unwrap();
+
+        assert_eq!(
+            document.body,
+            format!("{first}\n{second}\n{third}").as_str()
+        );
+        assert_eq!(document.chunks.len(), 3);
+
+        for (index, expected_body) in [first, second, third].iter().enumerate() {
+            let chunk = &document.chunks[index];
+            assert_eq!(
+                chunk.chunk_id,
+                format!("chunk:{}:{index}", document.document_id)
+            );
+            assert_eq!(chunk.chunk_index, index);
+            assert_eq!(chunk.body, *expected_body);
+            assert_eq!(chunk.chunking, "structural");
+            assert_eq!(chunk.boundary, "alinea");
+            assert_eq!(
+                chunk.source_fields,
+                vec![
+                    "BLOC_TEXTUEL/CONTENU".to_owned(),
+                    format!("BLOC_TEXTUEL/CONTENU/alinea:{}-{}", index + 1, index + 1),
+                ]
+            );
+            assert!(chunk.contextualized_body.starts_with("Code civil >"));
+            assert!(chunk.contextualized_body.ends_with(expected_body));
+            assert_eq!(chunk.chunk_builder_version, "legi_article_structural:v2");
+        }
+    }
+
+    #[test]
+    fn single_oversized_alinea_is_not_hard_split() {
+        let body = format!("Unique alinea. {}", vec!["alpha"; 1_200].join(" "));
+        let replacement = format!("<p>{body}</p>");
+        let xml = article_fixture().replace(
+            "<p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>",
+            &replacement,
+        );
+        let document = parse_article_fixture(&xml).unwrap();
+
+        assert_eq!(document.body, body);
+        assert_eq!(document.chunks.len(), 1);
+        let chunk = &document.chunks[0];
+        assert!(
+            chunk.contextualized_body.chars().count() > LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS
+        );
+        assert_eq!(chunk.body, document.body);
+        assert_eq!(chunk.boundary, "article");
+        assert_eq!(chunk.source_fields, vec!["BLOC_TEXTUEL/CONTENU"]);
+        assert_eq!(chunk.chunk_builder_version, "legi_article_structural:v2");
+    }
+
+    #[test]
+    fn long_articles_pack_multiple_alineas_into_range_chunks() {
+        let first = format!("Premier alinea. {}", vec!["alpha"; 400].join(" "));
+        let second = format!("Deuxieme alinea. {}", vec!["beta"; 400].join(" "));
+        let third = format!("Troisieme alinea. {}", vec!["gamma"; 400].join(" "));
+        let fourth = format!("Quatrieme alinea. {}", vec!["delta"; 400].join(" "));
+        let replacement = format!("<p>{first}</p><p>{second}</p><p>{third}</p><p>{fourth}</p>");
+        let xml = article_fixture().replace(
+            "<p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>",
+            &replacement,
+        );
+        let document = parse_article_fixture(&xml).unwrap();
+
+        assert_eq!(
+            document.body,
+            format!("{first}\n{second}\n{third}\n{fourth}").as_str()
+        );
+        assert_eq!(document.chunks.len(), 2);
+
+        let expected = [
+            (
+                format!("{first}\n{second}"),
+                "BLOC_TEXTUEL/CONTENU/alinea:1-2",
+            ),
+            (
+                format!("{third}\n{fourth}"),
+                "BLOC_TEXTUEL/CONTENU/alinea:3-4",
+            ),
+        ];
+        for (index, (expected_body, expected_source_field)) in expected.iter().enumerate() {
+            let chunk = &document.chunks[index];
+            assert_eq!(
+                chunk.chunk_id,
+                format!("chunk:{}:{index}", document.document_id)
+            );
+            assert_eq!(chunk.chunk_index, index);
+            assert_eq!(chunk.body, *expected_body);
+            assert_eq!(chunk.boundary, "alinea_range");
+            assert_eq!(
+                chunk.source_fields,
+                vec![
+                    "BLOC_TEXTUEL/CONTENU".to_owned(),
+                    (*expected_source_field).to_owned(),
+                ]
+            );
+            assert!(chunk.contextualized_body.ends_with(expected_body));
+            assert_eq!(chunk.chunk_builder_version, "legi_article_structural:v2");
+        }
     }
 
     #[test]
