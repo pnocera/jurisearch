@@ -1758,23 +1758,89 @@ mod tests {
 
     #[test]
     fn accepts_articles_without_num_or_type_as_absent_metadata() {
-        let xml = article_fixture()
-            .replace("      <NUM>1240</NUM>\n", "")
-            .replace("      <TYPE>AUTONOME</TYPE>\n", "");
-        let document = parse_article_fixture(&xml).unwrap();
+        let cases = [
+            (
+                "missing NUM",
+                article_fixture().replace("      <NUM>1240</NUM>\n", ""),
+                Some("Article LEGIARTI000006419320"),
+                Some("AUTONOME"),
+            ),
+            (
+                "empty NUM",
+                article_fixture().replace("<NUM>1240</NUM>", "<NUM></NUM>"),
+                Some("Article LEGIARTI000006419320"),
+                Some("AUTONOME"),
+            ),
+            (
+                "missing TYPE",
+                article_fixture().replace("      <TYPE>AUTONOME</TYPE>\n", ""),
+                Some("Article 1240"),
+                None,
+            ),
+            (
+                "empty TYPE",
+                article_fixture().replace("<TYPE>AUTONOME</TYPE>", "<TYPE/>"),
+                Some("Article 1240"),
+                None,
+            ),
+            (
+                "missing NUM and TYPE",
+                article_fixture()
+                    .replace("      <NUM>1240</NUM>\n", "")
+                    .replace("      <TYPE>AUTONOME</TYPE>\n", ""),
+                Some("Article LEGIARTI000006419320"),
+                None,
+            ),
+        ];
 
-        assert_eq!(
-            document.title.as_deref(),
-            Some("Article LEGIARTI000006419320")
-        );
-        assert_eq!(document.source_article_type, None);
-        assert!(document.canonical_version.contains("type=absent"));
-        assert!(document.chunks.first().is_some_and(|chunk| {
-            chunk
-                .contextualized_body
-                .contains("Article LEGIARTI000006419320\n\n")
-        }));
-        assert!(document.validate().is_ok());
+        for (name, xml, expected_title, expected_type) in cases {
+            let document = parse_article_fixture(&xml).unwrap_or_else(|error| {
+                panic!("{name} should parse with absent display metadata: {error}")
+            });
+
+            assert_eq!(document.title.as_deref(), expected_title, "{name}");
+            assert_eq!(
+                document.source_article_type.as_deref(),
+                expected_type,
+                "{name}"
+            );
+            assert_eq!(
+                document.canonical_version.contains("type=absent"),
+                expected_type.is_none(),
+                "{name}"
+            );
+            if expected_title == Some("Article LEGIARTI000006419320") {
+                assert!(
+                    document.chunks.first().is_some_and(|chunk| chunk
+                        .contextualized_body
+                        .contains("Article LEGIARTI000006419320\n\n")),
+                    "{name}"
+                );
+            }
+            assert!(document.validate().is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn rejects_articles_without_body_content() {
+        let error = parse_article_fixture(&article_fixture().replace(
+            r#"  <BLOC_TEXTUEL>
+    <CONTENU>
+      <p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>
+    </CONTENU>
+  </BLOC_TEXTUEL>
+"#,
+            "",
+        ))
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            LegiParseError::MissingRequiredField {
+                field: "BLOC_TEXTUEL/CONTENU",
+                ..
+            }
+        ));
     }
 
     #[test]
