@@ -58,14 +58,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "search",
         summary: "Return compact ranked candidates for a legal research query.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "SearchRequest",
         response_schema: "SearchResponse",
     },
     CommandSpec {
         name: "fetch",
         summary: "Return full source text for selected stable IDs.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "FetchRequest",
         response_schema: "FetchResponse",
     },

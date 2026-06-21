@@ -15,6 +15,7 @@ clap.workspace = true
 jurisearch-core = { path = "../jurisearch-core" }
 jurisearch-embed = { path = "../jurisearch-embed" }
 jurisearch-ingest = { path = "../jurisearch-ingest" }
+jurisearch-storage = { path = "../jurisearch-storage" }
 serde.workspace = true
 serde_json.workspace = true
 

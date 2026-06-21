@@ -605,6 +605,7 @@ dependencies = [
  "jurisearch-core",
  "jurisearch-embed",
  "jurisearch-ingest",
+ "jurisearch-storage",
  "predicates",
  "serde",
  "serde_json",

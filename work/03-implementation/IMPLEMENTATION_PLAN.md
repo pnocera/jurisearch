@@ -379,17 +379,20 @@ Tasks:
 - Done: `hybrid_candidates_json` now returns compact chunk/document IDs, citations, snippets, source URLs, validity blocks, RRF score details, and stable cursors while keeping the exact temporal prefilter and custom RRF over BM25 plus dense candidates.
 - Done: `fetch_documents_json` returns full document text plus chunk bodies/provenance for selected document IDs.
 - Done: ignored real-data storage smoke uses `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz` by default; local run on 2026-06-21 inserted 12 official LEGI articles, 12 chunks, and 53 publisher edges, then verified BM25/dense hybrid search, `--as-of` prefiltering before `valid_from`, and fetch full text.
-- Remaining: wire CLI `search` and `fetch` commands to the storage helpers with index-path/config loading.
-- Remaining: replace deterministic test vectors with live embedding endpoint calls in an ignored integration path once the CLI/index build path owns endpoint configuration; sanitize or escape arbitrary CLI query text before handing it to ParadeDB's query parser.
+- Done: direct CLI `search`/`fetch` and JSONL session `search`/`fetch` now route through the storage helpers using `--index-dir` or `JURISEARCH_INDEX_DIR`; missing or uninitialized indexes return JSON `index_unavailable` errors instead of creating empty indexes.
+- Done: CLI `search` sanitizes user query text before handing it to ParadeDB's query parser, embeds the original query through the configured OpenAI-compatible Phase 0 endpoint, and uses the stored `bge-m3:1024:normalize:true` fingerprint convention for dense candidates.
+- Done: CLI `fetch` is covered by an integration-style test that creates a durable index, drops it, then invokes the binary and JSONL session path against the existing root.
+- Done: ignored live CLI search smoke creates a tiny durable index with a live bge-m3 embedding, invokes `jurisearch search` against `JURISEARCH_INDEX_DIR`, and verifies the expected document plus dense rank.
+- Remaining: replace deterministic storage test vectors with live embedding endpoint calls in a reusable ingestion/index-build path once that path owns endpoint configuration.
 - Remaining: add full dense-index rebuild/re-embed command mechanics, ANN index creation, and manifest updates beyond the current reprojectable storage primitives.
 - Remaining: decide whether live embeddings read `chunks.body` or chunk `contextualized_body` recovered from `documents.canonical_json` until chunk provenance gets first-class storage columns.
 
 Acceptance:
 
 - Met in storage layer: `search` returns compact IDs, citations, snippets, source URLs, validity blocks, scores, and cursors.
-- Met in storage layer: `fetch` returns full text for selected IDs.
+- Met in storage and CLI layer: `fetch` returns full text for selected IDs.
 - Met in storage layer: historical `--as-of` queries do not leak future LEGI versions in the real-archive smoke.
-- Partially met: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance; full rebuild orchestration remains pending.
+- Partially met: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance, and CLI live search is smoke-tested; full rebuild orchestration remains pending.
 
 ### 0.7 Reranker Feasibility Spike
 

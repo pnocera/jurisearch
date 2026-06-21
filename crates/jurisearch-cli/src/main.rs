@@ -1,7 +1,8 @@
 use std::{
     io::{self, BufRead, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -9,12 +10,19 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use jurisearch_core::{
     SCHEMA_VERSION,
     contract::{LegalKind, agent_help},
-    error::{ErrorObject, ProcessExit},
+    error::{ErrorCode, ErrorObject, ProcessExit},
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
 };
-use jurisearch_embed::EmbeddingConfig;
+use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
 use jurisearch_ingest::archive::{ArchiveSource, plan_from_dir};
+use jurisearch_storage::{
+    retrieval::{
+        FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
+    },
+    runtime::{ManagedPostgres, PgConfig, StorageError},
+};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 #[derive(Debug, Parser)]
@@ -22,6 +30,8 @@ use serde_json::{Value, json};
 #[command(version, about = "Local-first French legal search CLI for AI agents.")]
 #[command(disable_help_subcommand = true)]
 struct Cli {
+    #[arg(long, env = "JURISEARCH_INDEX_DIR", global = true)]
+    index_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -76,6 +86,30 @@ struct FetchArgs {
     as_of: Option<String>,
     #[arg(long)]
     part: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionSearchArgs {
+    query: String,
+    #[serde(default = "default_cli_kind")]
+    kind: CliKind,
+    #[serde(default = "default_top_k")]
+    top_k: u32,
+    #[serde(default)]
+    as_of: Option<String>,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionFetchArgs {
+    ids: Vec<String>,
+    #[serde(default)]
+    as_of: Option<String>,
+    #[serde(default)]
+    part: Option<String>,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -171,7 +205,8 @@ enum HelpSubcommand {
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
 enum CliKind {
     Code,
     Decision,
@@ -218,6 +253,7 @@ fn main() -> ExitCode {
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let index_dir = cli.index_dir;
     let command = cli.command.unwrap_or(Command::Help(HelpCommand {
         command: Some(HelpSubcommand::Agent),
     }));
@@ -231,14 +267,10 @@ fn run() -> anyhow::Result<()> {
         Command::Search(args) => {
             if args.query.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("search query must not be empty"))
+            } else if args.top_k == 0 {
+                emit_error(ErrorObject::bad_input("search --top-k must be at least 1"))
             } else {
-                let kind: LegalKind = args.kind.into();
-                emit_error(ErrorObject::not_implemented(&format!(
-                    "search kind={} top_k={} as_of={}",
-                    kind.canonical_result_kind(),
-                    args.top_k,
-                    args.as_of.as_deref().unwrap_or("none")
-                )))
+                emit_search(args, index_dir.as_deref())
             }
         }
         Command::Fetch(args) => {
@@ -247,7 +279,7 @@ fn run() -> anyhow::Result<()> {
                     "fetch requires at least one stable ID",
                 ))
             } else {
-                emit_error(ErrorObject::not_implemented("fetch"))
+                emit_fetch(args, index_dir.as_deref())
             }
         }
         Command::Cite(args) => {
@@ -294,6 +326,115 @@ fn run() -> anyhow::Result<()> {
     }
 }
 
+fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match search_payload(args, index_dir) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
+fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let query_text = parade_query_text(&args.query).ok_or_else(|| {
+        ErrorObject::bad_input("search query must contain at least one searchable token")
+    })?;
+    let kind: LegalKind = args.kind.into();
+    if matches!(kind, LegalKind::Decision) {
+        return Err(ErrorObject::bad_input(
+            "Phase 0.6 search currently supports `--kind all` or `--kind code` over the LEGI subset",
+        ));
+    }
+
+    let postgres = open_index(index_dir.as_path())?;
+    let embedding_config = embedding_config_from_env();
+    let expected_fingerprint = embedding_config.fingerprint();
+    let embedding_fingerprint = storage_embedding_fingerprint(&embedding_config);
+    let client = OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
+    let embedding = client
+        .embed_query(args.query.as_str(), &expected_fingerprint)
+        .map_err(embedding_error_object)?;
+    let query_embedding = pgvector_literal(&embedding.values);
+    let as_of = args.as_of.unwrap_or_else(today_utc);
+    let response = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: query_text.as_str(),
+            query_embedding: query_embedding.as_str(),
+            embedding_fingerprint: embedding_fingerprint.as_str(),
+            as_of: as_of.as_str(),
+            lexical_limit: args.top_k.saturating_mul(4).max(args.top_k),
+            dense_limit: args.top_k.saturating_mul(4).max(args.top_k),
+            limit: args.top_k,
+        },
+    )
+    .map_err(storage_error_object)?;
+    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+}
+
+fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match fetch_payload(args, index_dir) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
+fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    let ids = args.ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
+        .map_err(storage_error_object)?;
+    let mut response: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if let Some(as_of) = args.as_of {
+        response["as_of"] = Value::String(as_of);
+    }
+    if let Some(part) = args.part {
+        response["part"] = Value::String(part);
+    }
+    Ok(response)
+}
+
+fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionSearchArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid search args: {error}")))?;
+    if args.query.trim().is_empty() {
+        return Err(ErrorObject::bad_input("search query must not be empty"));
+    }
+    if args.top_k == 0 {
+        return Err(ErrorObject::bad_input("search top_k must be at least 1"));
+    }
+    let index_dir = args.index_dir;
+    search_payload(
+        SearchArgs {
+            query: args.query,
+            kind: args.kind,
+            top_k: args.top_k,
+            as_of: args.as_of,
+        },
+        index_dir.as_deref(),
+    )
+}
+
+fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionFetchArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid fetch args: {error}")))?;
+    if args.ids.is_empty() {
+        return Err(ErrorObject::bad_input(
+            "fetch requires at least one stable ID",
+        ));
+    }
+    let index_dir = args.index_dir;
+    fetch_payload(
+        FetchArgs {
+            ids: args.ids,
+            as_of: args.as_of,
+            part: args.part,
+        },
+        index_dir.as_deref(),
+    )
+}
+
 fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
     match help.command.unwrap_or(HelpSubcommand::Agent) {
         HelpSubcommand::Agent => {
@@ -331,6 +472,51 @@ fn emit_ingest(ingest: IngestCommand) -> anyhow::Result<()> {
     }
 }
 
+fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {
+    let configured = index_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("JURISEARCH_INDEX_DIR").map(PathBuf::from));
+    let Some(index_dir) = configured else {
+        return Err(index_unavailable(
+            "index directory is required; pass `--index-dir` or set JURISEARCH_INDEX_DIR",
+        ));
+    };
+    if !index_dir.join("pg/data/PG_VERSION").is_file() {
+        return Err(index_unavailable(format!(
+            "`{}` is not an initialized jurisearch index",
+            index_dir.display()
+        )));
+    }
+    Ok(index_dir)
+}
+
+fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
+    let pg_config = PgConfig::discover().map_err(storage_error_object)?;
+    ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
+}
+
+fn embedding_config_from_env() -> EmbeddingConfig {
+    let embedding_base_url = std::env::var("JURISEARCH_EMBED_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8097/v1".into());
+    let mut embedding_config = EmbeddingConfig::phase0_bge_m3(
+        embedding_base_url,
+        std::env::var("JURISEARCH_EMBED_API_KEY").ok(),
+    );
+    if let Ok(model) = std::env::var("JURISEARCH_EMBED_MODEL") {
+        embedding_config.model = model;
+    }
+    if let Ok(dimension) = std::env::var("JURISEARCH_EMBED_DIMENSION") {
+        embedding_config.dimension = dimension.parse().unwrap_or(embedding_config.dimension);
+    }
+    if let Ok(normalize) = std::env::var("JURISEARCH_EMBED_NORMALIZE") {
+        embedding_config.normalize = normalize.parse().unwrap_or(embedding_config.normalize);
+    }
+    if let Ok(pooling) = std::env::var("JURISEARCH_EMBED_POOLING") {
+        embedding_config.pooling = pooling;
+    }
+    embedding_config
+}
+
 fn run_jsonl(args: JsonlArgs, _warm: bool) -> anyhow::Result<()> {
     if !args.jsonl {
         return emit_error(ErrorObject::bad_input(
@@ -365,50 +551,34 @@ fn run_jsonl(args: JsonlArgs, _warm: bool) -> anyhow::Result<()> {
 }
 
 fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) {
-    let command = request.command.trim();
+    let SessionRequest { id, command, args } = request;
+    let command = command.trim();
     if command == "exit" {
-        return (
-            SessionResponse::ok(request.id, json!({ "bye": true })),
-            true,
-        );
+        return (SessionResponse::ok(id, json!({ "bye": true })), true);
     }
     let result = match command {
         "help" | "help agent" => Ok(json!({ "text": agent_help() })),
         "help schema" | "schema" => Ok(compiled_schema()),
         "status" => Ok(status_payload()),
-        "search" | "fetch" | "cite" | "related" | "context" | "expand" | "model fetch"
-        | "setup" | "ingest" | "sync" => Err(ErrorObject::not_implemented(command)),
+        "search" => session_search_payload(args),
+        "fetch" => session_fetch_payload(args),
+        "cite" | "related" | "context" | "expand" | "model fetch" | "setup" | "ingest" | "sync" => {
+            Err(ErrorObject::not_implemented(command))
+        }
         _ => Err(ErrorObject::bad_input(format!(
             "unknown session command `{command}`"
         ))),
     };
 
     match result {
-        Ok(result) => (SessionResponse::ok(request.id, result), false),
-        Err(error) => (SessionResponse::err(request.id, error), false),
+        Ok(result) => (SessionResponse::ok(id, result), false),
+        Err(error) => (SessionResponse::err(id, error), false),
     }
 }
 
 fn status_payload() -> Value {
-    let embedding_base_url = std::env::var("JURISEARCH_EMBED_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8097/v1".into());
-    let embedding_config = EmbeddingConfig::phase0_bge_m3(
-        embedding_base_url.clone(),
-        std::env::var("JURISEARCH_EMBED_API_KEY").ok(),
-    );
-    let mut embedding_config = embedding_config;
-    if let Ok(model) = std::env::var("JURISEARCH_EMBED_MODEL") {
-        embedding_config.model = model;
-    }
-    if let Ok(dimension) = std::env::var("JURISEARCH_EMBED_DIMENSION") {
-        embedding_config.dimension = dimension.parse().unwrap_or(embedding_config.dimension);
-    }
-    if let Ok(normalize) = std::env::var("JURISEARCH_EMBED_NORMALIZE") {
-        embedding_config.normalize = normalize.parse().unwrap_or(embedding_config.normalize);
-    }
-    if let Ok(pooling) = std::env::var("JURISEARCH_EMBED_POOLING") {
-        embedding_config.pooling = pooling;
-    }
+    let embedding_config = embedding_config_from_env();
+    let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint;
 
@@ -438,6 +608,117 @@ fn status_payload() -> Value {
             "recovery_warnings": []
         }
     })
+}
+
+fn index_unavailable(message: impl Into<String>) -> ErrorObject {
+    ErrorObject {
+        code: ErrorCode::IndexUnavailable,
+        message: message.into(),
+        suggestions: vec![
+            "Build or select an index before running retrieval commands.".into(),
+            "Pass `--index-dir <path>` or set JURISEARCH_INDEX_DIR.".into(),
+        ],
+    }
+}
+
+fn dependency_unavailable(message: impl Into<String>) -> ErrorObject {
+    ErrorObject {
+        code: ErrorCode::DependencyUnavailable,
+        message: message.into(),
+        suggestions: vec![
+            "Check PostgreSQL extension setup and embedding endpoint configuration.".into(),
+        ],
+    }
+}
+
+fn upstream_unavailable(message: impl Into<String>) -> ErrorObject {
+    ErrorObject {
+        code: ErrorCode::Upstream,
+        message: message.into(),
+        suggestions: vec!["Check the configured OpenAI-compatible embeddings endpoint.".into()],
+    }
+}
+
+fn storage_error_object(error: StorageError) -> ErrorObject {
+    let message = error.to_string();
+    match &error {
+        StorageError::StorageLockBusy { .. } | StorageError::AdvisoryLockBusy { .. } => {
+            index_unavailable(message)
+        }
+        _ => dependency_unavailable(message),
+    }
+}
+
+fn embedding_error_object(error: jurisearch_embed::EmbeddingError) -> ErrorObject {
+    let message = error.to_string();
+    match &error {
+        jurisearch_embed::EmbeddingError::Endpoint(_)
+        | jurisearch_embed::EmbeddingError::InvalidResponse(_)
+        | jurisearch_embed::EmbeddingError::EmptyResponse => upstream_unavailable(message),
+        _ => dependency_unavailable(message),
+    }
+}
+
+fn parade_query_text(query: &str) -> Option<String> {
+    let terms = query
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" "))
+    }
+}
+
+fn storage_embedding_fingerprint(config: &EmbeddingConfig) -> String {
+    format!(
+        "{}:{}:normalize:{}",
+        config.model, config.dimension, config.normalize
+    )
+}
+
+fn pgvector_literal(values: &[f32]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("{value:.8}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
+fn today_utc() -> String {
+    let days_since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / 86_400;
+    let (year, month, day) = civil_from_days(days_since_epoch as i64);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year, month as u32, day as u32)
+}
+
+fn default_cli_kind() -> CliKind {
+    CliKind::All
+}
+
+fn default_top_k() -> u32 {
+    10
 }
 
 fn emit_error(error: ErrorObject) -> anyhow::Result<()> {
