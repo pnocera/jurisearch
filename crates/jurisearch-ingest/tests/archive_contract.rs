@@ -5,7 +5,8 @@ use std::{
 
 use flate2::{Compression, write::GzEncoder};
 use jurisearch_ingest::archive::{
-    ArchiveReadError, ArchiveSource, for_each_xml_member, plan_from_paths,
+    ArchiveReadError, ArchiveSource, ArchiveVisit, for_each_xml_member, for_each_xml_member_until,
+    plan_from_paths,
 };
 use tar::{Builder, Header};
 use tempfile::tempdir;
@@ -71,6 +72,36 @@ fn streaming_reader_visits_xml_members_and_enforces_limits() {
 
     let error = for_each_xml_member(&archive_path, 3, |_| Ok(())).unwrap_err();
     assert!(matches!(error, ArchiveReadError::MemberTooLarge { .. }));
+}
+
+#[test]
+fn streaming_reader_can_stop_after_a_bounded_sample() {
+    let dir = tempdir().unwrap();
+    let archive_path = dir
+        .path()
+        .join("Freemium_legi_global_20250102-120000.tar.gz");
+    write_tar_gz(
+        &archive_path,
+        &[
+            ("legi/a.xml", b"<A/>".as_slice()),
+            ("legi/b.xml", b"<B/>".as_slice()),
+            ("legi/c.xml", b"<C/>".as_slice()),
+        ],
+    );
+
+    let mut seen = Vec::new();
+    let count = for_each_xml_member_until(&archive_path, 64, |member| {
+        seen.push(member.member_path);
+        Ok(if seen.len() == 2 {
+            ArchiveVisit::Stop
+        } else {
+            ArchiveVisit::Continue
+        })
+    })
+    .unwrap();
+
+    assert_eq!(count, 2);
+    assert_eq!(seen, vec!["legi/a.xml", "legi/b.xml"]);
 }
 
 fn write_tar_gz(path: &Path, members: &[(&str, &[u8])]) {

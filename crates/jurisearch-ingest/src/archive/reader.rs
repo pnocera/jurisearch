@@ -18,6 +18,12 @@ pub struct ArchiveMember {
     pub bytes: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveVisit {
+    Continue,
+    Stop,
+}
+
 #[derive(Debug, Error)]
 pub enum ArchiveReadError {
     #[error("failed to open archive `{path}`: {source}")]
@@ -45,6 +51,20 @@ pub fn for_each_xml_member<F>(
 ) -> Result<usize, ArchiveReadError>
 where
     F: FnMut(ArchiveMember) -> Result<(), ArchiveReadError>,
+{
+    for_each_xml_member_until(archive_path, max_member_bytes, |member| {
+        visit(member)?;
+        Ok(ArchiveVisit::Continue)
+    })
+}
+
+pub fn for_each_xml_member_until<F>(
+    archive_path: &Path,
+    max_member_bytes: u64,
+    mut visit: F,
+) -> Result<usize, ArchiveReadError>
+where
+    F: FnMut(ArchiveMember) -> Result<ArchiveVisit, ArchiveReadError>,
 {
     let file = File::open(archive_path).map_err(|source| ArchiveReadError::Open {
         path: archive_path.to_owned(),
@@ -85,12 +105,15 @@ where
             archive_path,
             member_path.as_str(),
         )?;
-        visit(ArchiveMember {
+        let action = visit(ArchiveMember {
             archive_path: archive_path.to_owned(),
             member_path,
             bytes,
         })?;
         visited += 1;
+        if action == ArchiveVisit::Stop {
+            break;
+        }
     }
 
     Ok(visited)

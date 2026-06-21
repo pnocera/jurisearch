@@ -8,10 +8,29 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::archive::ArchiveMember;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceProvenance {
     pub archive_name: Option<String>,
     pub member_path: Option<String>,
+    pub payload_hash: Option<String>,
+}
+
+impl SourceProvenance {
+    pub fn from_archive_member(member: &ArchiveMember) -> Self {
+        let archive_name = member
+            .archive_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| Some(member.archive_path.display().to_string()));
+
+        Self {
+            archive_name,
+            member_path: Some(member.member_path.clone()),
+            payload_hash: Some(sha256_hex(&member.bytes)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +181,16 @@ pub fn parse_legi_xml(
     }
 }
 
+pub fn parse_legi_member(member: &ArchiveMember) -> Result<ParsedLegiXml, LegiParseError> {
+    let xml = std::str::from_utf8(&member.bytes).map_err(|error| LegiParseError::Xml {
+        message: format!(
+            "archive member `{}` is not valid UTF-8 XML: {error}",
+            member.member_path
+        ),
+    })?;
+    parse_legi_xml(xml, SourceProvenance::from_archive_member(member))
+}
+
 fn detect_root(xml: &str) -> Result<String, LegiParseError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
@@ -275,7 +304,7 @@ impl RawArticle {
         let id = required("article", "META_COMMUN/ID", self.id)?;
         validate_id("META_COMMUN/ID", &id, "LEGIARTI", "LEGIARTI[0-9]{12}")?;
         let nature = required("article", "META_COMMUN/NATURE", self.nature)?;
-        let etat = required("article", "META_ARTICLE/ETAT", self.etat)?;
+        let etat = optional_non_empty(self.etat);
         let num = required("article", "META_ARTICLE/NUM", self.num)?;
         let article_type = required("article", "META_ARTICLE/TYPE", self.article_type)?;
         let valid_from = normalize_required_date(
@@ -285,6 +314,9 @@ impl RawArticle {
         let valid_to_raw = required("article", "META_ARTICLE/DATE_FIN", self.date_fin)?;
         let valid_to = normalize_end_date("META_ARTICLE/DATE_FIN", &valid_to_raw)?;
         let body = required_non_empty("article", "BLOC_TEXTUEL/CONTENU", self.body)?;
+        let source_payload_hash = provenance
+            .payload_hash
+            .unwrap_or_else(|| sha256_hex(xml.as_bytes()));
         let title = format!("Article {num}");
         let citation_prefix = self
             .hierarchy_path
@@ -301,19 +333,20 @@ impl RawArticle {
             citation: Some(format!("{citation_prefix} {title}")),
             title: Some(title),
             body,
-            source_status: Some(etat.clone()),
+            source_status: etat.clone(),
             source_nature: Some(nature.clone()),
             source_article_type: Some(article_type.clone()),
             valid_from,
             valid_to,
             valid_to_raw: Some(valid_to_raw),
             source_url: self.url,
-            source_payload_hash: sha256_hex(xml.as_bytes()),
+            source_payload_hash,
             source_archive: provenance.archive_name,
             source_member_path: provenance.member_path,
             hierarchy_path: self.hierarchy_path,
             canonical_version: format!(
-                "legi_article:v1:nature={nature}:etat={etat}:type={article_type}"
+                "legi_article:v1:nature={nature}:etat={}:type={article_type}",
+                etat.as_deref().unwrap_or("absent")
             ),
         };
         document.validate().map_err(|error| LegiParseError::Xml {
@@ -342,6 +375,17 @@ fn required_non_empty(
     } else {
         Ok(value.trim().to_owned())
     }
+}
+
+fn optional_non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 fn validate_id(
@@ -508,8 +552,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use crate::archive::ArchiveMember;
+
     use super::{
-        CanonicalDocument, LegiParseError, ParsedLegiXml, SourceProvenance, parse_legi_xml,
+        CanonicalDocument, LegiParseError, ParsedLegiXml, SourceProvenance, parse_legi_member,
+        parse_legi_xml, sha256_hex,
     };
 
     #[test]
@@ -561,6 +610,43 @@ mod tests {
         assert_eq!(document.body, "Droit & obligations <ref> café inline suite");
         assert!(!document.body.contains("Droit  obligations"));
         assert!(!document.body.contains("inline\nsuite"));
+    }
+
+    #[test]
+    fn parse_member_uses_raw_archive_member_hash_and_provenance() {
+        let member = ArchiveMember {
+            archive_path: PathBuf::from("/tmp/Freemium_legi_global.tar.gz"),
+            member_path: "legi/articles/LEGIARTI000006419320.xml".to_owned(),
+            bytes: article_fixture().into_bytes(),
+        };
+
+        let document = match parse_legi_member(&member).unwrap() {
+            ParsedLegiXml::Article(document) => *document,
+            ParsedLegiXml::UnsupportedRoot { root } => {
+                panic!("expected article, got unsupported root {root}")
+            }
+        };
+
+        assert_eq!(
+            document.source_archive.as_deref(),
+            Some("Freemium_legi_global.tar.gz")
+        );
+        assert_eq!(
+            document.source_member_path.as_deref(),
+            Some("legi/articles/LEGIARTI000006419320.xml")
+        );
+        assert_eq!(document.source_payload_hash, sha256_hex(&member.bytes));
+    }
+
+    #[test]
+    fn accepts_articles_without_optional_status() {
+        let document =
+            parse_article_fixture(&article_fixture().replace("      <ETAT>VIGUEUR</ETAT>\n", ""))
+                .unwrap();
+
+        assert_eq!(document.source_status, None);
+        assert!(document.canonical_version.contains("etat=absent"));
+        assert!(document.validate().is_ok());
     }
 
     #[test]
@@ -637,6 +723,7 @@ mod tests {
         SourceProvenance {
             archive_name: Some("Freemium_legi_global.tar.gz".to_owned()),
             member_path: Some("legi/articles/LEGIARTI.xml".to_owned()),
+            payload_hash: None,
         }
     }
 

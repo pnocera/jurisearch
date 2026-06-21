@@ -338,9 +338,11 @@ Acceptance:
 
 Current status (2026-06-21):
 
-- Done: the first official LEGI parser slice is codified in `jurisearch-ingest::legi`. It parses `ARTICLE` XML into a `CanonicalDocument` record, validates typed `LEGIARTI` IDs and required fields, normalizes open-ended `DATE_FIN` sentinels to `valid_to = null` while preserving `valid_to_raw`, preserves status/nature/type, hierarchy context, source URL, archive/member provenance, and a SHA-256 source payload hash.
+- Done: the first official LEGI parser slice is codified in `jurisearch-ingest::legi`. It parses `ARTICLE` XML into a `CanonicalDocument` record, validates typed `LEGIARTI` IDs and required fields, normalizes open-ended `DATE_FIN` sentinels to `valid_to = null` while preserving `valid_to_raw`, preserves optional status plus nature/type, hierarchy context, source URL, archive/member provenance, and a SHA-256 source payload hash.
 - Done: structured parser errors now cover XML errors, missing required fields, invalid dates, invalid IDs, and unsupported roots. Unsupported roots return an explicit `UnsupportedRoot` classification instead of pretending to ingest.
-- Remaining before 0.5 is complete: parse a representative real LEGI XML subset from the archive reader, compute source payload hashes from raw archive-member bytes, confirm whether any non-predefined named entities appear, add `SECTION_TA`/`TEXTELR` or document why they are deferred from Phase 0, preserve publisher links into canonical graph-edge candidates, emit structural chunks with block-boundary handling, and re-verify required fields against the current official DTDs.
+- Done: representative real LEGI archive smoke is codified as an ignored integration test. Local run on 2026-06-21 used `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz`, parsed 25 real `ARTICLE` members after visiting 27 XML members, preserved raw archive-member SHA-256 hashes, classified `TEXTELR`/`TEXTE_VERSION` as unsupported roots, and hit no non-predefined named-entity failures in that sample.
+- Done: the real archive smoke and `DTD/jorf/jorf_article.dtd` showed `META_ARTICLE/ETAT` can be absent or empty for JORF-flavoured article members; status is now optional and canonical versions record `etat=absent` when the source carries no status value.
+- Remaining before 0.5 is complete: add `SECTION_TA`/`TEXTELR` or document why they are deferred from Phase 0, preserve publisher links into canonical graph-edge candidates, emit structural chunks with block-boundary handling, and re-verify required fields against the current official DTDs.
 
 ### 0.5a Archive Precedence and Streaming Module
 
