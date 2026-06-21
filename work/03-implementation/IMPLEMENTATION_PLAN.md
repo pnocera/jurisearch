@@ -1,8 +1,9 @@
 # `jurisearch` — Implementation Plan
 
 Date: 2026-06-20  
+Updated: 2026-06-21 for ingestion reuse findings in `work/notes/2026-06-21-ingestion-reuse-impact-on-implementation-plan.md`; W8/0.8 auth revised to PISTE API-Key (`KeyId`) per `work/03-implementation/00-setup/PREREQUISITES.md §6`
 Status: implementation planning document  
-Inputs: `work/02-conception/CONCEPTION.md`, `work/01-design/DESIGN.md`, `work/01-design/DECISIONS.md`, `work/reviews/2026-06-20-conception-readiness-review.md`, `work/reviews/2026-06-20-implementation-plan-review.md`  
+Inputs: `work/02-conception/CONCEPTION.md`, `work/01-design/DESIGN.md`, `work/01-design/DECISIONS.md`, `work/reviews/2026-06-20-conception-readiness-review.md`, `work/reviews/2026-06-20-implementation-plan-review.md`, `work/notes/2026-06-21-juridocs-ingestion-reuse.md`, `work/notes/2026-06-21-ingestion-reuse-impact-on-implementation-plan.md`
 Scope: execution plan only; no architecture re-decision
 
 ---
@@ -48,7 +49,7 @@ Deliverables:
 
 ### W2 — Evaluation Harness
 
-Owns all quality gates. This workstream starts in Phase 0, not after features. It also owns the process for legally credible gold labels.
+Owns the quality-gate harness, reporting, and legally credible retrieval evals. This workstream starts in Phase 0, not after features. Ingest-health gates are shared: W2 owns the harness/reporting, W3 owns schema/projection metrics, W4 owns ingestion replay inputs, and W7 owns operational runbooks.
 
 Deliverables:
 
@@ -62,6 +63,7 @@ Deliverables:
 - Ranking ablation framework: BM25-only, dense-only, hybrid, hybrid+authority, hybrid+rerank.
 - Held-out split to avoid tuning to the test set.
 - Curated vocabulary seed review process for `expand`.
+- Ingest-health gate harness and reports: latest completed run per source, failed-member/error thresholds, projection/embedding coverage, and replay-snapshot diffs.
 
 ### W3 — Embedded Storage Backend
 
@@ -71,7 +73,10 @@ Deliverables:
 
 - Managed local Postgres child process.
 - Pinned `pgvector` and `pg_search` extension installation.
-- Schema for documents, chunks, vectors, graph edges, manifests, eval traces.
+- Schema for documents, chunks, vectors, graph edges, manifests, eval traces, and operational ingest tables.
+- `ingest_run`, `ingest_member`, and `ingest_error` tables with recovery-compatibility fields (`parser_version`, `schema_version`, `source_payload_hash`, `code_version`) stored as metadata, not as member identity keys.
+- Projection/embedding coverage metrics used by ingest-health gates.
+- Chunk provenance fields: `source_payload_hash`, `source_fields`, `chunk_builder_version`, and embedding fingerprint.
 - Index/schema/extension migration mechanism.
 - Embedding-fingerprint migration mechanism: manifest version bump, full re-embed, and vector index rebuild.
 - Single-writer locking.
@@ -87,9 +92,15 @@ Deliverables:
 
 - Canonical JSONL/Parquet/Arrow schema.
 - Official LEGI/DILA XML parser path from day one.
+- Archive planning for official dumps: baseline/delta precedence, deterministic replay order, mixed-dataset rejection, and streaming `.tar.gz` member reads with configurable byte caps.
 - Rust schema validation.
 - Article-version temporal normalization.
+- LEGI temporal ID/field contract: canonical article IDs use `legi:<LEGIARTI>@<valid_from>`, `version_group` groups article versions, and raw source end-date/sentinel values are preserved as `valid_to_raw` when normalized to `valid_to = null`.
 - Structure-aware statutory chunking.
+- Versioned canonical text-assembly contracts per document kind.
+- Publisher link extraction from LEGI (`LIEN`, `LIEN_ART`, `LIEN_SECTION_TA`, `LIEN_TXT`, inline anchors) into canonical graph-edge records with `edge_source = publisher`.
+- Ingest run/member/error accounting, resume-after-interruption, explicit unsupported-root counters, and optional quarantine of failed payloads.
+- Derived-projection discipline: canonical/source writes complete before search/vector/graph projections, and query access is blocked or clearly marked until gates pass.
 - Canonical-record retention policy: retained build artifact or reproducibly regenerated, but always manifest-traceable.
 - Optional Python helpers only before canonical records.
 - Regression fixtures from derived datasets as comparison-only artifacts.
@@ -103,6 +114,7 @@ Deliverables:
 - French legal BM25 through `pg_search`.
 - Dense vector storage/search through `pgvector`.
 - Embeddings endpoint client and fingerprint checks.
+- Embedding input preflight against tokenizer or endpoint-specific token budget before document embeddings are written.
 - `bge-m3` as provisional benchmark-default until Phase 1 chooses the final embedding model.
 - Re-embedding and index migration coordination if the final embedding model differs from the provisional model.
 - Custom Rust RRF.
@@ -123,7 +135,7 @@ Deliverables:
 - `related`
 - `context`
 - `expand`
-- `status`
+- `status`, including ingest-health, latest-run, coverage, and recovery-warning fields.
 - `model fetch` / `setup`
 - `session --jsonl`
 - `batch --jsonl`
@@ -144,6 +156,7 @@ Deliverables:
 - `JURISEARCH_` environment override policy.
 - Secrets via env / OS keyring, never logs.
 - Local model cache rule: fail rather than silent download unless explicitly allowed.
+- Safe-mode ingest and rollback runbooks for projection/backfill/write-path failures.
 - Structured diagnostics/tracing to stderr only, never mixed into JSON stdout.
 
 ### W8 — Official API Client
@@ -152,13 +165,13 @@ Owns official API access used by `cite --online`, Judilibre ingestion, and incre
 
 Deliverables:
 
-- PISTE OAuth2 client-credentials flow.
-- Token lifecycle and refresh.
-- Sandbox vs production endpoint configuration.
+- **Dual PISTE Axway auth — both schemes required (tested 2026-06-21).** **API-Key (`KeyId` header)** for **Judilibre** (verified: prod `Juridia` → "JUDILIBRE 1.0.0", live `/search` → 200). **OAuth2 client-credentials (Bearer)** for **Légifrance**, which **rejects `KeyId`** (400-empty) but works via OAuth — **verified end-to-end** (token + `/search` → 200, prod + sandbox; `scope=openid`). See `work/03-implementation/00-setup/PREREQUISITES.md §6` for the recipe.
+- OAuth2 token lifecycle/refresh — applies to the Légifrance (`cite --online`) path only; Judilibre's keyed path needs none.
+- Per-app, per-API subscription + endpoint configuration. Subscriptions are per-app: prod `Juridia` → Judilibre + Légifrance; sandbox app → Légifrance only (Judilibre `/search` → 403 until subscribed).
 - Rate-limit and backoff policy.
 - Judilibre `/transactionalhistory` support for deltas.
 - Upstream error mapping to stable `upstream/API` error vocabulary and exit code `5`.
-- Secret handling integrated with W7.
+- Secret handling integrated with W7 — API key/secret read from env/keyring and sent as `KeyId`.
 
 ### Workstream ↔ Phase Traceability
 
@@ -171,18 +184,21 @@ This matrix is authoritative for ownership. Phase tasks may run in parallel only
 | 0.3 Embedded Postgres spike | W3 | 0.1 minimal workspace | Can run alongside 0.4/0.5. |
 | 0.4 Embeddings endpoint contract | W5/W7 | 0.1 schema stubs | Can run alongside 0.3/0.5. |
 | 0.5 Official LEGI XML ingestion spike | W4 | 0.1 schema stubs | Feeds 0.6. |
+| 0.5a Archive precedence + streaming module | W4 | 0.1 schema stubs | Ports proven baseline/delta ordering and streaming reader semantics before full-corpus work. |
 | 0.6 Baseline hybrid retrieval | W3/W5/W6 | 0.3 + 0.4 + 0.5 | Starts after backend, embeddings, and canonical subset exist. |
 | 0.7 Reranker feasibility spike | W5 | 0.1 + 0.2 metric harness | Can run after eval harness skeleton. |
 | 0.8 Official API client foundation | W8/W7 | 0.1 config/error stubs | Feeds 1.4, 2.1, and 2.5. |
-| 1.1 Full LEGI canonicalization | W4 | 0.5 | Can run alongside 1.2. |
+| 1.0 Ingest run/member/error accounting + resume/quarantine | W3/W4/W7/W2 | 0.3 + 0.5 + 0.5a | Gates 1.1; W2 supplies reporting hooks. |
+| 1.1 Full LEGI canonicalization | W4 | 1.0 | Can run alongside 1.2 once operational accounting exists. |
 | 1.2 Statutory chunking/context | W4/W6 | 1.1 partial records | Feeds 1.3 and 1.4. |
 | 1.3 Search pipeline hardening | W5/W6/W2 | 0.6 + 1.2 | Can iterate with eval data. |
 | 1.4 Statutory citation verification | W6/W8 | 1.1 + 0.8 | `--online` depends on W8. |
 | 1.5 JSONL session/batch | W1/W6 | 0.1 command registry | Can run alongside 1.1–1.4. |
 | 1.6 Model cache/configuration | W7/W5 | 0.4 | Feeds 1.7. |
-| 1.7 Phase 1 eval/migration gate | W2/W5/W3 | 1.1–1.6 + 0.7 | Final gate before Phase 1 claim. |
+| 1.7 Phase 1 eval/migration gate | W2/W5/W3 | 1.0 + 1.1–1.6 + 0.7 | Final gate before Phase 1 claim. |
 | 2.1 Judilibre ingestion | W4/W8 | 0.8 + Phase 1 schema/index | Feeds 2.3/2.4. |
 | 2.2 Justice administrative ingestion | W4 | Phase 1 schema/index | Can run alongside 2.1. |
+| 2.2a Optional DILA bulk jurisprudence adapter | W4 | 2.1 + 2.2 stable | Explicit scope decision; coverage fallback only, not a zone-accurate replacement. |
 | 2.3 Graph layer | W3/W5/W6 | 2.1 + 2.2 relationship records | Feeds `related`. |
 | 2.4 Decision search/fetch/context/cite | W5/W6/W8 | 2.1 + 2.2 + 2.3 | Feeds Phase 2 eval. |
 | 2.5 Incremental sync | W8/W4/W3 | 0.8 + source-specific ingestion | Can run after ingestion paths exist. |
@@ -218,18 +234,21 @@ Acceptance:
 Tasks:
 
 - Define eval fixture format for queries, expected IDs/citations, allowed alternates, and temporal expectations.
-- Define gold-label ownership: each legal retrieval fixture has a legal-domain author/reviewer, review status, and rationale for expected IDs/citations.
+- Define gold-label ownership and provenance: each legal retrieval fixture records `drafted_by` (may be an LLM), `verified_against` (official Légifrance/Judilibre API), a named legal-domain `reviewer` + review status + rationale, and a `tier` (`dev` | `release_gating`).
+- Implement the gold-label workflow: **LLM-draft → verify against the official source (not model memory) → named-human sign-off**; only human-signed, source-verified labels are `release_gating`. Add an LLM adversarial/coverage pass that flags human↔model and label↔retrieval disagreements for re-review.
 - Seed minimum fixture coverage: known-article lookup, conceptual statutory retrieval, historical `--as-of`, citation states, and one end-to-end `search → fetch → cite` loop.
 - Add CLI-contract tests for stdout/stderr discipline, exit codes, help completeness, and JSON schema validity.
 - Add citation-state fixture format for `exact`, `normalized`, `ambiguous`, `stale_version`, `not_found`, `source_unavailable`.
-- Add temporal fixtures for `valid_to = null`, 2016 reform boundaries, and same-day version changes.
+- Add temporal fixtures for `valid_to = null`, `valid_to_raw` sentinel preservation, 2016 reform boundaries, same-day version changes, and `MODIFIE` / `ABROGE` transitions.
 - Define review process for the curated vocabulary seed lexicon used by `expand`.
+- Define the ingest-health gate report envelope in JSON and Markdown, with placeholder categories for W3 projection metrics, W4 replay inputs, and W7 recovery/runbook checks.
 
 Acceptance:
 
 - Eval harness can run without a full corpus using fixtures.
-- Gold labels have author/reviewer metadata and cannot be marked release-gating until reviewed.
+- Gold labels carry provenance (`drafted_by`, `verified_against` the official API, named `reviewer`) and a `tier`; a label is `release_gating` only after **official-source verification AND human sign-off**. LLM-only labels are never release-gating; LLM-drafted + source-checked labels are allowed in the `dev` tier.
 - CI/local test command reports retrieval, citation, temporal, and CLI-contract categories separately.
+- Ingest-health reports can emit pending/empty categories before the full corpus exists, without treating unavailable W3/W4/W7 metrics as passed.
 - Failure output points to the broken contract or fixture.
 
 ### 0.3 Embedded Postgres Spike
@@ -288,7 +307,8 @@ Tasks:
 - Preserve raw source IDs, hierarchy, status, dates, links, and source provenance.
 - Emit canonical records.
 - Validate canonical records in Rust.
-- Normalize open-ended validity to `valid_to = null` while preserving raw source value.
+- Add typed parser errors for XML, missing required fields, invalid dates, invalid IDs, and unsupported roots.
+- Normalize open-ended validity to `valid_to = null` while preserving raw source value in `valid_to_raw`.
 - Generate structural article chunks.
 
 Acceptance:
@@ -296,6 +316,26 @@ Acceptance:
 - Canonical records index and search with no Python in the query/index path.
 - Derived datasets are not accepted as authoritative ingestion input.
 - Invalid canonical records fail validation with actionable diagnostics.
+- Unsupported XML roots are explicitly classified and counted; they are not reported as successful inserts.
+
+### 0.5a Archive Precedence and Streaming Module
+
+Scope qualifier: Phase 0 implements the planner/reader semantics and deterministic-ordering tests needed to de-risk full-corpus ingestion; production ingest orchestration remains Phase 1+ work.
+
+Tasks:
+
+- Implement `jurisearch-ingest::archive` with an official-source enum, starting with `legi`.
+- Parse official archive filenames and reject unrecognized or mixed-source plans.
+- Select the latest baseline archive and order deltas strictly after that baseline by timestamp.
+- Stream `.tar.gz` XML members through a bounded reader rather than materializing the archive.
+- Add configurable member byte caps and record the active cap in the ingest manifest.
+- Add deterministic ordering tests for baseline/delta selection, same-day deltas, mixed sources, and missing baseline errors.
+
+Acceptance:
+
+- A dry-run archive plan reports selected baseline, ordered deltas, skipped files, and source enum.
+- Streaming member reads preserve deterministic archive order and enforce byte caps.
+- Archive planning is recorded as a manifest artifact and can be reused by full ingest and `sync`.
 
 ### 0.6 Baseline Hybrid Retrieval
 
@@ -336,17 +376,17 @@ Acceptance:
 
 Tasks:
 
-- Implement PISTE OAuth2 client-credentials auth.
-- Implement token lifecycle and refresh.
-- Support sandbox and production endpoint configuration.
+- Implement PISTE Axway **API-Key (`KeyId` header)** auth for **Judilibre** — verified (`/search` → 200).
+- Implement **OAuth2 client-credentials (Bearer)** auth for **Légifrance** — verified end-to-end (`scope=openid` → Bearer → `/search` → 200, sandbox + prod). Token lifecycle/refresh applies to this path.
+- Support sandbox and production endpoint + credential configuration.
 - Implement rate-limit handling, backoff, and retry policy.
 - Map upstream/API failures to stable error objects and process exit code `5`.
 - Add Judilibre `/transactionalhistory` client support for Phase 2 deltas.
-- Integrate secret loading with W7 without logging credentials.
+- Integrate secret loading with W7 (env/keyring) without logging credentials.
 
 Acceptance:
 
-- Sandbox auth and a representative official API call work.
+- A representative **production** Judilibre call works (verified: `/search` → 200, `total` 109k+). Sandbox works once the sandbox app subscribes to Judilibre (currently "No subscribed APIs" → 403); until then dev/test uses prod or fixtures.
 - Rate-limit and upstream-error paths are testable without leaking secrets.
 - `cite --online`, Judilibre ingestion, and `sync --since` have a shared client rather than bespoke API code.
 
@@ -355,6 +395,7 @@ Phase 0 exit gate:
 - Backend stack passes acceptance or fallback path is formally triggered.
 - Eval harness exists and gates CLI contract, temporal correctness, citation states, and ranking metrics.
 - Official XML ingestion path produces valid searchable records.
+- Archive planning and streaming member reads are deterministic and manifest-recorded.
 - Embeddings fingerprint guard works.
 - Official API client foundation handles sandbox auth, rate limits, and upstream error mapping.
 - Reranker feasibility data is available for the Phase 1 adoption gate.
@@ -367,6 +408,26 @@ Phase 0 exit gate:
 
 Goal: ship best-in-class statutory search over official LEGI XML.
 
+### 1.0 Ingest Operational Accounting and Replay
+
+Tasks:
+
+- Add `ingest_run`, `ingest_member`, and `ingest_error` schema and repository APIs.
+- Track per-member archive name, member path, source entity, date anchor, status, structured error, and recovery-compatibility metadata (`parser_version`, `schema_version`, `source_payload_hash`, `code_version`).
+- Implement resume that skips only compatible `inserted` / `skipped` members and retries `failed` / unfinished `parsed` members.
+- Block blind recovery when parser/schema/code/source-payload compatibility differs; require targeted reprocess.
+- Add optional quarantine output for failed payloads with run/archive/member/error traceability.
+- Add ingest-health metrics used by W2 reporting: failed-member percentage, error classes, projection coverage, embedding coverage, and replay snapshot status.
+- Add safe-mode ingest flags that disable optimized write/backfill paths.
+
+Acceptance:
+
+- Interrupted ingest can resume without duplicate canonical records or skipped failed work.
+- Parser/schema/code changes cannot silently preserve stale bad rows.
+- Failed payloads can be traced to source archive/member and optionally quarantined.
+- `status --json` can report latest ingest health, coverage, and recovery warnings from these tables.
+- Query access is blocked or explicitly marked incomplete until required projections pass their gates.
+
 ### 1.1 Full LEGI Canonicalization
 
 Tasks:
@@ -375,6 +436,11 @@ Tasks:
 - Normalize hierarchy into `hierarchy_path`.
 - Build version groups across article versions.
 - Preserve statuses: `VIGUEUR`, `MODIFIE`, `ABROGE`, `ABROGE_DIFF`.
+- Implement the LEGI temporal identity contract: `legi:<LEGIARTI>@<valid_from>` for article-version IDs, stable `version_group`, and preserved `valid_to_raw`.
+- Extract publisher-provided LEGI links and inline references into canonical `GraphEdge` records with `edge_source = publisher`.
+- Define and version canonical text-assembly contracts per statutory document kind.
+- Use the `juridocs` DTD matrix as a checklist only; re-verify required fields against the current official DTDs before making parser validation authoritative.
+- Record per-record source payload hashes and source field lists.
 - Record source dataset version, build date, coverage, schema version, parser version, and source files.
 - Implement canonical-record retention policy: retain canonical records as a build artifact or document deterministic regeneration, with manifest traceability either way.
 
@@ -383,6 +449,9 @@ Acceptance:
 - `status` reports LEGI coverage, freshness, source versions, and manifest.
 - Rebuild from same inputs produces equivalent canonical records and index manifest.
 - Canonical-record retention/regeneration policy is explicit and tested.
+- Publisher graph edges rebuild from canonical records without re-ingesting LEGI XML.
+- Canonical text payload hashes are stable across equivalent rebuilds.
+- Temporal article IDs, `version_group`, and `valid_to_raw` are stable and covered by fixtures for current, modified, abrogated, sentinel, and same-day-version cases.
 
 ### 1.2 Statutory Chunking and Context
 
@@ -390,13 +459,20 @@ Tasks:
 
 - Chunk article versions structurally.
 - Split long articles only on legal substructure such as alinéas and enumerations.
+- Use French sentence splitting and legal-abbreviation repair only as a long-article sub-splitting aid, not as the primary chunk boundary model.
+- Preflight embedding inputs against a tokenizer or endpoint-specific token budget; keep conservative char-based guardrails as fallback only.
+- Record chunk-origin provenance: `structural`, `zone`, `heuristic`, or `hard_split` as applicable.
+- Record per-chunk `source_payload_hash`, `source_fields`, `chunk_builder_version`, and embedding fingerprint.
 - Repeat article header and hierarchy context where needed for embedding.
 - Implement `context` for ancestry and sibling articles with `--as-of`.
 
 Acceptance:
 
 - No chunk crosses legal hierarchy boundaries.
+- Embedding inputs cannot exceed the configured model/endpoint budget without an actionable ingest error.
+- Every chunk is traceable to its source payload, builder version, and chunk-origin provenance.
 - `context` reconstructs section neighbourhood at the requested date.
+- A structural-survival test proves `Code -> Livre -> Titre -> Chapitre -> Section -> Article` remains intact after ingestion, chunking, and context reconstruction.
 - Eval includes long-article and hierarchy-sensitive cases.
 
 ### 1.3 Search Pipeline Hardening
@@ -474,6 +550,7 @@ Acceptance:
 Tasks:
 
 - Complete LEGI eval set with realistic statutory research tasks.
+- Run ingest-health gates: latest completed LEGI run, failed-member/error thresholds, projection/embedding coverage, and replay snapshot diffs over canonical records, chunks, publisher graph edges, embeddings, and manifest fields.
 - Benchmark embedding candidates: `bge-m3`, French specialists, and at least one strong hosted multilingual model.
 - Decide final embedding model by post-fusion legal metrics.
 - If the winner differs from provisional `bge-m3`, run the explicit embedding migration: manifest fingerprint change, full-corpus re-embed, vector index rebuild, and schema/version bump.
@@ -484,6 +561,7 @@ Tasks:
 Acceptance:
 
 - Phase 1 may claim best-in-class LEGI/statutory search only if eval gates pass.
+- Phase 1 may be queried as complete only if ingest-health and projection gates pass.
 - The index fingerprint matches the selected final embedding model before release.
 - Any re-embedding migration is reproducible from canonical records and recorded in the manifest.
 - If reranker is not adopted, the eval result is recorded.
@@ -494,6 +572,8 @@ Acceptance:
 ## 5. Phase 2 — Jurisprudence and Full French Juridic Search
 
 Goal: add Judilibre and justice administrative so the product can claim best-in-class French juridic search across statutes and jurisprudence.
+
+Phase 2 scope note: DILA bulk jurisprudence XML (`cass`, `inca`, `capp`, `jade`; roots `TEXTE_JURI_JUDI` / `TEXTE_JURI_ADMIN`) is an explicit optional adapter, not a default equal source path. Judilibre and justice-administrative ingestion remain the required Phase 2 path. If DILA bulk is accepted, it is a flagged coverage fallback after 2.1 and 2.2 are stable; decisions without official publisher zones use heuristic/fallback chunking provenance and do not satisfy the official-zone chunking gate by themselves.
 
 ### 2.1 Judilibre Ingestion
 
@@ -527,11 +607,28 @@ Acceptance:
 - Administrative decisions are searchable and citeable.
 - Coverage and freshness are reported by `status`.
 
+### 2.2a Optional DILA Bulk Jurisprudence Adapter
+
+Tasks, only if explicitly accepted:
+
+- Parse DILA bulk jurisprudence archives for `cass`, `inca`, `capp`, and `jade`.
+- Support `TEXTE_JURI_JUDI` and `TEXTE_JURI_ADMIN` roots.
+- Preserve `JURITEXT`, `CETATEXT`, ECLI, court/source metadata, decision date, title, solution, text, summaries, links, archive/member provenance, and correction/replay semantics.
+- Map records into the same canonical decision schema used by Judilibre and justice-administrative ingestion.
+- Mark chunking provenance as heuristic/fallback when official zones are absent.
+
+Acceptance, only if accepted:
+
+- DILA bulk records are clearly distinguishable in `status`, manifest, and provenance.
+- DILA bulk records cannot be mistaken for zone-accurate Judilibre records.
+- Replay of the same bulk archives is deterministic and count/signature-stable.
+
 ### 2.3 Graph Layer
 
 Tasks:
 
-- Store graph edges in Postgres.
+- Store canonical graph edges in Postgres.
+- Materialize publisher-provided LEGI edges emitted during Phase 1 without re-ingesting LEGI XML.
 - Implement `related` over bounded 1–2 hop traversal.
 - Support `cites`, `interpreted-by`, `appeals`, `applies-article`, `rapprochements`.
 - Preserve `edge_source = publisher | inferred`.
@@ -565,6 +662,7 @@ Tasks:
 
 - Implement `sync --source legi|judilibre|ja --since`.
 - Use official deltas/transaction histories through the shared official API client where available.
+- Reuse archive precedence and replay-order rules for source families that sync from bulk/delta archives.
 - Update manifests and coverage.
 - Preserve deterministic rebuild path.
 
@@ -614,13 +712,16 @@ Acceptance:
 ### Unit Tests
 
 - ID parsing and normalization.
+- Archive filename parsing and baseline/delta ordering.
 - Temporal interval semantics.
 - Citation parsing and state classification.
 - Schema validation.
+- Parser error classification and DTD-required field validation.
 - RRF and authority scoring.
 - Vocabulary expansion.
 - Official API error mapping.
 - Embedding fingerprint migration decisions.
+- Chunk builder provenance and token-budget preflight.
 
 ### Integration Tests
 
@@ -628,6 +729,10 @@ Acceptance:
 - Extension installation and migrations.
 - Embedding-model re-embed and index migration.
 - Ingestion → canonical records → index → search.
+- Streaming archive reads with member byte caps.
+- Ingest run/member/error accounting, resume-after-interruption, quarantine, and recovery-compatibility gates.
+- Publisher link extraction into canonical graph edges.
+- Derived projection gating before query access.
 - Embeddings fingerprint mismatch.
 - Official API OAuth2 sandbox, token refresh, rate-limit/backoff, and upstream error handling.
 - JSONL session protocol.
@@ -641,6 +746,7 @@ Acceptance:
 - `help schema --json` schema validity.
 - Citation verification states.
 - Temporal historical queries.
+- Replay snapshots over canonical records, chunks, graph edges, embeddings, and manifest fields.
 - Legal gold labels with reviewer metadata.
 - Jurisprudence-by-facts expected decisions.
 
@@ -662,6 +768,7 @@ Acceptance:
 - Backend validated or fallback formally triggered.
 - Eval harness exists.
 - Official LEGI XML subset indexes and searches.
+- Archive precedence and streaming member reads are validated.
 - CLI contract skeleton works.
 - Embedding endpoint contract works.
 - Embedded Postgres spike hits < 500 ms warm JSON on the target spike corpus or records a hard failure.
@@ -672,6 +779,8 @@ Acceptance:
 ### Phase 1 Gate
 
 - Full LEGI statutory corpus path works from official XML.
+- Ingest run/member/error accounting, resume, and replay gates pass.
+- Projection/embedding coverage gates pass before the index is marked query-ready.
 - Temporal correctness eval passes.
 - Citation verification eval passes.
 - Hybrid retrieval beats BM25-only and dense-only baselines on legal tasks.
@@ -679,6 +788,7 @@ Acceptance:
 - Reranker adoption/deferral is backed by the feasibility spike and eval result.
 - CLI contract eval passes.
 - `status` accurately reports coverage and freshness.
+- `status` reports ingest health, latest completed source run, projection completeness, and recovery warnings.
 - Phase 1 claims only LEGI/statutory best-in-class.
 
 ### Phase 2 Gate
@@ -701,9 +811,15 @@ Acceptance:
 | Embedding endpoint model mismatch | High | Hard fingerprint/dimension checks; actionable errors. |
 | Embedding-model winner differs from provisional `bge-m3` | High | Budget full re-embed + manifest/index migration into Phase 1. |
 | Official XML edge cases are more complex than fixtures | High | Phase 0 parser spike on real representative XML; canonical validation. |
+| Full LEGI baseline volume/throughput exceeds the subset parser path | High | Streaming member reads, configurable member caps, and deterministic archive ordering from Phase 0. |
+| Resume/recovery after parser/schema changes preserves stale bad rows | High | Record parser/schema/code/source-payload compatibility metadata and require targeted reprocess on mismatch. |
 | Official API coverage-date drift or rate limits block verification/sync | High | Bulk dumps for full builds; APIs only for deltas/verification; backoff, sandbox/prod config, and freshness reporting. |
 | Eval set too small or generic | High | Build production-grade legal evals from Phase 0; legal-domain review, minimum category coverage, held-out split. |
 | Reranker local packaging lags | Medium | Keep HTTP rerank provider; quality gate decides adoption. |
+| Embedding/projection failure masks successful canonical ingestion | Medium | Separate canonical-ingestion states from embedding/index-projection states; retry/backfill derived work. |
+| Phase 1 ingestion omits publisher links and forces Phase 2 LEGI re-ingestion | Medium | Capture publisher links as canonical `GraphEdge` records during 1.1. |
+| Char-based chunk sizing overflows the embedding endpoint | Medium | Tokenizer or endpoint-specific preflight before embedding; conservative char guardrails only as fallback. |
+| DILA bulk jurisprudence is mistaken for zone-accurate Judilibre data | Medium | Keep DILA bulk as optional flagged fallback; Judilibre and justice-administrative sources remain primary for official zones. |
 | Python helper leaks into runtime | Medium | Rust test proves canonical records index/search without Python. |
 | Agent contract drifts from help/schema | Medium | Generate help/schema from the same registry where possible; eval completeness. |
 | Derived datasets accidentally influence production index | Medium | Validator rejects non-authoritative source labels for production indexes. |
@@ -718,13 +834,15 @@ Recommended first execution batch:
 1. Scaffold the Rust workspace and CLI command registry.
 2. Define schema/error/exit-code contracts and compile `help schema --json`.
 3. Build the eval harness shell with CLI-contract tests.
-4. Record phase/workstream owners and dependency gates in issue tracking from the matrix above.
-5. Spike embedded Postgres + `pgvector` + `pg_search` against the concrete packaging and latency checklist.
-6. Spike official LEGI XML → canonical record → Rust validation.
-7. Implement endpoint embeddings fingerprint checks with provisional `bge-m3` and migration metadata.
-8. Implement the shared official API client foundation.
-9. Run the reranker feasibility spike.
-10. Build the minimal LEGI subset search path: BM25 + dense + RRF + `search`/`fetch`.
+4. Add archive precedence/streaming module with deterministic ordering tests.
+5. Record phase/workstream owners and dependency gates in issue tracking from the matrix above.
+6. Spike embedded Postgres + `pgvector` + `pg_search` against the concrete packaging and latency checklist.
+7. Spike official LEGI XML → canonical record → Rust validation.
+8. Add ingest run/member/error accounting, resume, and quarantine before full-corpus ingestion.
+9. Implement endpoint embeddings fingerprint checks with provisional `bge-m3`, token preflight, and migration metadata.
+10. Implement the shared official API client foundation.
+11. Run the reranker feasibility spike.
+12. Build the minimal LEGI subset search path: BM25 + dense + RRF + `search`/`fetch`.
 
 This order keeps the hard validation gates ahead of feature work and prevents the implementation from drifting into a toy path.
 
@@ -740,3 +858,5 @@ This order keeps the hard validation gates ahead of feature work and prevents th
 - `work/reviews/2026-06-20-implementation-plan-review.md`
 - `work/00-foundation/search.md`
 - `work/00-foundation/assessment.md`
+- `work/notes/2026-06-21-juridocs-ingestion-reuse.md`
+- `work/notes/2026-06-21-ingestion-reuse-impact-on-implementation-plan.md`

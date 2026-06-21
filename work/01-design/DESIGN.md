@@ -574,7 +574,7 @@ index/
   api_key   = "no-key"                    # or via JURISEARCH_EMBED_API_KEY
   dimension = 1024                        # validated against the index; mismatch = hard error
   normalize = true
-  pooling   = "mean"                      # llama.cpp requires a pooling mode other than "none"
+  pooling   = "cls"                       # bge-m3 uses CLS pooling (mean degrades it); llama.cpp needs a mode other than "none"
   ```
   A local endpoint on `127.0.0.1` is still treated as a **"remote provider"** by the CLI (§11.2).
 - **Reranker provider (benchmark-gated, §7.2).** Pluggable like embeddings — local or HTTP, so the quality bar is never blocked by local inference packaging:

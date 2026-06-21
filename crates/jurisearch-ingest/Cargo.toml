@@ -1,0 +1,18 @@
+[package]
+name = "jurisearch-ingest"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2.workspace = true
+regex.workspace = true
+serde.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

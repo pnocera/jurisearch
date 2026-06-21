@@ -1,0 +1,18 @@
+# Secrets — never commit (DESIGN §14/§16: env / OS keyring only)
+secrets.txt
+secrets/
+*.secret
+*.secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Local index artifacts / embedded Postgres data dir
+index/
+*.sqlite
+*.parquet
+
+# Rust
+/target
+**/*.rs.bk
