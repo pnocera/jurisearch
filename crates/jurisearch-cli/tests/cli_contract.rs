@@ -277,8 +277,10 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
     assert_eq!(json["result"]["ingest_health"]["state"], "available");
 
     {
-        let postgres =
-            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        let postgres = jurisearch_storage::runtime::ManagedPostgres::start_durable(
+            pg_config.clone(),
+            root.path(),
+        )?;
         postgres.execute_sql(
             "UPDATE chunk_embeddings \
              SET embedding_fingerprint = 'stale-fingerprint' \
@@ -298,6 +300,30 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["index"]["query_ready"], false);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 0);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
+
+    {
+        let postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "UPDATE chunk_embeddings \
+             SET embedding_fingerprint = 'bge-m3:1024:normalize:true' \
+             WHERE chunk_id = 'chunk:1240:0';",
+        )?;
+    }
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["index"]["query_ready"], true);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 1);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
     Ok(())
 }

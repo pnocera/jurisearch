@@ -624,7 +624,7 @@ Tasks:
 - Run ingest-health gates: latest completed LEGI run, failed-member/error thresholds, projection/embedding coverage, and replay snapshot diffs over canonical records, chunks, publisher graph edges, embeddings, and manifest fields.
 - Benchmark embedding candidates: `bge-m3`, French specialists, and at least one strong hosted multilingual model.
 - Decide final embedding model by post-fusion legal metrics.
-- If the winner differs from provisional `bge-m3`, run the explicit embedding migration: manifest fingerprint change, full-corpus re-embed, vector index rebuild, and schema/version bump.
+- If the winner differs from provisional `bge-m3`, run the explicit embedding migration: manifest fingerprint change, chunk target fingerprint bump before re-embedding so coverage gates close until vectors are refreshed, full-corpus re-embed, vector index rebuild, and schema/version bump.
 - Evaluate reranker adoption before release.
 - Use the Phase 0 reranker feasibility spike to decide local vs HTTP vs disabled provider before the Phase 1 claim.
 - Measure token/tool-call budget for `search → fetch → cite`.

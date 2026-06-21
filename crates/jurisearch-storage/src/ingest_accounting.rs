@@ -608,6 +608,8 @@ fn load_projection_coverage<C: GenericClient>(
 fn load_embedding_coverage<C: GenericClient>(
     client: &mut C,
 ) -> Result<CoverageMetric, StorageError> {
+    // The non-NULL guards are redundant with SQL equality semantics, but make
+    // the freshness requirement explicit in the coverage query.
     let embedding = client
         .query_one(
             "SELECT count(*)::bigint, \

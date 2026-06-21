@@ -267,6 +267,14 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     let stale_embedding_readiness = load_ingest_readiness(&postgres)?;
     assert_eq!(stale_embedding_readiness.embedding_coverage.covered, 1);
     assert_eq!(stale_embedding_readiness.embedding_coverage.total, 2);
+    postgres.execute_sql(
+        "UPDATE chunk_embeddings \
+         SET embedding_fingerprint = 'bge-m3:1024:normalize:true' \
+         WHERE chunk_id = 'chunk:1240:1';",
+    )?;
+    let repaired_embedding_readiness = load_ingest_readiness(&postgres)?;
+    assert_eq!(repaired_embedding_readiness.embedding_coverage.covered, 2);
+    assert_eq!(repaired_embedding_readiness.embedding_coverage.total, 2);
     assert!(
         health
             .recovery_warnings
