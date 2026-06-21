@@ -858,8 +858,8 @@ impl RawArticle {
         validate_id("META_COMMUN/ID", &id, "LEGIARTI", "LEGIARTI[0-9]{12}")?;
         let nature = required("article", "META_COMMUN/NATURE", self.nature)?;
         let etat = optional_non_empty(self.etat);
-        let num = required("article", "META_ARTICLE/NUM", self.num)?;
-        let article_type = required("article", "META_ARTICLE/TYPE", self.article_type)?;
+        let num = optional_non_empty(self.num);
+        let article_type = optional_non_empty(self.article_type);
         let valid_from = normalize_required_date(
             "META_ARTICLE/DATE_DEBUT",
             &required("article", "META_ARTICLE/DATE_DEBUT", self.date_debut)?,
@@ -871,7 +871,10 @@ impl RawArticle {
             .payload_hash
             .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
         let publisher_links = self.publisher_links;
-        let title = format!("Article {num}");
+        let title = num
+            .as_deref()
+            .map(|num| format!("Article {num}"))
+            .unwrap_or_else(|| format!("Article {id}"));
         let citation_prefix = self
             .hierarchy_path
             .first()
@@ -889,7 +892,7 @@ impl RawArticle {
             body,
             source_status: etat.clone(),
             source_nature: Some(nature.clone()),
-            source_article_type: Some(article_type.clone()),
+            source_article_type: article_type.clone(),
             valid_from,
             valid_to,
             valid_to_raw: Some(valid_to_raw),
@@ -901,8 +904,9 @@ impl RawArticle {
             publisher_edges: Vec::new(),
             chunks: Vec::new(),
             canonical_version: format!(
-                "legi_article:v1:nature={nature}:etat={}:type={article_type}",
-                etat.as_deref().unwrap_or("absent")
+                "legi_article:v1:nature={nature}:etat={}:type={}",
+                etat.as_deref().unwrap_or("absent"),
+                article_type.as_deref().unwrap_or("absent")
             ),
         };
         document.publisher_edges = publisher_links
@@ -1750,6 +1754,27 @@ mod tests {
             assert!(document.canonical_version.contains("etat=absent"));
             assert!(document.validate().is_ok());
         }
+    }
+
+    #[test]
+    fn accepts_articles_without_num_or_type_as_absent_metadata() {
+        let xml = article_fixture()
+            .replace("      <NUM>1240</NUM>\n", "")
+            .replace("      <TYPE>AUTONOME</TYPE>\n", "");
+        let document = parse_article_fixture(&xml).unwrap();
+
+        assert_eq!(
+            document.title.as_deref(),
+            Some("Article LEGIARTI000006419320")
+        );
+        assert_eq!(document.source_article_type, None);
+        assert!(document.canonical_version.contains("type=absent"));
+        assert!(document.chunks.first().is_some_and(|chunk| {
+            chunk
+                .contextualized_body
+                .contains("Article LEGIARTI000006419320\n\n")
+        }));
+        assert!(document.validate().is_ok());
     }
 
     #[test]
