@@ -666,6 +666,29 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
   </META>
 </TEXTE_VERSION>"#,
             ),
+            (
+                "legi/textelr/LEGITEXT000006070721.xml",
+                br#"<TEXTELR>
+  <META>
+    <META_COMMUN>
+      <ID>LEGITEXT000006070721</ID>
+      <URL>/id/LEGITEXT000006070721</URL>
+      <NATURE>CODE</NATURE>
+    </META_COMMUN>
+    <META_SPEC>
+      <META_TEXTE_CHRONICLE>
+        <CID>LEGITEXT000006070721</CID>
+        <NUM>civil</NUM>
+        <DATE_PUBLI>1804-03-21</DATE_PUBLI>
+        <DATE_TEXTE>1804-03-21</DATE_TEXTE>
+      </META_TEXTE_CHRONICLE>
+    </META_SPEC>
+  </META>
+  <STRUCT>
+    <LIEN_TXT id="LEGITEXT000006070721" debut="1804-03-21"/>
+  </STRUCT>
+</TEXTELR>"#,
+            ),
             ("legi/articles/BROKEN.xml", b"<ARTICLE><META/></ARTICLE>"),
         ],
     )?;
@@ -680,7 +703,7 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
             "--run-id",
             "run-cli",
             "--limit-members",
-            "4",
+            "5",
             "--quarantine-dir",
         ])
         .arg(quarantine.path())
@@ -697,14 +720,15 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["run_id"], "run-cli");
     assert_eq!(json["run_status"], "failed");
     assert_eq!(json["safe_mode"], true);
-    assert_eq!(json["visited_members"], 4);
+    assert_eq!(json["visited_members"], 5);
     assert_eq!(json["inserted_documents"], 1);
-    assert_eq!(json["parsed_metadata_members"], 2);
-    assert_eq!(json["persisted_metadata_members"], 2);
-    assert_eq!(json["skipped_members"], 2);
+    assert_eq!(json["parsed_metadata_members"], 3);
+    assert_eq!(json["persisted_metadata_members"], 3);
+    assert_eq!(json["skipped_members"], 3);
     assert_eq!(json["failed_members"], 1);
     assert_eq!(json["quarantined_payloads"], 1);
     assert_eq!(json["parsed_metadata_roots"]["SECTION_TA"], 1);
+    assert_eq!(json["parsed_metadata_roots"]["TEXTELR"], 1);
     assert_eq!(json["parsed_metadata_roots"]["TEXTE_VERSION"], 1);
     assert!(json["unsupported_roots"].as_object().unwrap().is_empty());
 
@@ -722,7 +746,7 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
             "SELECT string_agg(status || ':' || member_count::text, ',' ORDER BY status) \
              FROM (SELECT status, count(*) AS member_count FROM ingest_member GROUP BY status) s;",
         )?,
-        "failed:1,inserted:1,skipped:2"
+        "failed:1,inserted:1,skipped:3"
     );
     assert_eq!(
         postgres.execute_sql(
@@ -743,7 +767,7 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
             "SELECT string_agg(root_kind || ':' || source_uid, ',' ORDER BY root_kind, source_uid) \
              FROM legi_metadata_roots;",
         )?,
-        "SECTION_TA:LEGISCTA000006089696,TEXTE_VERSION:LEGITEXT000049371154"
+        "SECTION_TA:LEGISCTA000006089696,TEXTELR:LEGITEXT000006070721,TEXTE_VERSION:LEGITEXT000049371154"
     );
     assert_eq!(
         postgres.execute_sql(
@@ -752,6 +776,14 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
              WHERE root_kind = 'TEXTE_VERSION';",
         )?,
         "absent"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->>'num' \
+             FROM legi_metadata_roots \
+             WHERE root_kind = 'TEXTELR';",
+        )?,
+        "civil"
     );
     assert_eq!(
         postgres.execute_sql(

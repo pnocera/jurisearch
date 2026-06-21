@@ -369,12 +369,7 @@ impl LegiMetadataRow {
                 })
             }
             LegiMetadataRoot::TextStruct(text_struct) => Ok(Self {
-                metadata_key: legi_metadata_key(
-                    "TEXTELR",
-                    Some(text_struct.text_id.as_str()),
-                    text_struct.source_date_debut_hint.as_deref(),
-                    text_struct.source_payload_hash.as_str(),
-                ),
+                metadata_key: legi_text_struct_metadata_key(text_struct),
                 root_kind: "TEXTELR",
                 source_uid: Some(text_struct.text_id.clone()),
                 parent_source_uid: None,
@@ -392,21 +387,36 @@ impl LegiMetadataRow {
     }
 }
 
+fn legi_text_struct_metadata_key(text_struct: &ParsedTextStruct) -> String {
+    let digest = source_payload_digest(text_struct.source_payload_hash.as_str());
+    match text_struct.source_date_debut_hint.as_deref() {
+        Some(date_anchor) => format!(
+            "legi:TEXTELR:{}@{date_anchor}:{digest}",
+            text_struct.text_id
+        ),
+        None => format!("legi:TEXTELR:{}:{digest}", text_struct.text_id),
+    }
+}
+
 fn legi_metadata_key(
     root_kind: &str,
     source_uid: Option<&str>,
     date_anchor: Option<&str>,
     source_payload_hash: &str,
 ) -> String {
-    let fallback = source_payload_hash
-        .strip_prefix("sha256:")
-        .unwrap_or(source_payload_hash);
+    let fallback = source_payload_digest(source_payload_hash);
     match (source_uid, date_anchor) {
         (Some(uid), Some(date_anchor)) => format!("legi:{root_kind}:{uid}@{date_anchor}"),
         (Some(uid), None) => format!("legi:{root_kind}:{uid}"),
         (None, Some(date_anchor)) => format!("legi:{root_kind}:payload:{fallback}@{date_anchor}"),
         (None, None) => format!("legi:{root_kind}:payload:{fallback}"),
     }
+}
+
+fn source_payload_digest(source_payload_hash: &str) -> &str {
+    source_payload_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(source_payload_hash)
 }
 
 fn insert_publisher_edge(

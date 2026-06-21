@@ -850,48 +850,47 @@ fn process_legi_archive_member(
             counters.inserted_chunks += report.chunks;
             counters.inserted_publisher_edges += report.publisher_edges;
         }
-        Ok(
-            parsed @ (ParsedLegiXml::TextVersion(_)
-            | ParsedLegiXml::SectionTa(_)
-            | ParsedLegiXml::TextStruct(_)),
-        ) => {
-            let root = parsed.root_name().to_owned();
-            let report = match &parsed {
-                ParsedLegiXml::TextVersion(text) => insert_legi_metadata_roots(
-                    postgres,
-                    &[LegiMetadataRoot::TextVersion(text.as_ref())],
-                )?,
-                ParsedLegiXml::SectionTa(section) => insert_legi_metadata_roots(
-                    postgres,
-                    &[LegiMetadataRoot::SectionTa(section.as_ref())],
-                )?,
-                ParsedLegiXml::TextStruct(text_struct) => insert_legi_metadata_roots(
-                    postgres,
-                    &[LegiMetadataRoot::TextStruct(text_struct.as_ref())],
-                )?,
-                ParsedLegiXml::Article(_) | ParsedLegiXml::UnsupportedRoot { .. } => {
-                    unreachable!("metadata branch only handles metadata roots")
-                }
-            };
-            *counters
-                .parsed_metadata_roots
-                .entry(root.clone())
-                .or_default() += 1;
-            record_legi_member(
+        Ok(ParsedLegiXml::TextVersion(text)) => {
+            process_legi_metadata_root(
                 postgres,
                 run_id,
-                LegiMemberRecordInput {
-                    archive_name,
-                    member_path: member.member_path.as_str(),
-                    source_entity: parsed.source_uid().or(Some(root.as_str())),
-                    date_anchor: parsed.date_anchor(),
-                    status: IngestMemberStatus::Skipped,
-                    compatibility,
-                },
+                archive_name,
+                member,
+                compatibility,
+                counters,
+                "TEXTE_VERSION",
+                Some(text.text_id.as_str()),
+                Some(text.valid_from.as_str()),
+                LegiMetadataRoot::TextVersion(text.as_ref()),
             )?;
-            counters.parsed_metadata_members += 1;
-            counters.persisted_metadata_members += report.metadata_roots;
-            counters.skipped_members += 1;
+        }
+        Ok(ParsedLegiXml::SectionTa(section)) => {
+            process_legi_metadata_root(
+                postgres,
+                run_id,
+                archive_name,
+                member,
+                compatibility,
+                counters,
+                "SECTION_TA",
+                section.section_id.as_deref(),
+                Some(section.valid_from.as_str()),
+                LegiMetadataRoot::SectionTa(section.as_ref()),
+            )?;
+        }
+        Ok(ParsedLegiXml::TextStruct(text_struct)) => {
+            process_legi_metadata_root(
+                postgres,
+                run_id,
+                archive_name,
+                member,
+                compatibility,
+                counters,
+                "TEXTELR",
+                Some(text_struct.text_id.as_str()),
+                text_struct.source_date_debut_hint.as_deref(),
+                LegiMetadataRoot::TextStruct(text_struct.as_ref()),
+            )?;
         }
         Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
             *counters.unsupported_roots.entry(root.clone()).or_default() += 1;
@@ -940,6 +939,42 @@ fn process_legi_archive_member(
             counters.failed_members += 1;
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_legi_metadata_root(
+    postgres: &ManagedPostgres,
+    run_id: &str,
+    archive_name: &str,
+    member: &ArchiveMember,
+    compatibility: IngestCompatibility<'_>,
+    counters: &mut LegiArchiveIngestCounters,
+    root: &str,
+    source_uid: Option<&str>,
+    date_anchor: Option<&str>,
+    metadata_root: LegiMetadataRoot<'_>,
+) -> Result<(), StorageError> {
+    let report = insert_legi_metadata_roots(postgres, &[metadata_root])?;
+    *counters
+        .parsed_metadata_roots
+        .entry(root.to_owned())
+        .or_default() += 1;
+    record_legi_member(
+        postgres,
+        run_id,
+        LegiMemberRecordInput {
+            archive_name,
+            member_path: member.member_path.as_str(),
+            source_entity: source_uid.or(Some(root)),
+            date_anchor,
+            status: IngestMemberStatus::Skipped,
+            compatibility,
+        },
+    )?;
+    counters.parsed_metadata_members += 1;
+    counters.persisted_metadata_members += report.metadata_roots;
+    counters.skipped_members += 1;
     Ok(())
 }
 

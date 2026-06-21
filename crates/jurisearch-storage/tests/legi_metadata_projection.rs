@@ -113,12 +113,20 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         postgres.execute_sql("SELECT count(*)::text FROM legi_metadata_roots;")?,
         "3"
     );
+    let text_struct_digest = text_struct
+        .source_payload_hash
+        .strip_prefix("sha256:")
+        .unwrap_or(text_struct.source_payload_hash.as_str());
     assert_eq!(
         postgres.execute_sql(
             "SELECT string_agg(metadata_key, ',' ORDER BY metadata_key) \
              FROM legi_metadata_roots;",
         )?,
-        "legi:SECTION_TA:LEGISCTA000006089696@1804-03-21,legi:TEXTELR:LEGITEXT000006070721@1804-03-21,legi:TEXTE_VERSION:LEGITEXT000049371154@1956-04-12"
+        format!(
+            "legi:SECTION_TA:LEGISCTA000006089696@1804-03-21,\
+             legi:TEXTELR:LEGITEXT000006070721@1804-03-21:{text_struct_digest},\
+             legi:TEXTE_VERSION:LEGITEXT000049371154@1956-04-12"
+        )
     );
     assert_eq!(
         postgres.execute_sql(
