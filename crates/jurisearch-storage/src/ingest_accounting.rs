@@ -1,3 +1,4 @@
+use postgres::GenericClient;
 use serde::Serialize;
 
 use crate::runtime::{ManagedPostgres, StorageError};
@@ -557,9 +558,34 @@ pub fn load_ingest_readiness(
     load_readiness_metrics(&mut client)
 }
 
+pub fn load_ingest_projection_coverage(
+    postgres: &ManagedPostgres,
+) -> Result<CoverageMetric, StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    load_projection_coverage(&mut client)
+}
+
+pub fn load_ingest_embedding_coverage(
+    postgres: &ManagedPostgres,
+) -> Result<CoverageMetric, StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    load_embedding_coverage(&mut client)
+}
+
 fn load_readiness_metrics(
     client: &mut postgres::Client,
 ) -> Result<IngestReadinessReport, StorageError> {
+    Ok(IngestReadinessReport {
+        projection_coverage: load_projection_coverage(client)?,
+        embedding_coverage: load_embedding_coverage(client)?,
+    })
+}
+
+fn load_projection_coverage<C: GenericClient>(
+    client: &mut C,
+) -> Result<CoverageMetric, StorageError> {
     let projection = client
         .query_one(
             "SELECT count(DISTINCT d.document_id)::bigint, \
@@ -572,6 +598,16 @@ fn load_readiness_metrics(
     let total_documents: i64 = projection.get(0);
     let projected_documents: i64 = projection.get(1);
 
+    Ok(CoverageMetric {
+        covered: projected_documents,
+        total: total_documents,
+        percentage: percentage(projected_documents, total_documents),
+    })
+}
+
+fn load_embedding_coverage<C: GenericClient>(
+    client: &mut C,
+) -> Result<CoverageMetric, StorageError> {
     let embedding = client
         .query_one(
             "SELECT count(*)::bigint, \
@@ -584,25 +620,22 @@ fn load_readiness_metrics(
     let total_chunks: i64 = embedding.get(0);
     let embedded_chunks: i64 = embedding.get(1);
 
-    Ok(IngestReadinessReport {
-        projection_coverage: CoverageMetric {
-            covered: projected_documents,
-            total: total_documents,
-            percentage: percentage(projected_documents, total_documents),
-        },
-        embedding_coverage: CoverageMetric {
-            covered: embedded_chunks,
-            total: total_chunks,
-            percentage: percentage(embedded_chunks, total_chunks),
-        },
+    Ok(CoverageMetric {
+        covered: embedded_chunks,
+        total: total_chunks,
+        percentage: percentage(embedded_chunks, total_chunks),
     })
 }
 
 fn load_replay_snapshot(
     client: &mut postgres::Client,
 ) -> Result<ReplaySnapshotReport, StorageError> {
+    let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    transaction
+        .batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;")
+        .map_err(StorageError::PostgresClient)?;
     let documents = snapshot_component(
-        client,
+        &mut transaction,
         "documents",
         "SELECT document_id AS row_key, \
                 md5(concat_ws(chr(31), document_id, source, kind, source_uid, \
@@ -613,7 +646,7 @@ fn load_replay_snapshot(
          FROM documents",
     )?;
     let chunks = snapshot_component(
-        client,
+        &mut transaction,
         "chunks",
         "SELECT chunk_id AS row_key, \
                 md5(concat_ws(chr(31), chunk_id, document_id, chunk_index::text, body, \
@@ -622,7 +655,7 @@ fn load_replay_snapshot(
          FROM chunks",
     )?;
     let publisher_edges = snapshot_component(
-        client,
+        &mut transaction,
         "publisher_edges",
         "SELECT edge_id AS row_key, \
                 md5(concat_ws(chr(31), edge_id, coalesce(from_document_id, ''), \
@@ -631,7 +664,7 @@ fn load_replay_snapshot(
          WHERE edge_source = 'publisher'",
     )?;
     let embeddings = snapshot_component(
-        client,
+        &mut transaction,
         "chunk_embeddings",
         "SELECT chunk_id AS row_key, \
                 md5(concat_ws(chr(31), chunk_id, embedding_fingerprint, embedding::text, \
@@ -639,7 +672,7 @@ fn load_replay_snapshot(
          FROM chunk_embeddings",
     )?;
     let manifests = snapshot_component(
-        client,
+        &mut transaction,
         "index_manifest",
         "SELECT key AS row_key, \
                 md5(concat_ws(chr(31), key, value::text)) AS row_hash \
@@ -658,10 +691,11 @@ fn load_replay_snapshot(
         manifests.count,
         manifests.signature
     );
-    let signature = client
+    let signature = transaction
         .query_one("SELECT md5($1);", &[&signature_input])
         .map_err(StorageError::PostgresClient)?
         .get(0);
+    transaction.commit().map_err(StorageError::PostgresClient)?;
 
     Ok(ReplaySnapshotReport {
         documents,
@@ -673,8 +707,8 @@ fn load_replay_snapshot(
     })
 }
 
-fn snapshot_component(
-    client: &mut postgres::Client,
+fn snapshot_component<C: GenericClient>(
+    client: &mut C,
     component_name: &str,
     rows_sql: &str,
 ) -> Result<ReplaySnapshotComponent, StorageError> {

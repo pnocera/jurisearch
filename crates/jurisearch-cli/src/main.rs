@@ -30,11 +30,11 @@ use jurisearch_storage::{
         load_chunk_embedding_inputs,
     },
     ingest_accounting::{
-        IngestCompatibility, IngestErrorInput, IngestHealthReport, IngestMemberInput,
-        IngestMemberStatus, IngestReadinessReport, IngestResumeAction, IngestRunInput,
-        IngestRunStatus, finish_ingest_run, ingest_resume_decision, load_ingest_health,
-        load_ingest_readiness, record_ingest_error, record_ingest_member, start_ingest_run,
-        update_ingest_member_status,
+        CoverageMetric, IngestCompatibility, IngestErrorInput, IngestHealthReport,
+        IngestMemberInput, IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
+        finish_ingest_run, ingest_resume_decision, load_ingest_embedding_coverage,
+        load_ingest_health, load_ingest_projection_coverage, record_ingest_error,
+        record_ingest_member, start_ingest_run, update_ingest_member_status,
     },
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_legi_documents},
     retrieval::{
@@ -1409,28 +1409,32 @@ fn ensure_query_readiness(
     postgres: &ManagedPostgres,
     gate: QueryReadinessGate,
 ) -> Result<(), ErrorObject> {
-    let report = load_ingest_readiness(postgres).map_err(storage_error_object)?;
-    let projection_ready = coverage_complete(
-        report.projection_coverage.covered,
-        report.projection_coverage.total,
-    );
+    let projection_coverage =
+        load_ingest_projection_coverage(postgres).map_err(storage_error_object)?;
+    let projection_ready =
+        coverage_complete(projection_coverage.covered, projection_coverage.total);
     if !projection_ready {
         return Err(index_not_query_ready(
             gate,
             "projection coverage gate is incomplete",
-            &report,
+            &projection_coverage,
+            None,
         ));
     }
 
-    let embedding_ready = coverage_complete(
-        report.embedding_coverage.covered,
-        report.embedding_coverage.total,
-    );
+    if matches!(gate, QueryReadinessGate::Fetch) {
+        return Ok(());
+    }
+
+    let embedding_coverage =
+        load_ingest_embedding_coverage(postgres).map_err(storage_error_object)?;
+    let embedding_ready = coverage_complete(embedding_coverage.covered, embedding_coverage.total);
     if matches!(gate, QueryReadinessGate::Search) && !embedding_ready {
         return Err(index_not_query_ready(
             gate,
             "embedding coverage gate is incomplete",
-            &report,
+            &projection_coverage,
+            Some(&embedding_coverage),
         ));
     }
 
@@ -1440,17 +1444,19 @@ fn ensure_query_readiness(
 fn index_not_query_ready(
     gate: QueryReadinessGate,
     reason: &str,
-    report: &IngestReadinessReport,
+    projection_coverage: &CoverageMetric,
+    embedding_coverage: Option<&CoverageMetric>,
 ) -> ErrorObject {
+    let embedding_coverage = embedding_coverage
+        .map(|metric| format!("{}/{}", metric.covered, metric.total))
+        .unwrap_or_else(|| "not checked".to_owned());
     ErrorObject {
         code: ErrorCode::IndexUnavailable,
         message: format!(
-            "index is not query-ready for `{}`: {reason}; projection coverage {}/{}, embedding coverage {}/{}",
+            "index is not query-ready for `{}`: {reason}; projection coverage {}/{}, embedding coverage {embedding_coverage}",
             gate.command(),
-            report.projection_coverage.covered,
-            report.projection_coverage.total,
-            report.embedding_coverage.covered,
-            report.embedding_coverage.total
+            projection_coverage.covered,
+            projection_coverage.total,
         ),
         suggestions: vec![
             "Run `jurisearch status` to inspect ingest health and coverage gates.".into(),

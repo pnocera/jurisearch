@@ -5,8 +5,9 @@ use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestErrorInput, IngestMemberInput, IngestMemberStatus,
         IngestResumeAction, IngestRunInput, IngestRunStatus, finish_ingest_run,
-        ingest_resume_decision, load_ingest_health, load_ingest_readiness, record_ingest_error,
-        record_ingest_member, start_ingest_run, update_ingest_member_status,
+        ingest_resume_decision, load_ingest_embedding_coverage, load_ingest_health,
+        load_ingest_readiness, record_ingest_error, record_ingest_member, start_ingest_run,
+        update_ingest_member_status,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -231,6 +232,10 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     );
     assert_eq!(
         readiness.embedding_coverage.covered,
+        health.embedding_coverage.covered
+    );
+    assert_eq!(
+        load_ingest_embedding_coverage(&postgres)?.covered,
         health.embedding_coverage.covered
     );
     assert_eq!(health.replay_snapshot_status, "available");
