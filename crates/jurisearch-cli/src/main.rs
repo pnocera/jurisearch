@@ -498,8 +498,11 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
         },
     )
     .map_err(storage_error_object)?;
-    let response: Value = serde_json::from_str(&response)
+    let mut response: Value = serde_json::from_str(&response)
         .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let expansion = expand_query(&args.query);
+    response["expansion_seed_version"] = json!(expansion.seed_version);
+    response["expanded_terms"] = json!(expansion.expanded_terms);
     if response["candidates"]
         .as_array()
         .is_some_and(|candidates| candidates.is_empty())

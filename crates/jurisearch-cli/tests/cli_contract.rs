@@ -60,6 +60,14 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "hybrid"
     );
     assert_eq!(
+        json["schemas"]["SearchResponse"]["properties"]["expanded_terms"]["type"],
+        "array"
+    );
+    assert_eq!(
+        json["schemas"]["SearchResponse"]["properties"]["expansion_seed_version"]["type"],
+        "string"
+    );
+    assert_eq!(
         json["schemas"]["ExpandResponse"]["properties"]["expanded_terms"]["type"],
         "array"
     );
@@ -531,6 +539,15 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
         "legi:LEGIARTI000006419320@1804-02-21"
     );
     assert!(json["candidates"][0]["scores"]["dense_rank"].is_null());
+    assert_eq!(json["expansion_seed_version"], "legal-vocabulary-seed:v1");
+    assert!(
+        json["expanded_terms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|term| term["term"] == "article 1240"
+                && term["source_seed_id"] == "civil-liability-fault-damage")
+    );
     Ok(())
 }
 

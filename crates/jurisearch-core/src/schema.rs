@@ -89,6 +89,26 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "query": { "type": "string" },
                     "retrieval_mode": { "enum": ["hybrid", "bm25", "dense"] },
+                    "expansion_seed_version": { "type": "string" },
+                    "expanded_terms": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "term": { "type": "string" },
+                                "matched_terms": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "source_seed_id": { "type": "string" },
+                                "source_label": { "type": "string" },
+                                "source_citation": { "type": "string" },
+                                "review_status": { "type": "string" },
+                                "reviewer": { "type": "string" },
+                                "rationale": { "type": "string" }
+                            }
+                        }
+                    },
                     "as_of": { "type": "string", "format": "date" },
                     "limit": { "type": "integer" },
                     "candidates": {
