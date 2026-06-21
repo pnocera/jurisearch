@@ -1050,6 +1050,28 @@ fn ingest_legi_archives_skips_no_text_articles_without_failing_run()
     assert!(json["unsupported_roots"].as_object().unwrap().is_empty());
     assert!(!quarantine.path().join("run-no-text").exists());
 
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-no-text-resume"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["skipped_members"], 1);
+    assert_eq!(json["skipped_compatible_members"], 1);
+    assert_eq!(json["skipped_no_text_articles"], 0);
+    assert_eq!(json["failed_members"], 0);
+
     let postgres = ManagedPostgres::start_durable(pg_config, index.path())?;
     assert_eq!(
         postgres.execute_sql("SELECT count(*)::text FROM documents;")?,
@@ -1070,6 +1092,84 @@ fn ingest_legi_archives_skips_no_text_articles_without_failing_run()
              WHERE run_id = 'run-no-text';",
         )?,
         "0"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn ingest_legi_archives_keeps_non_body_article_errors_failed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI LEGI invalid article failure")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-invalid-article.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-invalid-article-archives.")
+        .tempdir()?;
+    let quarantine = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-invalid-article-quarantine.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_legi_global_20250101-000000.tar.gz");
+    let invalid_article = article_fixture().replace(
+        "<DATE_DEBUT>1804-02-21</DATE_DEBUT>",
+        "<DATE_DEBUT>not-a-date</DATE_DEBUT>",
+    );
+    write_tar_gz(
+        archive_path.as_path(),
+        &[(
+            "legi/articles/LEGIARTI000006419320.xml",
+            invalid_article.as_bytes(),
+        )],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-invalid-article", "--quarantine-dir"])
+        .arg(quarantine.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "failed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["skipped_members"], 0);
+    assert_eq!(json["skipped_no_text_articles"], 0);
+    assert_eq!(json["failed_members"], 1);
+    assert_eq!(json["quarantined_payloads"], 1);
+
+    let quarantine_entries = fs::read_dir(quarantine.path().join("run-invalid-article"))?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(quarantine_entries.len(), 1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config, index.path())?;
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT status \
+             FROM ingest_member \
+             WHERE run_id = 'run-invalid-article';",
+        )?,
+        "failed"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT error_code \
+             FROM ingest_error \
+             WHERE run_id = 'run-invalid-article';",
+        )?,
+        "validation_invalid_date"
     );
 
     Ok(())

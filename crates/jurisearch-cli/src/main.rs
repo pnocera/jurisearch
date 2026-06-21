@@ -1259,6 +1259,8 @@ fn is_no_text_article_error(error: &LegiParseError) -> bool {
 }
 
 fn legi_article_id_from_member_path(member_path: &str) -> Option<&str> {
+    // Best-effort provenance for skipped ARTICLE members: official archive paths
+    // end with the LEGIARTI source UID filename.
     let start = member_path.find("LEGIARTI")?;
     let end = start + "LEGIARTI".len() + 12;
     let candidate = member_path.get(start..end)?;
