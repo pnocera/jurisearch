@@ -385,7 +385,8 @@ Tasks:
 - Done: ignored live CLI search smoke creates a tiny durable index with a live bge-m3 embedding, invokes `jurisearch search` against `JURISEARCH_INDEX_DIR`, and verifies the expected document plus dense rank.
 - Done: `help schema --json` now advertises the implemented `SearchResponse.candidates` and `FetchResponse.documents` shapes instead of the old stub `results` shape.
 - Remaining: replace deterministic storage test vectors with live embedding endpoint calls in a reusable ingestion/index-build path once that path owns endpoint configuration.
-- Remaining: add full dense-index rebuild/re-embed command mechanics, ANN index creation, and manifest updates beyond the current reprojectable storage primitives.
+- Done: storage dense rebuild finalization verifies full chunk embedding coverage for the expected fingerprint/model/dimension, rebuilds the ivfflat ANN index, and writes the embedding manifest with coverage and index parameters.
+- Remaining: add the higher-level embedding loop that calls the configured endpoint over canonical chunks and feeds the dense rebuild finalizer.
 - Remaining: decide whether live embeddings read `chunks.body` or chunk `contextualized_body` recovered from `documents.canonical_json` until chunk provenance gets first-class storage columns.
 
 Acceptance:
@@ -393,7 +394,7 @@ Acceptance:
 - Met in storage layer: `search` returns compact IDs, citations, snippets, source URLs, validity blocks, scores, and cursors.
 - Met in storage and CLI layer: `fetch` returns full text for selected IDs.
 - Met in storage layer: historical `--as-of` queries do not leak future LEGI versions in the real-archive smoke.
-- Partially met: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance, and CLI live search is smoke-tested; full rebuild orchestration remains pending.
+- Partially met: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance, CLI live search is smoke-tested, and storage can finalize/rebuild the ANN index and manifest after a full re-embed; endpoint-driven embedding orchestration remains pending.
 
 ### 0.7 Reranker Feasibility Spike
 

@@ -1,3 +1,4 @@
+pub mod dense;
 pub mod migrations;
 pub mod projection;
 pub mod retrieval;

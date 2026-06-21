@@ -623,6 +623,8 @@ pub enum StorageError {
     MigrationPlan { message: String },
     #[error("canonical projection failed: {message}")]
     Projection { message: String },
+    #[error("dense rebuild failed: {message}")]
+    DenseRebuild { message: String },
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("postgres client error: {0}")]
