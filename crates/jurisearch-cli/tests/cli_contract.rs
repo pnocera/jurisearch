@@ -138,6 +138,11 @@ fn help_schema_json_is_valid_and_lists_commands() {
             && command["status"] == "implemented"
             && command["response_schema"] == "SetupResponse"
     }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|command| {
+        command["name"] == "eval phase1"
+            && command["status"] == "implemented"
+            && command["response_schema"] == "EvalPhase1Response"
+    }));
     assert_eq!(
         json["schemas"]["CiteRequest"]["properties"]["as_of"]["format"],
         "date"
@@ -161,6 +166,14 @@ fn help_schema_json_is_valid_and_lists_commands() {
     assert_eq!(
         json["schemas"]["EvalFixtureSummary"]["properties"]["release_candidates"]["type"],
         "integer"
+    );
+    assert_eq!(
+        json["schemas"]["EvalPhase1Request"]["properties"]["mode"]["default"],
+        "hybrid"
+    );
+    assert_eq!(
+        json["schemas"]["EvalPhase1Response"]["properties"]["eval_fixtures"]["$ref"],
+        "#/schemas/EvalFixtureSummary"
     );
     assert_eq!(
         json["schemas"]["ModelFetchRequest"]["properties"]["allow_download"]["default"],
@@ -308,6 +321,74 @@ fn status_returns_json_without_index() {
             .any(|check| check["name"] == "release_gating_eval_fixtures"
                 && check["status"] == "pending")
     );
+}
+
+#[test]
+fn eval_phase1_list_reports_release_candidates_without_index() {
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .args(["eval", "phase1", "--list"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["schema_version"], "1");
+    assert_eq!(json["command"], "eval phase1");
+    assert_eq!(json["action"], "list");
+    assert_eq!(json["include_dev"], false);
+    assert_eq!(json["fixture_count"], 4);
+    assert_eq!(json["eval_fixtures"]["total"], 6);
+    assert_eq!(json["eval_fixtures"]["release_candidates"], 4);
+    assert_eq!(json["eval_fixtures"]["release_gating"], 0);
+    assert_eq!(json["fixtures"].as_array().unwrap().len(), 4);
+    assert!(json["fixtures"].as_array().unwrap().iter().all(|fixture| {
+        fixture["tier"] == "release_gating"
+            && fixture["review_status"] == "official_source_checked"
+            && fixture["reviewer"].is_null()
+            && fixture["as_of"].is_string()
+    }));
+}
+
+#[test]
+fn session_eval_phase1_list_preserves_jsonl_envelope() {
+    let input = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id": "eval-list",
+            "command": "eval phase1",
+            "args": { "list": true, "include_dev": true }
+        }),
+        serde_json::json!({"id": "done", "command": "exit"})
+    );
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let values = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["id"], "eval-list");
+    assert_eq!(values[0]["ok"], true);
+    assert_eq!(values[0]["result"]["action"], "list");
+    assert_eq!(values[0]["result"]["include_dev"], true);
+    assert_eq!(values[0]["result"]["fixture_count"], 6);
+    assert_eq!(values[1]["result"]["bye"], true);
 }
 
 #[test]
@@ -1461,6 +1542,48 @@ fn retrieval_command_without_index_is_json_and_uses_exit_code_3() {
         .unwrap()
         .env_remove("JURISEARCH_INDEX_DIR")
         .args(["fetch", "legi:LEGIARTI000000000000@2020-01-01"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "index_unavailable");
+}
+
+#[test]
+fn eval_phase1_rejects_zero_top_k_before_opening_index() {
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .args(["eval", "phase1", "--top-k", "0"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("eval phase1 --top-k")
+    );
+}
+
+#[test]
+fn eval_phase1_without_index_is_json_and_uses_exit_code_3() {
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .args(["eval", "phase1", "--mode", "bm25"])
         .assert()
         .code(3)
         .stderr(predicate::str::is_empty())

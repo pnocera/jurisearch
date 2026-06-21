@@ -309,6 +309,60 @@ pub fn compiled_schema() -> Value {
                     }
                 }
             },
+            "EvalPhase1Request": {
+                "properties": {
+                    "list": { "type": "boolean", "default": false },
+                    "include_dev": { "type": "boolean", "default": false },
+                    "mode": { "enum": ["hybrid", "bm25", "dense"], "default": "hybrid" },
+                    "top_k": { "type": "integer", "minimum": 1, "default": 10 }
+                }
+            },
+            "EvalPhase1Response": {
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "command": { "const": "eval phase1" },
+                    "action": { "enum": ["list", "run"] },
+                    "include_dev": { "type": "boolean" },
+                    "fixture_count": { "type": "integer" },
+                    "retrieval_mode": { "enum": ["hybrid", "bm25", "dense"] },
+                    "top_k": { "type": "integer" },
+                    "eval_fixtures": { "$ref": "#/schemas/EvalFixtureSummary" },
+                    "summary": {
+                        "type": "object",
+                        "properties": {
+                            "fixture_count": { "type": "integer" },
+                            "passed": { "type": "integer" },
+                            "failed": { "type": "integer" },
+                            "all_passed": { "type": "boolean" }
+                        }
+                    },
+                    "fixtures": { "type": "array", "items": { "type": "object" } },
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "tier": { "enum": ["dev", "release_gating"] },
+                                "category": { "type": "string" },
+                                "query": { "type": "string" },
+                                "as_of": { "type": ["string", "null"], "format": "date" },
+                                "expected_ids": { "type": "array", "items": { "type": "string" } },
+                                "allowed_alternates": { "type": "array", "items": { "type": "string" } },
+                                "status": { "enum": ["pass", "pass_allowed_alternate", "fail"] },
+                                "passed": { "type": "boolean" },
+                                "best_expected_rank": { "type": ["integer", "null"] },
+                                "best_allowed_alternate_rank": { "type": ["integer", "null"] },
+                                "matched_document_id": { "type": ["string", "null"] },
+                                "candidate_count": { "type": "integer" },
+                                "top_document_ids": { "type": "array", "items": { "type": "string" } },
+                                "search": { "type": "object" },
+                                "error": { "$ref": "#/error_object" }
+                            }
+                        }
+                    }
+                }
+            },
             "StatusResponse": {
                 "properties": {
                     "schema_version": { "type": "string" },

@@ -14,7 +14,10 @@ use jurisearch_core::{
     SCHEMA_VERSION,
     contract::{CitationState, LegalKind, OutputFormat, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
-    eval::phase1_eval_fixture_summary,
+    eval::{
+        LegalRetrievalFixture, phase1_eval_fixture_summary, phase1_eval_fixtures,
+        phase1_release_candidate_fixtures,
+    },
     expand::expand_query,
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
@@ -101,6 +104,8 @@ enum Command {
     Batch(JsonlArgs),
     /// Official-source ingestion helpers.
     Ingest(IngestCommand),
+    /// Run built-in retrieval evaluation fixtures.
+    Eval(EvalCommand),
     /// Synchronize official sources.
     Sync(SyncArgs),
     /// Compiled agent help and schemas.
@@ -193,6 +198,20 @@ struct SessionStatusArgs {
     index_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionEvalPhase1Args {
+    #[serde(default)]
+    list: bool,
+    #[serde(default)]
+    include_dev: bool,
+    #[serde(default = "default_search_mode")]
+    mode: CliSearchMode,
+    #[serde(default = "default_top_k")]
+    top_k: u32,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Args)]
 struct CiteArgs {
     cite: String,
@@ -245,6 +264,34 @@ struct SyncArgs {
 struct ModelCommand {
     #[command(subcommand)]
     command: Option<ModelSubcommand>,
+}
+
+#[derive(Debug, Args)]
+struct EvalCommand {
+    #[command(subcommand)]
+    command: Option<EvalSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum EvalSubcommand {
+    /// Run or list Phase 1 LEGI statutory-search fixtures.
+    Phase1(EvalPhase1Args),
+}
+
+#[derive(Debug, Clone, Args)]
+struct EvalPhase1Args {
+    /// List selected fixtures without opening an index.
+    #[arg(long)]
+    list: bool,
+    /// Include development fixtures as well as release candidates.
+    #[arg(long)]
+    include_dev: bool,
+    /// Retrieval mode used when executing fixtures.
+    #[arg(long, default_value = "hybrid")]
+    mode: CliSearchMode,
+    /// Number of candidates to inspect per fixture.
+    #[arg(long, default_value_t = 10)]
+    top_k: u32,
 }
 
 #[derive(Debug, Subcommand)]
@@ -406,6 +453,7 @@ fn run() -> anyhow::Result<()> {
         Command::Status => write_json(&status_payload(index_dir.as_deref())),
         Command::Session(args) | Command::Batch(args) => run_jsonl(args),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
+        Command::Eval(eval) => emit_eval(eval, index_dir.as_deref()),
         Command::Search(args) => {
             if args.query.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("search query must not be empty"))
@@ -467,6 +515,187 @@ fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()>
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
+}
+
+fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match eval.command {
+        Some(EvalSubcommand::Phase1(args)) => match eval_phase1_payload(args, index_dir) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
+        None => emit_error(ErrorObject::bad_input(
+            "eval requires a subcommand; try `eval phase1`",
+        )),
+    }
+}
+
+fn eval_phase1_payload(
+    args: EvalPhase1Args,
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
+    if !args.list && args.top_k == 0 {
+        return Err(ErrorObject::bad_input(
+            "eval phase1 --top-k must be at least 1 when executing fixtures",
+        ));
+    }
+
+    let fixtures = selected_phase1_eval_fixtures(args.include_dev);
+    let fixture_summary = phase1_eval_fixture_summary();
+    if args.list {
+        return Ok(json!({
+            "schema_version": SCHEMA_VERSION,
+            "command": "eval phase1",
+            "action": "list",
+            "include_dev": args.include_dev,
+            "fixture_count": fixtures.len(),
+            "eval_fixtures": fixture_summary,
+            "fixtures": fixtures,
+        }));
+    }
+
+    let mut results = Vec::with_capacity(fixtures.len());
+    for fixture in &fixtures {
+        results.push(eval_phase1_fixture_result(
+            fixture, args.mode, args.top_k, index_dir,
+        )?);
+    }
+    let passed = results
+        .iter()
+        .filter(|result| result["passed"].as_bool() == Some(true))
+        .count();
+    let failed = results.len().saturating_sub(passed);
+    let retrieval_mode: RetrievalMode = args.mode.into();
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "eval phase1",
+        "action": "run",
+        "include_dev": args.include_dev,
+        "retrieval_mode": retrieval_mode.as_str(),
+        "top_k": args.top_k,
+        "eval_fixtures": fixture_summary,
+        "summary": {
+            "fixture_count": results.len(),
+            "passed": passed,
+            "failed": failed,
+            "all_passed": failed == 0,
+        },
+        "results": results,
+    }))
+}
+
+fn selected_phase1_eval_fixtures(include_dev: bool) -> Vec<LegalRetrievalFixture> {
+    if include_dev {
+        phase1_eval_fixtures()
+    } else {
+        phase1_release_candidate_fixtures()
+    }
+}
+
+fn eval_phase1_fixture_result(
+    fixture: &LegalRetrievalFixture,
+    mode: CliSearchMode,
+    top_k: u32,
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
+    let search_result = search_payload(
+        SearchArgs {
+            query: fixture.query.clone(),
+            kind: CliKind::Code,
+            mode,
+            format: CliOutputFormat::Detailed,
+            top_k,
+            cursor: None,
+            as_of: fixture.as_of.clone(),
+        },
+        index_dir,
+    );
+
+    match search_result {
+        Ok(search) => Ok(eval_phase1_fixture_search_result(fixture, search)),
+        Err(error) if error.code == ErrorCode::NoResults => Ok(json!({
+            "id": fixture.id.as_str(),
+            "tier": &fixture.tier,
+            "category": fixture.category.as_str(),
+            "query": fixture.query.as_str(),
+            "as_of": fixture.as_of.as_deref(),
+            "expected_ids": &fixture.expected_ids,
+            "allowed_alternates": &fixture.allowed_alternates,
+            "status": "fail",
+            "passed": false,
+            "best_expected_rank": null,
+            "best_allowed_alternate_rank": null,
+            "matched_document_id": null,
+            "candidate_count": 0,
+            "top_document_ids": [],
+            "error": error,
+        })),
+        Err(error) => Err(error),
+    }
+}
+
+fn eval_phase1_fixture_search_result(fixture: &LegalRetrievalFixture, search: Value) -> Value {
+    let expected_ids = fixture
+        .expected_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let allowed_alternates = fixture
+        .allowed_alternates
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let candidates = search["candidates"].as_array().cloned().unwrap_or_default();
+    let mut top_document_ids = Vec::with_capacity(candidates.len());
+    let mut best_expected_rank = None::<usize>;
+    let mut best_allowed_alternate_rank = None::<usize>;
+    let mut matched_document_id = None::<String>;
+
+    for candidate in &candidates {
+        let Some(document_id) = candidate["document_id"].as_str() else {
+            continue;
+        };
+        top_document_ids.push(document_id.to_owned());
+        let rank = top_document_ids.len();
+        if best_expected_rank.is_none() && expected_ids.contains(document_id) {
+            best_expected_rank = Some(rank);
+            matched_document_id = Some(document_id.to_owned());
+        }
+        if best_allowed_alternate_rank.is_none() && allowed_alternates.contains(document_id) {
+            best_allowed_alternate_rank = Some(rank);
+            matched_document_id.get_or_insert_with(|| document_id.to_owned());
+        }
+    }
+
+    let status = if best_expected_rank.is_some() {
+        "pass"
+    } else if best_allowed_alternate_rank.is_some() {
+        "pass_allowed_alternate"
+    } else {
+        "fail"
+    };
+
+    json!({
+        "id": fixture.id.as_str(),
+        "tier": &fixture.tier,
+        "category": fixture.category.as_str(),
+        "query": fixture.query.as_str(),
+        "as_of": fixture.as_of.as_deref(),
+        "expected_ids": &fixture.expected_ids,
+        "allowed_alternates": &fixture.allowed_alternates,
+        "status": status,
+        "passed": status != "fail",
+        "best_expected_rank": best_expected_rank,
+        "best_allowed_alternate_rank": best_allowed_alternate_rank,
+        "matched_document_id": matched_document_id,
+        "candidate_count": candidates.len(),
+        "top_document_ids": top_document_ids,
+        "search": {
+            "retrieval_mode": search["retrieval_mode"].clone(),
+            "pagination": search["pagination"].clone(),
+            "diagnostics": search["diagnostics"]["retrieval"].clone(),
+        }
+    })
 }
 
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
@@ -2355,8 +2584,9 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "context" => session_context_payload(args),
         "expand" => session_expand_payload(args),
         "model fetch" => session_model_fetch_payload(args),
+        "eval phase1" => session_eval_phase1_payload(args),
         "setup" => Ok(setup_payload()),
-        "related" | "ingest" | "sync" => Err(ErrorObject::not_implemented(command)),
+        "related" | "ingest" | "eval" | "sync" => Err(ErrorObject::not_implemented(command)),
         _ => Err(ErrorObject::bad_input(format!(
             "unknown session command `{command}`"
         ))),
@@ -2379,6 +2609,20 @@ fn session_model_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
     let args = serde_json::from_value::<SessionModelFetchArgs>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid model fetch args: {error}")))?;
     model_fetch_payload(args.model, args.allow_download)
+}
+
+fn session_eval_phase1_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionEvalPhase1Args>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid eval phase1 args: {error}")))?;
+    eval_phase1_payload(
+        EvalPhase1Args {
+            list: args.list,
+            include_dev: args.include_dev,
+            mode: args.mode,
+            top_k: args.top_k,
+        },
+        args.index_dir.as_deref(),
+    )
 }
 
 fn model_fetch_payload(model: Option<String>, allow_download: bool) -> Result<Value, ErrorObject> {
@@ -3466,6 +3710,7 @@ fn write_session_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jurisearch_core::eval::{FixtureTier, ReviewStatus};
 
     fn test_embedding_manifest(provisional: bool) -> jurisearch_embed::EmbeddingManifest {
         jurisearch_embed::EmbeddingManifest {
@@ -3488,6 +3733,91 @@ mod tests {
             .and_then(|checks| checks.iter().find(|check| check["name"] == name))
             .and_then(|check| check["status"].as_str())
             .expect("phase1 gate check status exists")
+    }
+
+    fn test_eval_fixture() -> LegalRetrievalFixture {
+        LegalRetrievalFixture {
+            id: "fixture".to_string(),
+            tier: FixtureTier::ReleaseGating,
+            category: "known_article_statutory".to_string(),
+            query: "query".to_string(),
+            expected_ids: vec!["legi:expected@2024-01-01".to_string()],
+            allowed_alternates: vec!["legi:alternate@2024-01-01".to_string()],
+            as_of: Some("2024-01-01".to_string()),
+            temporal_expectation: None,
+            hierarchy: None,
+            drafted_by: "codex".to_string(),
+            verified_against: "official source".to_string(),
+            reviewer: None,
+            review_status: ReviewStatus::OfficialSourceChecked,
+            rationale: "test fixture".to_string(),
+        }
+    }
+
+    fn search_with_candidate_ids(ids: &[Option<&str>]) -> Value {
+        json!({
+            "retrieval_mode": "bm25",
+            "pagination": { "returned": ids.len() },
+            "diagnostics": {
+                "retrieval": {
+                    "mode": "bm25",
+                    "uses_lexical": true,
+                    "uses_dense": false
+                }
+            },
+            "candidates": ids
+                .iter()
+                .map(|id| match id {
+                    Some(id) => json!({ "document_id": id }),
+                    None => json!({ "chunk_id": "missing-document-id" }),
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    #[test]
+    fn eval_phase1_fixture_search_result_reports_expected_alternate_and_miss() {
+        let fixture = test_eval_fixture();
+
+        let expected_hit = eval_phase1_fixture_search_result(
+            &fixture,
+            search_with_candidate_ids(&[
+                Some("legi:other@2024-01-01"),
+                Some("legi:expected@2024-01-01"),
+            ]),
+        );
+        assert_eq!(expected_hit["status"], "pass");
+        assert_eq!(expected_hit["passed"], true);
+        assert_eq!(expected_hit["best_expected_rank"], 2);
+        assert_eq!(
+            expected_hit["matched_document_id"],
+            "legi:expected@2024-01-01"
+        );
+
+        let alternate_hit = eval_phase1_fixture_search_result(
+            &fixture,
+            search_with_candidate_ids(&[
+                Some("legi:other@2024-01-01"),
+                None,
+                Some("legi:alternate@2024-01-01"),
+            ]),
+        );
+        assert_eq!(alternate_hit["status"], "pass_allowed_alternate");
+        assert_eq!(alternate_hit["passed"], true);
+        assert_eq!(alternate_hit["best_allowed_alternate_rank"], 2);
+        assert_eq!(
+            alternate_hit["top_document_ids"],
+            json!(["legi:other@2024-01-01", "legi:alternate@2024-01-01"])
+        );
+
+        let miss = eval_phase1_fixture_search_result(
+            &fixture,
+            search_with_candidate_ids(&[Some("legi:other@2024-01-01")]),
+        );
+        assert_eq!(miss["status"], "fail");
+        assert_eq!(miss["passed"], false);
+        assert!(miss["best_expected_rank"].is_null());
+        assert!(miss["matched_document_id"].is_null());
     }
 
     #[test]

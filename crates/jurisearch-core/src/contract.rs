@@ -149,6 +149,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "IngestResponse",
     },
     CommandSpec {
+        name: "eval phase1",
+        summary: "List or execute built-in Phase 1 LEGI retrieval evaluation fixtures.",
+        status: CommandStatus::Implemented,
+        request_schema: "EvalPhase1Request",
+        response_schema: "EvalPhase1Response",
+    },
+    CommandSpec {
         name: "sync",
         summary: "Synchronize official sources through deltas or transactional histories.",
         status: CommandStatus::Stub,
