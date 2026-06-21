@@ -357,6 +357,8 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
                  AND section.source_uid = text_section.link->>'target_source_uid' \
                 WHERE d.source = 'legi' \
                   AND d.kind = 'article' \
+                  /* Direct publisher section edges are treated as authoritative; \
+                     TEXTELR fallback only fills articles that lack one. */ \
                   AND NOT EXISTS ( \
                       SELECT 1 \
                       FROM graph_edges direct_edge \
@@ -653,6 +655,8 @@ fn enriched_article_hierarchy_json(
     let mut document: serde_json::Value = serde_json::from_str(document_json)?;
     let section: serde_json::Value = serde_json::from_str(section_json)?;
     let section_hierarchy = section_hierarchy_from_json(&section);
+    // When TEXTELR adds depth, its ordered TOC labels become the structural
+    // branch; at equal or shallower depth, SECTION_TA metadata labels win.
     let hierarchy = match text_section_links_json {
         Some(links_json) => match text_struct_hierarchy_from_links(&section, links_json)? {
             Some(text_hierarchy) if text_hierarchy.len() > section_hierarchy.len() => {
@@ -913,4 +917,96 @@ fn insert_publisher_edge(
         )
         .map_err(StorageError::PostgresClient)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_struct_hierarchy_handles_niv_gaps_and_sibling_resets() -> Result<(), StorageError> {
+        let section = json!({
+            "title": "Titre fallback",
+            "hierarchy_path": ["Code civil"],
+        });
+        let links_json = json!([
+            {"text": "Livre I", "level": 1},
+            {"text": "Section gap", "level": 3},
+            {"text": "Livre II", "level": 1},
+            {"text": "Titre II", "level": 2},
+        ])
+        .to_string();
+
+        let hierarchy = text_struct_hierarchy_from_links(&section, &links_json)?
+            .expect("TEXTELR hierarchy should be built");
+
+        assert_eq!(
+            hierarchy,
+            string_vec(&["Code civil", "Livre II", "Titre II"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_hierarchy_with_overlap_deduplicates_existing_prefix() {
+        let hierarchy = merge_hierarchy_with_overlap(
+            string_vec(&["Code civil", "Livre I"]),
+            string_vec(&["Livre I", "Titre II"]),
+        );
+
+        assert_eq!(
+            hierarchy,
+            string_vec(&["Code civil", "Livre I", "Titre II"])
+        );
+    }
+
+    #[test]
+    fn enriched_article_hierarchy_keeps_section_when_text_struct_is_not_richer()
+    -> Result<(), StorageError> {
+        let document_json = json!({
+            "title": "Article 1",
+            "body": "Body",
+            "hierarchy_path": ["Code civil"],
+            "chunks": [{
+                "body": "Body",
+                "hierarchy_path": ["Code civil"],
+                "contextualized_body": "Code civil > Article 1\n\nBody"
+            }]
+        })
+        .to_string();
+        let section_json = json!({
+            "title": "Titre officiel",
+            "hierarchy_path": ["Code civil", "Livre officiel"],
+        })
+        .to_string();
+        let text_links_json = json!([
+            {"text": "Livre officiel", "level": 1},
+            {"text": "Titre texte", "level": 2},
+        ])
+        .to_string();
+
+        let enriched =
+            enriched_article_hierarchy_json(&document_json, &section_json, Some(&text_links_json))?
+                .expect("section hierarchy should enrich the article");
+        let enriched: serde_json::Value = serde_json::from_str(&enriched)?;
+
+        assert_eq!(
+            string_array_field(&enriched, "hierarchy_path"),
+            string_vec(&["Code civil", "Livre officiel", "Titre officiel"])
+        );
+        assert_eq!(
+            string_array_field(&enriched["chunks"][0], "hierarchy_path"),
+            string_vec(&["Code civil", "Livre officiel", "Titre officiel"])
+        );
+        assert_eq!(
+            enriched["chunks"][0]["contextualized_body"].as_str(),
+            Some("Code civil > Livre officiel > Titre officiel > Article 1\n\nBody")
+        );
+        Ok(())
+    }
+
+    fn string_vec(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
 }
