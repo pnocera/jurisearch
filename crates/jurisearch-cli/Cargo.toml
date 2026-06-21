@@ -19,6 +19,7 @@ jurisearch-official-api = { path = "../jurisearch-official-api" }
 jurisearch-storage = { path = "../jurisearch-storage" }
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

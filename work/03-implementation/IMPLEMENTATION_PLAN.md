@@ -683,6 +683,13 @@ Acceptance:
 - Missing in-process models fail with an actionable error.
 - Secrets are never written into manifest or logs.
 
+Current status (2026-06-21):
+
+- Done: CLI embedding configuration now loads from a TOML runtime config at `JURISEARCH_CONFIG`, `$XDG_CONFIG_HOME/jurisearch/config.toml`, or `~/.config/jurisearch/config.toml`; `JURISEARCH_CONFIG=none`, `0`, or an empty value disables file loading for deterministic tests and scripted runs.
+- Done: file config covers embedding provider, base URL, API key, model, dimension, normalization, pooling, token budgets, tokenizer path, provisional status, and re-embeddable status. `JURISEARCH_EMBED_*` environment variables are applied after the file config, so env values remain the final override layer. Provider spellings accept the same aliases in env and file config, `base_url` implies the OpenAI-compatible provider, and `0` token budgets mean unbounded in both layers.
+- Done: `jurisearch status` reports config diagnostics (`config_path`, `config_loaded`, `config_error`) and active non-secret embedding settings, while API keys from either config files or env are redacted from stdout/stderr contract coverage. TOML parse diagnostics are source-free line/column errors, and unknown embedding config keys are rejected without echoing source snippets.
+- Remaining: implement durable local model cache/fetch/setup semantics for in-process models, endpoint reachability checks in `status`, and actionable missing-model diagnostics outside the existing embedding guard.
+
 ### 1.7 Phase 1 Evaluation and Migration Gate
 
 Tasks:

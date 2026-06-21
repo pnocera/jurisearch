@@ -17,7 +17,7 @@ use jurisearch_core::{
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
 };
-use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
+use jurisearch_embed::{EmbeddingConfig, EmbeddingProvider, OpenAiCompatibleClient};
 use jurisearch_ingest::{
     archive::{
         ArchiveMember, ArchivePlan, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
@@ -52,7 +52,7 @@ use jurisearch_storage::{
     },
     runtime::{ManagedPostgres, PgConfig, StorageError},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v4";
@@ -1785,13 +1785,205 @@ fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
     ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
 }
 
+#[derive(Debug)]
+struct LoadedEmbeddingConfig {
+    config: EmbeddingConfig,
+    config_path: Option<PathBuf>,
+    config_loaded: bool,
+    config_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct RuntimeConfigLocation {
+    path: PathBuf,
+    explicit: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeConfigFile {
+    embedding: Option<EmbeddingConfigFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmbeddingConfigFile {
+    #[serde(default, deserialize_with = "deserialize_embedding_provider_option")]
+    provider: Option<EmbeddingProvider>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    dimension: Option<usize>,
+    normalize: Option<bool>,
+    pooling: Option<String>,
+    max_input_chars: Option<usize>,
+    max_estimated_tokens: Option<usize>,
+    estimated_chars_per_token: Option<usize>,
+    tokenizer_json: Option<PathBuf>,
+    tokenizer_path: Option<PathBuf>,
+    provisional: Option<bool>,
+    reembeddable: Option<bool>,
+}
+
 fn embedding_config_from_env() -> EmbeddingConfig {
-    let embedding_base_url = std::env::var("JURISEARCH_EMBED_BASE_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8097/v1".into());
-    let mut embedding_config = EmbeddingConfig::phase0_bge_m3(
-        embedding_base_url,
-        std::env::var("JURISEARCH_EMBED_API_KEY").ok(),
-    );
+    loaded_embedding_config().config
+}
+
+fn loaded_embedding_config() -> LoadedEmbeddingConfig {
+    let mut embedding_config = EmbeddingConfig::phase0_bge_m3("http://127.0.0.1:8097/v1", None);
+    let mut config_path = None;
+    let mut config_loaded = false;
+    let mut config_error = None;
+
+    if let Some(location) = runtime_config_location() {
+        match fs::read_to_string(&location.path) {
+            Ok(contents) => {
+                config_path = Some(location.path.clone());
+                match toml::from_str::<RuntimeConfigFile>(&contents) {
+                    Ok(runtime_config) => {
+                        if let Some(embedding) = runtime_config.embedding {
+                            apply_embedding_file_config(&mut embedding_config, embedding);
+                        }
+                        config_loaded = true;
+                    }
+                    Err(error) => {
+                        config_error =
+                            Some(toml_parse_error_message(&location.path, &contents, &error));
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !location.explicit => {
+                // The default config path is optional.
+            }
+            Err(error) => {
+                config_path = Some(location.path.clone());
+                config_error = Some(format!(
+                    "failed to read `{}`: {error}",
+                    location.path.display()
+                ));
+            }
+        }
+    }
+
+    apply_embedding_env_overrides(&mut embedding_config);
+
+    LoadedEmbeddingConfig {
+        config: embedding_config,
+        config_path,
+        config_loaded,
+        config_error,
+    }
+}
+
+fn runtime_config_location() -> Option<RuntimeConfigLocation> {
+    if let Some(path) = std::env::var_os("JURISEARCH_CONFIG") {
+        let text = path.to_string_lossy();
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") || trimmed == "0" {
+            return None;
+        }
+        return Some(RuntimeConfigLocation {
+            path: PathBuf::from(trimmed),
+            explicit: true,
+        });
+    }
+
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
+        && !config_home.is_empty()
+    {
+        return Some(RuntimeConfigLocation {
+            path: PathBuf::from(config_home)
+                .join("jurisearch")
+                .join("config.toml"),
+            explicit: false,
+        });
+    }
+
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| RuntimeConfigLocation {
+            path: PathBuf::from(home)
+                .join(".config")
+                .join("jurisearch")
+                .join("config.toml"),
+            explicit: false,
+        })
+}
+
+fn apply_embedding_file_config(config: &mut EmbeddingConfig, file_config: EmbeddingConfigFile) {
+    if let Some(provider) = file_config.provider {
+        config.provider = provider;
+        if matches!(provider, EmbeddingProvider::InProcess) {
+            config.base_url = None;
+            config.api_key = None;
+        }
+    }
+    if let Some(base_url) = nonempty_string(file_config.base_url) {
+        config.provider = EmbeddingProvider::OpenAiCompatible;
+        config.base_url = Some(base_url);
+    }
+    if let Some(api_key) = nonempty_string(file_config.api_key) {
+        config.api_key = Some(api_key);
+    }
+    if let Some(model) = nonempty_string(file_config.model) {
+        config.model = model;
+    }
+    if let Some(dimension) = file_config.dimension {
+        config.dimension = dimension;
+    }
+    if let Some(normalize) = file_config.normalize {
+        config.normalize = normalize;
+    }
+    if let Some(pooling) = nonempty_string(file_config.pooling) {
+        config.pooling = pooling;
+    }
+    if let Some(max_input_chars) = file_config.max_input_chars {
+        config.max_input_chars = nonzero_usize(max_input_chars);
+    }
+    if let Some(max_estimated_tokens) = file_config.max_estimated_tokens {
+        config.max_estimated_tokens = nonzero_usize(max_estimated_tokens);
+    }
+    if let Some(estimated_chars_per_token) = file_config.estimated_chars_per_token
+        && estimated_chars_per_token != 0
+    {
+        config.estimated_chars_per_token = estimated_chars_per_token;
+    }
+    if file_config.tokenizer_json.is_some() {
+        config.tokenizer_path = file_config.tokenizer_json;
+    }
+    if file_config.tokenizer_path.is_some() {
+        config.tokenizer_path = file_config.tokenizer_path;
+    }
+    if let Some(provisional) = file_config.provisional {
+        config.provisional = provisional;
+    }
+    if let Some(reembeddable) = file_config.reembeddable {
+        config.reembeddable = reembeddable;
+    }
+    clear_unused_in_process_secret_fields(config);
+}
+
+fn apply_embedding_env_overrides(embedding_config: &mut EmbeddingConfig) {
+    if let Ok(provider) = std::env::var("JURISEARCH_EMBED_PROVIDER")
+        && let Some(provider) = parse_embedding_provider(&provider)
+    {
+        embedding_config.provider = provider;
+        if matches!(provider, EmbeddingProvider::InProcess) {
+            embedding_config.base_url = None;
+            embedding_config.api_key = None;
+        }
+    }
+    if let Ok(base_url) = std::env::var("JURISEARCH_EMBED_BASE_URL")
+        && let Some(base_url) = nonempty_string(Some(base_url))
+    {
+        embedding_config.provider = EmbeddingProvider::OpenAiCompatible;
+        embedding_config.base_url = Some(base_url);
+    }
+    if let Ok(api_key) = std::env::var("JURISEARCH_EMBED_API_KEY")
+        && let Some(api_key) = nonempty_string(Some(api_key))
+    {
+        embedding_config.api_key = Some(api_key);
+    }
     if let Ok(model) = std::env::var("JURISEARCH_EMBED_MODEL") {
         embedding_config.model = model;
     }
@@ -1821,7 +2013,80 @@ fn embedding_config_from_env() -> EmbeddingConfig {
     if let Ok(tokenizer_path) = std::env::var("JURISEARCH_EMBED_TOKENIZER_JSON") {
         embedding_config.tokenizer_path = parse_optional_path_buf(&tokenizer_path);
     }
-    embedding_config
+    clear_unused_in_process_secret_fields(embedding_config);
+}
+
+fn parse_embedding_provider(value: &str) -> Option<EmbeddingProvider> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openai_compatible" | "openai-compatible" | "openai" | "remote" => {
+            Some(EmbeddingProvider::OpenAiCompatible)
+        }
+        "in_process" | "in-process" | "local" => Some(EmbeddingProvider::InProcess),
+        _ => None,
+    }
+}
+
+fn nonempty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_owned();
+        if value.is_empty() { None } else { Some(value) }
+    })
+}
+
+fn deserialize_embedding_provider_option<'de, D>(
+    deserializer: D,
+) -> Result<Option<EmbeddingProvider>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    parse_embedding_provider(&value)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!("unsupported embedding provider `{value}`"))
+        })
+        .map(Some)
+}
+
+fn nonzero_usize(value: usize) -> Option<usize> {
+    if value == 0 { None } else { Some(value) }
+}
+
+fn clear_unused_in_process_secret_fields(config: &mut EmbeddingConfig) {
+    if matches!(config.provider, EmbeddingProvider::InProcess) {
+        config.base_url = None;
+        config.api_key = None;
+    }
+}
+
+fn toml_parse_error_message(path: &Path, contents: &str, error: &toml::de::Error) -> String {
+    if let Some(span) = error.span() {
+        let (line, column) = line_column_for_offset(contents, span.start);
+        format!(
+            "failed to parse `{}`: TOML syntax error at line {line}, column {column}",
+            path.display()
+        )
+    } else {
+        format!("failed to parse `{}`: TOML syntax error", path.display())
+    }
+}
+
+fn line_column_for_offset(contents: &str, byte_offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut column = 1;
+    for (index, character) in contents.char_indices() {
+        if index >= byte_offset {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
@@ -1887,7 +2152,8 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
 }
 
 fn status_payload(index_dir: Option<&Path>) -> Value {
-    let embedding_config = embedding_config_from_env();
+    let loaded_embedding = loaded_embedding_config();
+    let embedding_config = loaded_embedding.config;
     let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint;
@@ -1910,7 +2176,10 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
             "token_count_method": embedding_config.configured_token_count_method(),
             "tokenizer_path": embedding_config.tokenizer_path.as_ref().map(|path| path.display().to_string()),
             "provisional": embedding_manifest.provisional,
-            "reembeddable": embedding_manifest.reembeddable
+            "reembeddable": embedding_manifest.reembeddable,
+            "config_path": loaded_embedding.config_path.as_ref().map(|path| path.display().to_string()),
+            "config_loaded": loaded_embedding.config_loaded,
+            "config_error": loaded_embedding.config_error
         },
         "ingest_health": ingest_health
     })

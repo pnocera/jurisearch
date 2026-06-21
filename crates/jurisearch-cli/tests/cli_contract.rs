@@ -20,6 +20,28 @@ use predicates::prelude::*;
 use serde_json::Value;
 use tar::{Builder, Header};
 
+fn jurisearch_command_without_embedding_env() -> Command {
+    let mut command = Command::cargo_bin("jurisearch").unwrap();
+    for name in [
+        "JURISEARCH_CONFIG",
+        "XDG_CONFIG_HOME",
+        "JURISEARCH_EMBED_PROVIDER",
+        "JURISEARCH_EMBED_BASE_URL",
+        "JURISEARCH_EMBED_API_KEY",
+        "JURISEARCH_EMBED_MODEL",
+        "JURISEARCH_EMBED_DIMENSION",
+        "JURISEARCH_EMBED_NORMALIZE",
+        "JURISEARCH_EMBED_POOLING",
+        "JURISEARCH_EMBED_MAX_INPUT_CHARS",
+        "JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS",
+        "JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN",
+        "JURISEARCH_EMBED_TOKENIZER_JSON",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
 #[test]
 fn help_agent_works_without_index() {
     let mut command = Command::cargo_bin("jurisearch").unwrap();
@@ -201,9 +223,9 @@ fn expand_rejects_empty_query_in_cli_and_session() {
 
 #[test]
 fn status_returns_json_without_index() {
-    let output = Command::cargo_bin("jurisearch")
-        .unwrap()
+    let output = jurisearch_command_without_embedding_env()
         .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
         .arg("status")
         .assert()
         .success()
@@ -229,13 +251,16 @@ fn status_returns_json_without_index() {
     assert!(json["embedding"]["tokenizer_path"].is_null());
     assert_eq!(json["embedding"]["provisional"], true);
     assert_eq!(json["embedding"]["reembeddable"], true);
+    assert!(json["embedding"]["config_path"].is_null());
+    assert_eq!(json["embedding"]["config_loaded"], false);
+    assert!(json["embedding"]["config_error"].is_null());
 }
 
 #[test]
 fn status_reports_embedding_budget_env_overrides() {
-    let output = Command::cargo_bin("jurisearch")
-        .unwrap()
+    let output = jurisearch_command_without_embedding_env()
         .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
         .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "0")
         .env("JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS", "none")
         .env("JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN", "3")
@@ -259,6 +284,307 @@ fn status_reports_embedding_budget_env_overrides() {
     assert_eq!(
         json["embedding"]["tokenizer_path"],
         "/tmp/jurisearch-tokenizer.json"
+    );
+}
+
+#[test]
+fn status_loads_embedding_config_file_and_redacts_secrets() {
+    let config_home = tempfile::Builder::new()
+        .prefix("jurisearch-cli-config.")
+        .tempdir()
+        .unwrap();
+    let config_dir = config_home.path().join("jurisearch");
+    fs::create_dir_all(&config_dir).unwrap();
+    let config_path = config_dir.join("config.toml");
+    fs::write(
+        &config_path,
+        r#"
+[embedding]
+provider = "openai_compatible"
+base_url = "https://embeddings.example.test/v1"
+api_key = "file-secret-token"
+model = "custom-embed"
+dimension = 768
+normalize = false
+pooling = "mean"
+max_input_chars = 1234
+max_estimated_tokens = 567
+estimated_chars_per_token = 6
+tokenizer_json = "/tmp/config-tokenizer.json"
+provisional = false
+reembeddable = false
+"#,
+    )
+    .unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("file-secret-token"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["provider"], "openai_compatible");
+    assert_eq!(
+        json["embedding"]["base_url"],
+        "https://embeddings.example.test/v1"
+    );
+    assert_eq!(json["embedding"]["base_url_class"], "hosted");
+    assert_eq!(json["embedding"]["model"], "custom-embed");
+    assert_eq!(json["embedding"]["dimension"], 768);
+    assert_eq!(json["embedding"]["normalize"], false);
+    assert_eq!(json["embedding"]["pooling"], "mean");
+    assert_eq!(json["embedding"]["max_input_chars"], 1234);
+    assert_eq!(json["embedding"]["max_estimated_tokens"], 567);
+    assert_eq!(json["embedding"]["estimated_chars_per_token"], 6);
+    assert_eq!(json["embedding"]["token_count_method"], "tokenizer");
+    assert_eq!(
+        json["embedding"]["tokenizer_path"],
+        "/tmp/config-tokenizer.json"
+    );
+    assert_eq!(json["embedding"]["provisional"], false);
+    assert_eq!(json["embedding"]["reembeddable"], false);
+    assert_eq!(
+        json["embedding"]["config_path"],
+        config_path.display().to_string()
+    );
+    assert_eq!(json["embedding"]["config_loaded"], true);
+    assert!(json["embedding"]["config_error"].is_null());
+}
+
+#[test]
+fn status_env_overrides_embedding_config_file_and_redacts_env_secret() {
+    let config_home = tempfile::Builder::new()
+        .prefix("jurisearch-cli-config-env.")
+        .tempdir()
+        .unwrap();
+    let config_dir = config_home.path().join("jurisearch");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[embedding]
+base_url = "https://embeddings.example.test/v1"
+api_key = "file-secret-token"
+model = "file-model"
+dimension = 768
+"#,
+    )
+    .unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .env("JURISEARCH_EMBED_API_KEY", "env-secret-token")
+        .env("JURISEARCH_EMBED_MODEL", "env-model")
+        .env("JURISEARCH_EMBED_DIMENSION", "1024")
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("file-secret-token"));
+    assert!(!stdout.contains("env-secret-token"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["base_url"], "http://127.0.0.1:9/v1");
+    assert_eq!(json["embedding"]["base_url_class"], "local_loopback");
+    assert_eq!(json["embedding"]["model"], "env-model");
+    assert_eq!(json["embedding"]["dimension"], 1024);
+    assert_eq!(json["embedding"]["config_loaded"], true);
+    assert!(json["embedding"]["config_error"].is_null());
+}
+
+#[test]
+fn status_reports_in_process_embedding_config_file() {
+    let config_home = tempfile::Builder::new()
+        .prefix("jurisearch-cli-config-local.")
+        .tempdir()
+        .unwrap();
+    let config_dir = config_home.path().join("jurisearch");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[embedding]
+provider = "local"
+api_key = "unused-local-secret"
+model = "local-bge-m3"
+dimension = 1024
+max_input_chars = 0
+max_estimated_tokens = 0
+"#,
+    )
+    .unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("unused-local-secret"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["provider"], "in_process");
+    assert_eq!(json["embedding"]["base_url"], "");
+    assert_eq!(json["embedding"]["base_url_class"], "in_process");
+    assert_eq!(json["embedding"]["model"], "local-bge-m3");
+    assert_eq!(json["embedding"]["dimension"], 1024);
+    assert!(json["embedding"]["max_input_chars"].is_null());
+    assert!(json["embedding"]["max_estimated_tokens"].is_null());
+    assert_eq!(json["embedding"]["config_loaded"], true);
+    assert!(json["embedding"]["config_error"].is_null());
+}
+
+#[test]
+fn status_env_in_process_provider_clears_unused_api_key() {
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_EMBED_PROVIDER", "in_process")
+        .env("JURISEARCH_EMBED_API_KEY", "unused-env-local-secret")
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("unused-env-local-secret"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["provider"], "in_process");
+    assert_eq!(json["embedding"]["base_url"], "");
+    assert_eq!(json["embedding"]["base_url_class"], "in_process");
+    assert!(json["embedding"]["config_error"].is_null());
+}
+
+#[test]
+fn status_malformed_embedding_config_does_not_leak_api_key() {
+    let config_home = tempfile::Builder::new()
+        .prefix("jurisearch-cli-config-malformed.")
+        .tempdir()
+        .unwrap();
+    let config_dir = config_home.path().join("jurisearch");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[embedding]
+base_url = "https://embeddings.example.test/v1"
+api_key = "super-secret-leaky-token
+model = "custom-embed"
+"#,
+    )
+    .unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("super-secret-leaky-token"));
+    assert!(!stdout.contains("api_key"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["config_loaded"], false);
+    assert!(
+        json["embedding"]["config_error"]
+            .as_str()
+            .unwrap()
+            .contains("TOML syntax error at line")
+    );
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .args(["session", "--jsonl"])
+        .write_stdin("{\"id\":\"status\",\"command\":\"status\"}\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("super-secret-leaky-token"));
+    assert!(!stdout.contains("api_key"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["id"], "status");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["result"]["embedding"]["config_loaded"], false);
+    assert!(
+        json["result"]["embedding"]["config_error"]
+            .as_str()
+            .unwrap()
+            .contains("TOML syntax error at line")
+    );
+}
+
+#[test]
+fn status_unknown_embedding_config_key_fails_without_source_echo() {
+    let config_home = tempfile::Builder::new()
+        .prefix("jurisearch-cli-config-unknown-key.")
+        .tempdir()
+        .unwrap();
+    let config_dir = config_home.path().join("jurisearch");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[embedding]
+api_key = "unknown-key-secret"
+dimention = 768
+"#,
+    )
+    .unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("unknown-key-secret"));
+    assert!(!stdout.contains("dimention"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["config_loaded"], false);
+    assert!(
+        json["embedding"]["config_error"]
+            .as_str()
+            .unwrap()
+            .contains("TOML syntax error at line")
     );
 }
 
