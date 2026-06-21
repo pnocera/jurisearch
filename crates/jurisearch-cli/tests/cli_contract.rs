@@ -634,7 +634,18 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         archive_path.as_path(),
         &[
             ("legi/articles/LEGIARTI000006419320.xml", article.as_bytes()),
-            ("legi/sections/SECTION.xml", b"<SECTION_TA/>"),
+            (
+                "legi/sections/SECTION.xml",
+                br#"<SECTION_TA>
+  <ID>LEGISCTA000006089696</ID>
+  <TITRE_TA>Titre preliminaire</TITRE_TA>
+  <CONTEXTE>
+    <TEXTE cid="LEGITEXT000006070721">
+      <TITRE_TXT debut="1804-03-21" fin="2999-01-01">Code civil</TITRE_TXT>
+    </TEXTE>
+  </CONTEXTE>
+</SECTION_TA>"#,
+            ),
             ("legi/articles/BROKEN.xml", b"<ARTICLE><META/></ARTICLE>"),
         ],
     )?;
@@ -668,10 +679,12 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["safe_mode"], true);
     assert_eq!(json["visited_members"], 3);
     assert_eq!(json["inserted_documents"], 1);
+    assert_eq!(json["parsed_metadata_members"], 1);
     assert_eq!(json["skipped_members"], 1);
     assert_eq!(json["failed_members"], 1);
     assert_eq!(json["quarantined_payloads"], 1);
-    assert_eq!(json["unsupported_roots"]["SECTION_TA"], 1);
+    assert_eq!(json["parsed_metadata_roots"]["SECTION_TA"], 1);
+    assert!(json["unsupported_roots"].as_object().unwrap().is_empty());
 
     let quarantine_entries =
         fs::read_dir(quarantine.path().join("run-cli"))?.collect::<Result<Vec<_>, _>>()?;
@@ -688,6 +701,13 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
              FROM (SELECT status, count(*) AS member_count FROM ingest_member GROUP BY status) s;",
         )?,
         "failed:1,inserted:1,skipped:1"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT source_entity FROM ingest_member \
+             WHERE member_path = 'legi/sections/SECTION.xml';",
+        )?,
+        "LEGISCTA000006089696"
     );
     assert_eq!(
         postgres.execute_sql(

@@ -43,7 +43,91 @@ impl SourceProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParsedLegiXml {
     Article(Box<CanonicalDocument>),
+    TextVersion(Box<ParsedTextVersion>),
+    SectionTa(Box<ParsedSectionTa>),
+    TextStruct(Box<ParsedTextStruct>),
     UnsupportedRoot { root: String },
+}
+
+impl ParsedLegiXml {
+    pub fn root_name(&self) -> &'static str {
+        match self {
+            Self::Article(_) => "ARTICLE",
+            Self::TextVersion(_) => "TEXTE_VERSION",
+            Self::SectionTa(_) => "SECTION_TA",
+            Self::TextStruct(_) => "TEXTELR",
+            Self::UnsupportedRoot { .. } => "unsupported",
+        }
+    }
+
+    pub fn source_uid(&self) -> Option<&str> {
+        match self {
+            Self::Article(document) => Some(document.source_uid.as_str()),
+            Self::TextVersion(text) => Some(text.text_id.as_str()),
+            Self::SectionTa(section) => section.section_id.as_deref(),
+            Self::TextStruct(text_struct) => Some(text_struct.text_id.as_str()),
+            Self::UnsupportedRoot { .. } => None,
+        }
+    }
+
+    pub fn date_anchor(&self) -> Option<&str> {
+        match self {
+            Self::Article(document) => Some(document.valid_from.as_str()),
+            Self::TextVersion(text) => Some(text.valid_from.as_str()),
+            Self::SectionTa(section) => Some(section.valid_from.as_str()),
+            Self::TextStruct(text_struct) => text_struct.source_date_debut_hint.as_deref(),
+            Self::UnsupportedRoot { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedTextVersion {
+    pub text_id: String,
+    pub title: String,
+    pub title_full: Option<String>,
+    pub status: String,
+    pub nature: String,
+    pub valid_from: String,
+    pub valid_to: Option<String>,
+    pub valid_to_raw: Option<String>,
+    pub source_url: Option<String>,
+    pub source_payload_hash: String,
+    pub source_archive: Option<String>,
+    pub source_member_path: Option<String>,
+    pub canonical_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedSectionTa {
+    pub section_id: Option<String>,
+    pub title: String,
+    pub valid_from: String,
+    pub valid_to: Option<String>,
+    pub valid_to_raw: Option<String>,
+    pub parent_text_id: Option<String>,
+    pub hierarchy_path: Vec<String>,
+    pub source_payload_hash: String,
+    pub source_archive: Option<String>,
+    pub source_member_path: Option<String>,
+    pub canonical_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedTextStruct {
+    pub text_id: String,
+    pub nature: Option<String>,
+    pub source_url: Option<String>,
+    pub cid: Option<String>,
+    pub num: Option<String>,
+    pub nor: Option<String>,
+    pub date_publi: Option<String>,
+    pub date_texte: Option<String>,
+    pub source_date_debut_hint: Option<String>,
+    pub source_payload_hash: String,
+    pub source_archive: Option<String>,
+    pub source_member_path: Option<String>,
+    pub canonical_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +359,41 @@ struct RawArticle {
     publisher_links: Vec<RawPublisherLink>,
 }
 
+#[derive(Debug, Default)]
+struct RawTextVersion {
+    id: Option<String>,
+    url: Option<String>,
+    nature: Option<String>,
+    title: Option<String>,
+    title_full: Option<String>,
+    status: Option<String>,
+    date_debut: Option<String>,
+    date_fin: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct RawSectionTa {
+    id: Option<String>,
+    title: Option<String>,
+    date_debut: Option<String>,
+    date_fin: Option<String>,
+    parent_text_id: Option<String>,
+    hierarchy_path: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct RawTextStruct {
+    id: Option<String>,
+    url: Option<String>,
+    nature: Option<String>,
+    cid: Option<String>,
+    num: Option<String>,
+    nor: Option<String>,
+    date_publi: Option<String>,
+    date_texte: Option<String>,
+    source_date_debut_hint: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RawPublisherLink {
     source_tag: String,
@@ -291,6 +410,15 @@ pub fn parse_legi_xml(
         "ARTICLE" => parse_article(xml, provenance)
             .map(Box::new)
             .map(ParsedLegiXml::Article),
+        "TEXTE_VERSION" => parse_text_version(xml, provenance)
+            .map(Box::new)
+            .map(ParsedLegiXml::TextVersion),
+        "SECTION_TA" => parse_section_ta(xml, provenance)
+            .map(Box::new)
+            .map(ParsedLegiXml::SectionTa),
+        "TEXTELR" => parse_text_struct(xml, provenance)
+            .map(Box::new)
+            .map(ParsedLegiXml::TextStruct),
         _ => Ok(ParsedLegiXml::UnsupportedRoot { root }),
     }
 }
@@ -402,6 +530,178 @@ fn parse_article(
     raw.into_document(xml, provenance)
 }
 
+fn parse_text_version(
+    xml: &str,
+    provenance: SourceProvenance,
+) -> Result<ParsedTextVersion, LegiParseError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<String>::new();
+    let mut raw = RawTextVersion::default();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                stack.push(local_name(start.local_name().as_ref()));
+            }
+            Ok(Event::Empty(start)) => {
+                stack.push(local_name(start.local_name().as_ref()));
+                stack.pop();
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Text(text)) => {
+                let value = text.decode().map_err(|error| LegiParseError::Xml {
+                    message: error.to_string(),
+                })?;
+                assign_text_version_text(&mut raw, &stack, value.as_ref());
+            }
+            Ok(Event::CData(text)) => {
+                let value = String::from_utf8_lossy(text.as_ref());
+                assign_text_version_text(&mut raw, &stack, value.as_ref());
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = resolve_reference(&reference)?;
+                assign_text_version_text(&mut raw, &stack, value.as_str());
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(LegiParseError::Xml {
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+
+    raw.into_text_version(xml, provenance)
+}
+
+fn parse_section_ta(
+    xml: &str,
+    provenance: SourceProvenance,
+) -> Result<ParsedSectionTa, LegiParseError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<String>::new();
+    let mut raw = RawSectionTa::default();
+    let mut in_contexte = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                let name = local_name(start.local_name().as_ref());
+                if name == "CONTEXTE" {
+                    in_contexte = true;
+                } else if in_contexte && name == "TEXTE" && raw.parent_text_id.is_none() {
+                    raw.parent_text_id = attribute_value(&start, "cid")?
+                        .and_then(|value| optional_non_empty(Some(value)));
+                } else if in_contexte && name == "TITRE_TXT" {
+                    assign_section_title_dates(&mut raw, &start)?;
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(start)) => {
+                let name = local_name(start.local_name().as_ref());
+                if in_contexte && name == "TEXTE" && raw.parent_text_id.is_none() {
+                    raw.parent_text_id = attribute_value(&start, "cid")?
+                        .and_then(|value| optional_non_empty(Some(value)));
+                } else if in_contexte && name == "TITRE_TXT" {
+                    assign_section_title_dates(&mut raw, &start)?;
+                }
+                stack.push(name);
+                stack.pop();
+            }
+            Ok(Event::End(_)) => {
+                if stack.last().is_some_and(|name| name == "CONTEXTE") {
+                    in_contexte = false;
+                }
+                stack.pop();
+            }
+            Ok(Event::Text(text)) => {
+                let value = text.decode().map_err(|error| LegiParseError::Xml {
+                    message: error.to_string(),
+                })?;
+                assign_section_text(&mut raw, &stack, value.as_ref());
+            }
+            Ok(Event::CData(text)) => {
+                let value = String::from_utf8_lossy(text.as_ref());
+                assign_section_text(&mut raw, &stack, value.as_ref());
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = resolve_reference(&reference)?;
+                assign_section_text(&mut raw, &stack, value.as_str());
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(LegiParseError::Xml {
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+
+    raw.into_section_ta(xml, provenance)
+}
+
+fn parse_text_struct(
+    xml: &str,
+    provenance: SourceProvenance,
+) -> Result<ParsedTextStruct, LegiParseError> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<String>::new();
+    let mut raw = RawTextStruct::default();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) => {
+                let name = local_name(start.local_name().as_ref());
+                if matches!(name.as_str(), "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART") {
+                    assign_text_struct_date_hint(&mut raw, &start)?;
+                }
+                stack.push(name);
+            }
+            Ok(Event::Empty(start)) => {
+                let name = local_name(start.local_name().as_ref());
+                if matches!(name.as_str(), "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART") {
+                    assign_text_struct_date_hint(&mut raw, &start)?;
+                }
+                stack.push(name);
+                stack.pop();
+            }
+            Ok(Event::End(_)) => {
+                stack.pop();
+            }
+            Ok(Event::Text(text)) => {
+                let value = text.decode().map_err(|error| LegiParseError::Xml {
+                    message: error.to_string(),
+                })?;
+                assign_text_struct_text(&mut raw, &stack, value.as_ref());
+            }
+            Ok(Event::CData(text)) => {
+                let value = String::from_utf8_lossy(text.as_ref());
+                assign_text_struct_text(&mut raw, &stack, value.as_ref());
+            }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = resolve_reference(&reference)?;
+                assign_text_struct_text(&mut raw, &stack, value.as_str());
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(LegiParseError::Xml {
+                    message: error.to_string(),
+                });
+            }
+        }
+    }
+
+    raw.into_text_struct(xml, provenance)
+}
+
 fn assign_article_text(raw: &mut RawArticle, stack: &[String], value: &str) {
     if path_contains(stack, &["BLOC_TEXTUEL", "CONTENU"]) {
         append_xml_content(&mut raw.body, value);
@@ -434,6 +734,108 @@ fn assign_article_text(raw: &mut RawArticle, stack: &[String], value: &str) {
     {
         raw.hierarchy_path.push(trimmed.to_owned());
     }
+}
+
+fn assign_text_version_text(raw: &mut RawTextVersion, stack: &[String], value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    let trimmed = value.trim();
+
+    if path_ends_with(stack, &["META_COMMUN", "ID"]) {
+        assign_if_empty(&mut raw.id, trimmed);
+    } else if path_ends_with(stack, &["META_COMMUN", "URL"]) {
+        assign_if_empty(&mut raw.url, trimmed);
+    } else if path_ends_with(stack, &["META_COMMUN", "NATURE"]) {
+        assign_if_empty(&mut raw.nature, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_VERSION", "TITRE"]) {
+        assign_if_empty(&mut raw.title, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_VERSION", "TITREFULL"]) {
+        assign_if_empty(&mut raw.title_full, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_VERSION", "ETAT"]) {
+        assign_if_empty(&mut raw.status, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_VERSION", "DATE_DEBUT"]) {
+        assign_if_empty(&mut raw.date_debut, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_VERSION", "DATE_FIN"]) {
+        assign_if_empty(&mut raw.date_fin, trimmed);
+    }
+}
+
+fn assign_section_text(raw: &mut RawSectionTa, stack: &[String], value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    let trimmed = value.trim();
+
+    if path_ends_with(stack, &["SECTION_TA", "ID"]) {
+        assign_if_empty(&mut raw.id, trimmed);
+    } else if path_ends_with(stack, &["SECTION_TA", "TITRE_TA"]) {
+        assign_if_empty(&mut raw.title, trimmed);
+    } else if path_contains(stack, &["CONTEXTE"])
+        && (path_ends_with(stack, &["TITRE_TXT"]) || path_ends_with(stack, &["TITRE_TM"]))
+    {
+        raw.hierarchy_path.push(trimmed.to_owned());
+    }
+}
+
+fn assign_section_title_dates(
+    raw: &mut RawSectionTa,
+    start: &BytesStart<'_>,
+) -> Result<(), LegiParseError> {
+    if let Some(debut) = attribute_value(start, "debut")?
+        && !debut.trim().is_empty()
+    {
+        raw.date_debut = Some(debut);
+    }
+    if let Some(fin) = attribute_value(start, "fin")?
+        && !fin.trim().is_empty()
+    {
+        raw.date_fin = Some(fin);
+    }
+    Ok(())
+}
+
+fn assign_text_struct_text(raw: &mut RawTextStruct, stack: &[String], value: &str) {
+    if value.trim().is_empty() {
+        return;
+    }
+    let trimmed = value.trim();
+
+    if path_ends_with(stack, &["META_COMMUN", "ID"]) {
+        assign_if_empty(&mut raw.id, trimmed);
+    } else if path_ends_with(stack, &["META_COMMUN", "URL"]) {
+        assign_if_empty(&mut raw.url, trimmed);
+    } else if path_ends_with(stack, &["META_COMMUN", "NATURE"]) {
+        assign_if_empty(&mut raw.nature, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_CHRONICLE", "CID"]) {
+        assign_if_empty(&mut raw.cid, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_CHRONICLE", "NUM"]) {
+        assign_if_empty(&mut raw.num, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_CHRONICLE", "NOR"]) {
+        assign_if_empty(&mut raw.nor, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_CHRONICLE", "DATE_PUBLI"]) {
+        assign_if_empty(&mut raw.date_publi, trimmed);
+    } else if path_ends_with(stack, &["META_TEXTE_CHRONICLE", "DATE_TEXTE"]) {
+        assign_if_empty(&mut raw.date_texte, trimmed);
+    }
+}
+
+fn assign_text_struct_date_hint(
+    raw: &mut RawTextStruct,
+    start: &BytesStart<'_>,
+) -> Result<(), LegiParseError> {
+    let Some(debut) = attribute_value(start, "debut")? else {
+        return Ok(());
+    };
+    let Some(debut) = optional_non_empty(Some(debut)) else {
+        return Ok(());
+    };
+    validate_date("LIEN@debut", debut.as_str())?;
+    match &raw.source_date_debut_hint {
+        Some(current) if current <= &debut => {}
+        _ => raw.source_date_debut_hint = Some(debut),
+    }
+    Ok(())
 }
 
 fn append_body_block_boundary_for_current_tag(raw: &mut RawArticle, stack: &[String]) {
@@ -513,6 +915,124 @@ impl RawArticle {
             message: format!("canonical validation failed: {error}"),
         })?;
         Ok(document)
+    }
+}
+
+impl RawTextVersion {
+    fn into_text_version(
+        self,
+        xml: &str,
+        provenance: SourceProvenance,
+    ) -> Result<ParsedTextVersion, LegiParseError> {
+        let id = required("text_version", "META_COMMUN/ID", self.id)?;
+        validate_id("META_COMMUN/ID", &id, "LEGITEXT", "LEGITEXT[0-9]{12}")?;
+        let nature = required("text_version", "META_COMMUN/NATURE", self.nature)?;
+        let title = required("text_version", "META_TEXTE_VERSION/TITRE", self.title)?;
+        let status = required("text_version", "META_TEXTE_VERSION/ETAT", self.status)?;
+        let valid_from = normalize_required_date(
+            "META_TEXTE_VERSION/DATE_DEBUT",
+            &required(
+                "text_version",
+                "META_TEXTE_VERSION/DATE_DEBUT",
+                self.date_debut,
+            )?,
+        )?;
+        let valid_to_raw = required("text_version", "META_TEXTE_VERSION/DATE_FIN", self.date_fin)?;
+        let valid_to = normalize_end_date("META_TEXTE_VERSION/DATE_FIN", &valid_to_raw)?;
+        let source_payload_hash = provenance
+            .payload_hash
+            .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
+
+        Ok(ParsedTextVersion {
+            text_id: id,
+            title,
+            title_full: optional_non_empty(self.title_full),
+            status,
+            nature: nature.clone(),
+            valid_from,
+            valid_to,
+            valid_to_raw: Some(valid_to_raw),
+            source_url: optional_non_empty(self.url),
+            source_payload_hash,
+            source_archive: provenance.archive_name,
+            source_member_path: provenance.member_path,
+            canonical_version: format!("legi_text_version:v1:nature={nature}"),
+        })
+    }
+}
+
+impl RawSectionTa {
+    fn into_section_ta(
+        self,
+        xml: &str,
+        provenance: SourceProvenance,
+    ) -> Result<ParsedSectionTa, LegiParseError> {
+        let section_id = optional_non_empty(self.id)
+            .map(|id| {
+                validate_id("SECTION_TA/ID", &id, "LEGISCTA", "LEGISCTA[0-9]{12}")?;
+                Ok::<_, LegiParseError>(id)
+            })
+            .transpose()?;
+        let title = required("section_ta", "SECTION_TA/TITRE_TA", self.title)?;
+        let valid_from = normalize_required_date(
+            "TITRE_TXT@debut",
+            &required("section_ta", "TITRE_TXT@debut", self.date_debut)?,
+        )?;
+        let valid_to_raw = required("section_ta", "TITRE_TXT@fin", self.date_fin)?;
+        let valid_to = normalize_end_date("TITRE_TXT@fin", &valid_to_raw)?;
+        let source_payload_hash = provenance
+            .payload_hash
+            .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
+
+        Ok(ParsedSectionTa {
+            section_id,
+            title,
+            valid_from,
+            valid_to,
+            valid_to_raw: Some(valid_to_raw),
+            parent_text_id: self.parent_text_id,
+            hierarchy_path: self.hierarchy_path,
+            source_payload_hash,
+            source_archive: provenance.archive_name,
+            source_member_path: provenance.member_path,
+            canonical_version: "legi_section_ta:v1".to_owned(),
+        })
+    }
+}
+
+impl RawTextStruct {
+    fn into_text_struct(
+        self,
+        xml: &str,
+        provenance: SourceProvenance,
+    ) -> Result<ParsedTextStruct, LegiParseError> {
+        let id = required("textelr", "META_COMMUN/ID", self.id)?;
+        validate_id("META_COMMUN/ID", &id, "LEGITEXT", "LEGITEXT[0-9]{12}")?;
+        if let Some(date_publi) = &self.date_publi {
+            validate_date("META_TEXTE_CHRONICLE/DATE_PUBLI", date_publi)?;
+        }
+        if let Some(date_texte) = &self.date_texte {
+            validate_date("META_TEXTE_CHRONICLE/DATE_TEXTE", date_texte)?;
+        }
+        let source_payload_hash = provenance
+            .payload_hash
+            .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
+
+        Ok(ParsedTextStruct {
+            text_id: id,
+            nature: optional_non_empty(self.nature),
+            source_url: optional_non_empty(self.url),
+            cid: optional_non_empty(self.cid),
+            num: optional_non_empty(self.num),
+            nor: optional_non_empty(self.nor),
+            date_publi: optional_non_empty(self.date_publi),
+            date_texte: optional_non_empty(self.date_texte),
+            source_date_debut_hint: self.source_date_debut_hint,
+            source_payload_hash,
+            source_archive: provenance.archive_name,
+            source_member_path: provenance.member_path,
+            canonical_version: "legi_textelr:v1".to_owned(),
+        })
     }
 }
 
@@ -655,6 +1175,24 @@ fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>,
         });
     }
     Ok(attributes)
+}
+
+fn attribute_value(start: &BytesStart<'_>, wanted: &str) -> Result<Option<String>, LegiParseError> {
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| LegiParseError::Xml {
+            message: error.to_string(),
+        })?;
+        if attribute_name(attribute.key.as_ref()) != wanted {
+            continue;
+        }
+        let value = attribute
+            .decode_and_unescape_value(start.decoder())
+            .map_err(|error| LegiParseError::Xml {
+                message: error.to_string(),
+            })?;
+        return Ok(Some(value.into_owned()));
+    }
+    Ok(None)
 }
 
 fn assign_link_text(raw: &mut RawArticle, link_stack: &[usize], value: &str) {
@@ -1113,6 +1651,9 @@ mod tests {
             ParsedLegiXml::UnsupportedRoot { root } => {
                 panic!("expected article, got unsupported root {root}")
             }
+            other => {
+                panic!("expected article, got {} root", other.root_name())
+            }
         };
 
         assert_eq!(
@@ -1176,6 +1717,129 @@ mod tests {
     }
 
     #[test]
+    fn parses_text_version_metadata_root() {
+        let parsed = parse_legi_xml(
+            r#"
+<TEXTE_VERSION>
+  <META>
+    <META_COMMUN>
+      <ID>LEGITEXT000006070721</ID>
+      <URL>/codes/texte_lc/LEGITEXT000006070721</URL>
+      <NATURE>CODE</NATURE>
+    </META_COMMUN>
+    <META_SPEC>
+      <META_TEXTE_VERSION>
+        <TITRE>Code civil</TITRE>
+        <TITREFULL>Code civil complet</TITREFULL>
+        <ETAT>VIGUEUR</ETAT>
+        <DATE_DEBUT>2024-01-01</DATE_DEBUT>
+        <DATE_FIN>2999-01-01</DATE_FIN>
+      </META_TEXTE_VERSION>
+    </META_SPEC>
+  </META>
+</TEXTE_VERSION>
+"#,
+            provenance(),
+        )
+        .unwrap();
+
+        let ParsedLegiXml::TextVersion(text) = parsed else {
+            panic!("expected TEXTE_VERSION metadata root");
+        };
+        assert_eq!(text.text_id, "LEGITEXT000006070721");
+        assert_eq!(text.title, "Code civil");
+        assert_eq!(text.title_full.as_deref(), Some("Code civil complet"));
+        assert_eq!(text.valid_from, "2024-01-01");
+        assert_eq!(text.valid_to, None);
+        assert_eq!(text.valid_to_raw.as_deref(), Some("2999-01-01"));
+        assert_eq!(
+            text.source_archive.as_deref(),
+            Some("Freemium_legi_global.tar.gz")
+        );
+        assert!(text.source_payload_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn parses_section_ta_metadata_root_with_context() {
+        let parsed = parse_legi_xml(
+            r#"
+<SECTION_TA>
+  <ID>LEGISCTA000006089696</ID>
+  <TITRE_TA>Titre preliminaire</TITRE_TA>
+  <CONTEXTE>
+    <TEXTE cid="LEGITEXT000006070721">
+      <TITRE_TXT debut="1804-03-21" fin="2999-01-01">Code civil</TITRE_TXT>
+      <TM><TITRE_TM>Livre Ier</TITRE_TM></TM>
+    </TEXTE>
+  </CONTEXTE>
+</SECTION_TA>
+"#,
+            provenance(),
+        )
+        .unwrap();
+
+        let ParsedLegiXml::SectionTa(section) = parsed else {
+            panic!("expected SECTION_TA metadata root");
+        };
+        assert_eq!(section.section_id.as_deref(), Some("LEGISCTA000006089696"));
+        assert_eq!(section.title, "Titre preliminaire");
+        assert_eq!(section.valid_from, "1804-03-21");
+        assert_eq!(section.valid_to, None);
+        assert_eq!(
+            section.parent_text_id.as_deref(),
+            Some("LEGITEXT000006070721")
+        );
+        assert_eq!(
+            section.hierarchy_path,
+            vec!["Code civil".to_owned(), "Livre Ier".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parses_textelr_metadata_root_with_date_hint() {
+        let parsed = parse_legi_xml(
+            r#"
+<TEXTELR>
+  <META>
+    <META_COMMUN>
+      <ID>LEGITEXT000006070721</ID>
+      <URL>/codes/texte_lc/LEGITEXT000006070721</URL>
+      <NATURE>CODE</NATURE>
+    </META_COMMUN>
+    <META_SPEC>
+      <META_TEXTE_CHRONICLE>
+        <CID>LEGITEXT000006070721</CID>
+        <NUM>1</NUM>
+        <NOR>NOR0000000001A</NOR>
+        <DATE_PUBLI>1804-03-21</DATE_PUBLI>
+        <DATE_TEXTE>1804-03-21</DATE_TEXTE>
+      </META_TEXTE_CHRONICLE>
+    </META_SPEC>
+  </META>
+  <STRUCT>
+    <LIEN_ART id="LEGIARTI000006419320" debut="1804-02-21" fin="2999-01-01"/>
+    <LIEN_SECTION_TA id="LEGISCTA000006089696" debut="1804-03-21" fin="2999-01-01"/>
+  </STRUCT>
+</TEXTELR>
+"#,
+            provenance(),
+        )
+        .unwrap();
+
+        let ParsedLegiXml::TextStruct(text_struct) = parsed else {
+            panic!("expected TEXTELR metadata root");
+        };
+        assert_eq!(text_struct.text_id, "LEGITEXT000006070721");
+        assert_eq!(text_struct.nature.as_deref(), Some("CODE"));
+        assert_eq!(
+            text_struct.source_date_debut_hint.as_deref(),
+            Some("1804-02-21")
+        );
+        assert_eq!(text_struct.date_publi.as_deref(), Some("1804-03-21"));
+        assert_eq!(text_struct.date_texte.as_deref(), Some("1804-03-21"));
+    }
+
+    #[test]
     fn rejects_missing_required_fields() {
         let error = parse_article_fixture(
             r#"<ARTICLE><META><META_COMMUN><ID>LEGIARTI000006419320</ID></META_COMMUN></META></ARTICLE>"#,
@@ -1222,33 +1886,18 @@ mod tests {
 
     #[test]
     fn classifies_unsupported_roots() {
-        for (root, xml) in [
-            (
-                "SECTION_TA",
-                "<SECTION_TA><ID>LEGISCTA000006109057</ID></SECTION_TA>",
-            ),
-            (
-                "TEXTELR",
-                "<TEXTELR><META><META_COMMUN><ID>LEGITEXT000006070721</ID></META_COMMUN></META></TEXTELR>",
-            ),
-            (
-                "TEXTEKALI",
-                "<TEXTEKALI><META><META_COMMUN><ID>KALITEXT000005652781</ID></META_COMMUN></META></TEXTEKALI>",
-            ),
-            (
-                "TEXTE_VERSION",
-                "<TEXTE_VERSION><META><META_COMMUN><ID>LEGITEXT000006070721</ID></META_COMMUN></META></TEXTE_VERSION>",
-            ),
-        ] {
-            let parsed = parse_legi_xml(xml, provenance()).unwrap();
+        let parsed = parse_legi_xml(
+            "<TEXTEKALI><META><META_COMMUN><ID>KALITEXT000005652781</ID></META_COMMUN></META></TEXTEKALI>",
+            provenance(),
+        )
+        .unwrap();
 
-            assert_eq!(
-                parsed,
-                ParsedLegiXml::UnsupportedRoot {
-                    root: root.to_owned()
-                }
-            );
-        }
+        assert_eq!(
+            parsed,
+            ParsedLegiXml::UnsupportedRoot {
+                root: "TEXTEKALI".to_owned()
+            }
+        );
     }
 
     fn parse_article_fixture(xml: &str) -> Result<CanonicalDocument, LegiParseError> {
@@ -1256,6 +1905,9 @@ mod tests {
             ParsedLegiXml::Article(document) => Ok(*document),
             ParsedLegiXml::UnsupportedRoot { root } => {
                 panic!("expected article, got unsupported root {root}")
+            }
+            other => {
+                panic!("expected article, got {} root", other.root_name())
             }
         }
     }

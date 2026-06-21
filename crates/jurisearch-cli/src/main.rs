@@ -45,7 +45,7 @@ use jurisearch_storage::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const LEGI_PARSER_VERSION: &str = "legi_article_parser:v1";
+const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v2";
 const CANONICAL_SCHEMA_VERSION: &str = "canonical_document:v1";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
 
@@ -613,10 +613,12 @@ struct LegiArchiveIngestCounters {
     inserted_documents: usize,
     inserted_chunks: usize,
     inserted_publisher_edges: usize,
+    parsed_metadata_members: usize,
     skipped_members: usize,
     skipped_compatible_members: usize,
     failed_members: usize,
     quarantined_payloads: usize,
+    parsed_metadata_roots: BTreeMap<String, usize>,
     unsupported_roots: BTreeMap<String, usize>,
 }
 
@@ -731,10 +733,12 @@ fn ingest_legi_archives_payload(
         "inserted_documents": counters.inserted_documents,
         "inserted_chunks": counters.inserted_chunks,
         "inserted_publisher_edges": counters.inserted_publisher_edges,
+        "parsed_metadata_members": counters.parsed_metadata_members,
         "skipped_members": counters.skipped_members,
         "skipped_compatible_members": counters.skipped_compatible_members,
         "failed_members": counters.failed_members,
         "quarantined_payloads": counters.quarantined_payloads,
+        "parsed_metadata_roots": counters.parsed_metadata_roots,
         "unsupported_roots": counters.unsupported_roots,
         "quarantine_dir": quarantine_dir
     }))
@@ -840,6 +844,31 @@ fn process_legi_archive_member(
             counters.inserted_documents += report.documents;
             counters.inserted_chunks += report.chunks;
             counters.inserted_publisher_edges += report.publisher_edges;
+        }
+        Ok(
+            parsed @ (ParsedLegiXml::TextVersion(_)
+            | ParsedLegiXml::SectionTa(_)
+            | ParsedLegiXml::TextStruct(_)),
+        ) => {
+            let root = parsed.root_name().to_owned();
+            *counters
+                .parsed_metadata_roots
+                .entry(root.clone())
+                .or_default() += 1;
+            record_legi_member(
+                postgres,
+                run_id,
+                LegiMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: parsed.source_uid().or(Some(root.as_str())),
+                    date_anchor: parsed.date_anchor(),
+                    status: IngestMemberStatus::Skipped,
+                    compatibility,
+                },
+            )?;
+            counters.parsed_metadata_members += 1;
+            counters.skipped_members += 1;
         }
         Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
             *counters.unsupported_roots.entry(root.clone()).or_default() += 1;

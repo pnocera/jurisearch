@@ -37,6 +37,7 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     let mut publisher_edges = 0usize;
     let mut articles_with_block_boundaries = 0usize;
     let mut saw_section_ta = false;
+    let mut metadata_roots = BTreeSet::new();
     let mut unsupported_roots = BTreeSet::new();
     let mut parse_errors = Vec::new();
 
@@ -80,10 +81,17 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
                     }
                 }
                 Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
-                    if root == "SECTION_TA" {
-                        saw_section_ta = true;
-                    }
                     unsupported_roots.insert(root);
+                }
+                Ok(ParsedLegiXml::TextVersion(_)) => {
+                    metadata_roots.insert("TEXTE_VERSION");
+                }
+                Ok(ParsedLegiXml::SectionTa(_)) => {
+                    saw_section_ta = true;
+                    metadata_roots.insert("SECTION_TA");
+                }
+                Ok(ParsedLegiXml::TextStruct(_)) => {
+                    metadata_roots.insert("TEXTELR");
                 }
                 Err(error) => {
                     if member_path.contains("/article/") {
@@ -128,17 +136,17 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     );
     assert!(
         saw_section_ta,
-        "expected real LEGI sample to classify at least one SECTION_TA root as unsupported"
+        "expected real LEGI sample to parse at least one SECTION_TA metadata root"
     );
     // The default baseline currently starts with text-version XML before articles. This keeps
-    // unsupported-root classification visible in the smoke, but the test remains ignored because
+    // metadata-root classification visible in the smoke, but the test remains ignored because
     // tar member ordering is source-archive-specific.
     assert!(
-        unsupported_roots.contains("TEXTELR"),
-        "expected the sample to classify at least one TEXTELR root before articles; visited {visited_xml} XML members, unsupported roots: {unsupported_roots:?}"
+        metadata_roots.contains("TEXTELR"),
+        "expected the sample to parse at least one TEXTELR metadata root before articles; visited {visited_xml} XML members, metadata roots: {metadata_roots:?}, unsupported roots: {unsupported_roots:?}"
     );
     eprintln!(
-        "parsed {parsed_articles} ARTICLE members and {publisher_edges} publisher edges from `{}` after visiting {visited_xml} XML members; unsupported roots: {unsupported_roots:?}",
+        "parsed {parsed_articles} ARTICLE members and {publisher_edges} publisher edges from `{}` after visiting {visited_xml} XML members; metadata roots: {metadata_roots:?}; unsupported roots: {unsupported_roots:?}",
         archive_path.display()
     );
 }

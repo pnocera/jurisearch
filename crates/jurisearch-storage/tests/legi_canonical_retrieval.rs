@@ -247,6 +247,11 @@ fn collect_article_sample(archive_path: &Path) -> Result<ArticleSample, Box<dyn 
                 Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
                     unsupported_roots.insert(root);
                 }
+                Ok(
+                    ParsedLegiXml::TextVersion(_)
+                    | ParsedLegiXml::SectionTa(_)
+                    | ParsedLegiXml::TextStruct(_),
+                ) => {}
                 Err(error) => {
                     parse_errors.push(format!("{member_path}: {error}"));
                 }
