@@ -266,6 +266,9 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
     )
 }
 
+/// Backfill LEGI article hierarchy for the provided scope.
+///
+/// An empty scope is intentionally interpreted as a full maintenance backfill.
 pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
     postgres: &ManagedPostgres,
     scope: &LegiHierarchyBackfillScope,
@@ -279,6 +282,8 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
             // edge `debut` date, falling back to article validity and then to the
             // latest section row when source dates are incomplete or no section
             // validity window contains the available anchor.
+            // Section-UID scoping matches the current single-section enrichment
+            // model; multi-link hierarchy assembly must revisit this predicate.
             "SELECT d.document_id, d.canonical_json::text, d.valid_from::text, \
                     edge.payload::text, section.canonical_json::text, \
                     section.valid_from::text, section.valid_to::text \
