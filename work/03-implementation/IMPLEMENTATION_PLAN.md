@@ -336,6 +336,12 @@ Acceptance:
 - Invalid canonical records fail validation with actionable diagnostics.
 - Unsupported XML roots are explicitly classified and counted; they are not reported as successful inserts.
 
+Current status (2026-06-21):
+
+- Done: the first official LEGI parser slice is codified in `jurisearch-ingest::legi`. It parses `ARTICLE` XML into a canonical `Document`, validates typed `LEGIARTI` IDs and required fields, normalizes open-ended `DATE_FIN` sentinels to `valid_to = null` while preserving `valid_to_raw`, preserves status/nature/type, hierarchy context, source URL, archive/member provenance, and a SHA-256 source payload hash.
+- Done: structured parser errors now cover XML errors, missing required fields, invalid dates, invalid IDs, and unsupported roots. Unsupported roots return an explicit `UnsupportedRoot` classification instead of pretending to ingest.
+- Remaining before 0.5 is complete: parse a representative real LEGI XML subset from the archive reader, compute source payload hashes from raw archive-member bytes, add `SECTION_TA`/`TEXTELR` or document why they are deferred from Phase 0, preserve publisher links into canonical graph-edge candidates, emit structural chunks, and re-verify required fields against the current official DTDs.
+
 ### 0.5a Archive Precedence and Streaming Module
 
 Scope qualifier: Phase 0 implements the planner/reader semantics and deterministic-ordering tests needed to de-risk full-corpus ingestion; production ingest orchestration remains Phase 1+ work.
