@@ -1222,18 +1222,33 @@ mod tests {
 
     #[test]
     fn classifies_unsupported_roots() {
-        let parsed = parse_legi_xml(
-            "<TEXTELR><META><META_COMMUN><ID>LEGITEXT000006070721</ID></META_COMMUN></META></TEXTELR>",
-            provenance(),
-        )
-        .unwrap();
+        for (root, xml) in [
+            (
+                "SECTION_TA",
+                "<SECTION_TA><ID>LEGISCTA000006109057</ID></SECTION_TA>",
+            ),
+            (
+                "TEXTELR",
+                "<TEXTELR><META><META_COMMUN><ID>LEGITEXT000006070721</ID></META_COMMUN></META></TEXTELR>",
+            ),
+            (
+                "TEXTEKALI",
+                "<TEXTEKALI><META><META_COMMUN><ID>KALITEXT000005652781</ID></META_COMMUN></META></TEXTEKALI>",
+            ),
+            (
+                "TEXTE_VERSION",
+                "<TEXTE_VERSION><META><META_COMMUN><ID>LEGITEXT000006070721</ID></META_COMMUN></META></TEXTE_VERSION>",
+            ),
+        ] {
+            let parsed = parse_legi_xml(xml, provenance()).unwrap();
 
-        assert_eq!(
-            parsed,
-            ParsedLegiXml::UnsupportedRoot {
-                root: "TEXTELR".to_owned()
-            }
-        );
+            assert_eq!(
+                parsed,
+                ParsedLegiXml::UnsupportedRoot {
+                    root: root.to_owned()
+                }
+            );
+        }
     }
 
     fn parse_article_fixture(xml: &str) -> Result<CanonicalDocument, LegiParseError> {

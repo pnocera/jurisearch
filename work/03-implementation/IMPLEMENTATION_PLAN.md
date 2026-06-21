@@ -345,7 +345,8 @@ Current status (2026-06-21):
 - Done: article parsing now emits canonical publisher graph-edge candidates from `LIEN`, `LIEN_ART`, `LIEN_SECTION_TA`, `LIEN_TXT`, and inline anchors with `edge_source = publisher`, raw DILA attributes, source-member provenance, and conservative `refers_to` relation. The ignored real-archive smoke asserts publisher edges are emitted from the sampled official members.
 - Done: article parsing now emits one structural `article_body` chunk per article version with full hierarchy context, source-field provenance, raw source payload hash, `chunk_builder_version = legi_article_structural:v1`, and paragraph/list/line-break boundaries preserved in the chunk body. The ignored real-archive smoke asserts each sampled article emits the structural chunk.
 - Follow-up for 1.2/materialization: storage projection must persist emitted chunk provenance (`contextualized_body`, `chunking`, `boundary`, and `hierarchy_path`) via dedicated columns or chunk-level JSON before canonical chunks are inserted into Postgres; the current minimal `chunks` table does not yet carry all of these fields.
-- Remaining before 0.5 is complete: add `SECTION_TA`/`TEXTELR` or document why they are deferred from Phase 0, and re-verify required fields against the current official DTDs.
+- Done: Phase 0.5 root scope and DTD-required-field audit are recorded in `work/03-implementation/02-evidence/2026-06-21-legi-phase0-root-dtd-audit.md` using `/home/pierre/Apps/juridocs/opendata` and `/home/pierre/Apps/juridocs/DTD`. `SECTION_TA`, `TEXTELR`/`TEXTEKALI`, and `TEXTE_VERSION` are intentionally deferred from Phase 0.5 canonical output and are covered by explicit unsupported-root tests.
+- Remaining before 0.5 is complete: none. Phase 1 must add profile-specific field retention, `SECTION_TA`/text-structure hierarchy assembly, and text-level canonicalization before claiming full LEGI canonicalization.
 
 ### 0.5a Archive Precedence and Streaming Module
 
