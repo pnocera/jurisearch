@@ -40,6 +40,7 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         assert!(migrations.contains("6:chunk_provenance_columns"));
         assert!(migrations.contains("7:document_hierarchy_path_index"));
         assert!(migrations.contains("8:chunk_contextualized_bm25_index"));
+        assert!(migrations.contains("9:chunk_french_legal_bm25_analyzer"));
         assert_eq!(
             postgres.execute_sql(
                 "SELECT count(*)::text \
@@ -60,7 +61,9 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         );
         assert_eq!(
             postgres.execute_sql(
-                "SELECT (indexdef LIKE '%contextualized_body%')::text \
+                "SELECT (indexdef LIKE '%contextualized_body%' \
+                         AND indexdef LIKE '%ascii_folding%' \
+                         AND indexdef LIKE '%French%')::text \
                  FROM pg_indexes \
                  WHERE schemaname = current_schema() \
                    AND indexname = 'chunks_bm25_idx';",

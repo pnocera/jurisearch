@@ -390,7 +390,7 @@ Tasks:
 - Done: live chunk embeddings use canonical `contextualized_body` recovered from `documents.canonical_json` when present, falling back to `chunks.body` until chunk provenance gets first-class storage columns.
 - Done: ignored live CLI embed smoke creates a tiny durable index without dense rows, invokes `jurisearch ingest embed-chunks`, and verifies one endpoint-produced embedding plus the dense manifest/index coverage.
 - Done: the embedding client preflights input size before network calls using configurable endpoint ceilings (`JURISEARCH_EMBED_MAX_INPUT_CHARS`, `JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS`, `JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN`); `status` and `ingest embed-chunks` output record the active budget.
-- Remaining for Phase 1.2 hardening: replace the conservative estimated-token guard with tokenizer-grade splitting/preflight for long statutory chunks.
+- Done in Phase 1.2: tokenizer-backed embedding preflight can count a configured endpoint/model tokenizer before network calls, while conservative char/token estimates remain the fallback.
 
 Acceptance:
 
@@ -601,6 +601,15 @@ Acceptance:
 - Vocabulary seed entries carry source/review metadata.
 - Exact statutory references such as article numbers remain precise.
 - Authority prior never overrides explicit filters.
+
+Current status (2026-06-21):
+
+- Done: the chunk BM25 index now uses an explicit pg_search French legal tokenizer config for `chunks.contextualized_body`: default tokenization with accent folding, French stemming, and French stopword removal. Elision is handled by the tokenizer splitting apostrophes plus French stopword removal of elision particles; there is no dedicated elision filter. Schema migration `9` drops/rebuilds `chunks_bm25_idx` with `text_fields` tokenizer metadata and records manifest schema version `9`.
+- Operator note: migration `9` drops and rebuilds the `pg_search` BM25 index; on a corpus-scale populated index this can take time and temporarily removes the lexical index while the migration runs.
+- Done: retrieval smoke covers accent-insensitive and stemmed French legal lexical matching (`responsabilité`/`réparations`/`créancier`/`procédure`/`arrêté` vs unaccented queries), elision matching (`l'auteur` vs `auteur`), and exact statutory reference matching with reciprocal `Article 1240` and `Article 1241` assertions.
+- Already present from earlier retrieval slices: temporal validity predicates are applied independently to lexical and dense candidate pools before RRF fusion.
+- Follow-up for W5/W2 ranking evidence: include the French analyzer change in the planned before/after BM25 ranking check, and run a legal-vocabulary pass over the French stopword behavior before treating the analyzer as quality-neutral at scale.
+- Remaining: BM25/dense/hybrid ablation controls and reporting, vocabulary expansion seed lexicon plus `expand`, legal term/field boosters, authority prior, pagination/truncation guidance, and `--format concise|detailed`.
 
 ### 1.4 Citation Verification for Statutes
 

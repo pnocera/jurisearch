@@ -38,23 +38,23 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
          VALUES \
            ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
             'LEGIARTI000006419320', 'Code civil article 1240', \
-            'Article 1240', 'Tout fait quelconque de l''homme oblige celui par la faute duquel il est arrive a le reparer.', \
+            'Article 1240', 'Responsabilité civile pour fautes et réparations du dommage causé par l''auteur. Créancier, procédure et arrêté.', \
             '1804-02-21', 'sha256:article-1240', '{{\"official\":true}}'), \
            ('legi:LEGIARTI000000000001@2024-01-01', 'legi', 'article', \
-            'LEGIARTI000000000001', 'Code de cuisine article 1', \
-            'Article cuisine', 'Recette de tarte aux pommes avec cannelle.', \
+            'LEGIARTI000000000001', 'Code de cuisine article 1241', \
+            'Article cuisine', 'Recette article 1241 de tarte aux pommes avec cannelle.', \
             '2024-01-01', 'sha256:recipe', '{{\"official\":true}}'); \
          INSERT INTO chunks \
            (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
-            'responsabilite civile faute reparation dommage article 1240', \
-            'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
+            'responsabilité civile fautes réparations dommage causé par l''auteur créancier procédure arrêté article 1240', \
+            'Code civil > Article 1240\nresponsabilité civile fautes réparations dommage causé par l''auteur créancier procédure arrêté article 1240', \
             'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'), \
            ('chunk:recipe:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
-            'recette tarte pommes cannelle dessert', \
-            'Code de cuisine > Article 1\nrecette tarte pommes cannelle dessert', \
+            'recette article 1241 tarte pommes cannelle dessert', \
+            'Code de cuisine > Article 1241\nrecette article 1241 tarte pommes cannelle dessert', \
             'sha256:recipe', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
          INSERT INTO chunk_embeddings \
            (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -72,6 +72,51 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
          LIMIT 1;",
     )?;
     assert_eq!(lexical, "chunk:1240:0");
+
+    let normalized_legal = postgres.execute_sql(
+        "SELECT chunk_id \
+         FROM chunks \
+         WHERE contextualized_body @@@ 'responsabilite faute reparation' \
+         ORDER BY paradedb.score(chunk_id) DESC, chunk_id \
+         LIMIT 1;",
+    )?;
+    assert_eq!(normalized_legal, "chunk:1240:0");
+
+    let elision_legal = postgres.execute_sql(
+        "SELECT chunk_id \
+         FROM chunks \
+         WHERE contextualized_body @@@ 'auteur dommage' \
+         ORDER BY paradedb.score(chunk_id) DESC, chunk_id \
+         LIMIT 1;",
+    )?;
+    assert_eq!(elision_legal, "chunk:1240:0");
+
+    let additional_accents = postgres.execute_sql(
+        "SELECT chunk_id \
+         FROM chunks \
+         WHERE contextualized_body @@@ 'creancier procedure arrete' \
+         ORDER BY paradedb.score(chunk_id) DESC, chunk_id \
+         LIMIT 1;",
+    )?;
+    assert_eq!(additional_accents, "chunk:1240:0");
+
+    let statutory_reference = postgres.execute_sql(
+        "SELECT chunk_id \
+         FROM chunks \
+         WHERE contextualized_body @@@ 'article 1240' \
+         ORDER BY paradedb.score(chunk_id) DESC, chunk_id \
+         LIMIT 1;",
+    )?;
+    assert_eq!(statutory_reference, "chunk:1240:0");
+
+    let statutory_reference_decoy = postgres.execute_sql(
+        "SELECT chunk_id \
+         FROM chunks \
+         WHERE contextualized_body @@@ 'article 1241' \
+         ORDER BY paradedb.score(chunk_id) DESC, chunk_id \
+         LIMIT 1;",
+    )?;
+    assert_eq!(statutory_reference_decoy, "chunk:recipe:0");
 
     let vector = postgres.execute_sql(&format!(
         "SELECT chunk_id \

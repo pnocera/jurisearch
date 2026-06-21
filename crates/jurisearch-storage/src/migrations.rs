@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 8;
+pub const CURRENT_SCHEMA_VERSION: i32 = 9;
 
 struct Migration {
     version: i32,
@@ -341,6 +341,35 @@ WITH (key_field = 'chunk_id');
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 8), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 9,
+        name: "chunk_french_legal_bm25_analyzer",
+        sql: r#"
+DROP INDEX IF EXISTS chunks_bm25_idx;
+
+CREATE INDEX chunks_bm25_idx
+ON chunks USING bm25 (chunk_id, contextualized_body)
+WITH (
+    key_field = 'chunk_id',
+    text_fields = '{
+        "contextualized_body": {
+            "tokenizer": {
+                "type": "default",
+                "ascii_folding": true,
+                "stemmer": "French",
+                "stopwords_language": "French"
+            }
+        }
+    }'
+);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 9), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;
