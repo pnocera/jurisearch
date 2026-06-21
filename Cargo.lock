@@ -648,6 +648,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-official-api"
+version = "0.1.0"
+dependencies = [
+ "jurisearch-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ureq",
+]
+
+[[package]]
 name = "jurisearch-storage"
 version = "0.1.0"
 dependencies = [

@@ -443,6 +443,12 @@ Acceptance:
 - Rate-limit and upstream-error paths are testable without leaking secrets.
 - `cite --online`, Judilibre ingestion, and `sync --since` have a shared client rather than bespoke API code.
 
+Current status (2026-06-21):
+
+- Done: `jurisearch-official-api` provides the shared PISTE client foundation with production/sandbox base URLs, redacted config debug output, Judilibre `KeyId` auth, Légifrance OAuth2 client-credentials token acquisition/cache, Bearer search calls, and `/transactionalhistory` path support.
+- Done: mock-server tests verify Judilibre sends `KeyId`, Légifrance posts the `scope=openid` client-credentials form and reuses Bearer tokens, missing credentials map to dependency errors, and HTTP 429 maps to stable upstream/rate-limit errors without leaking secrets.
+- Remaining for later 0.8 slices: live opt-in smoke tests against configured PISTE credentials, explicit retry/backoff scheduling around 429/5xx, keyring-backed secret loading, CLI wiring for `cite --online` / `sync`, and Judilibre sandbox validation once the sandbox app is subscribed.
+
 Phase 0 exit gate:
 
 - Backend stack passes acceptance or fallback path is formally triggered.
