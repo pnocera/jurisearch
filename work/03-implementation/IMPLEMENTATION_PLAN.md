@@ -415,6 +415,14 @@ Acceptance:
 - Reranker adoption remains eval-gated; the spike does not force adoption.
 - If local inference is infeasible but quality gain is material, HTTP provider remains available.
 
+Current status (2026-06-21):
+
+- Done: feasibility evidence is recorded in `work/03-implementation/02-evidence/2026-06-21-reranker-feasibility.md`.
+- Done: `bge-reranker-v2-m3` remains the first benchmark candidate, with `max_length=1024` as the initial setting because upstream notes 8192-token support but recommends 1024 from fine-tuning.
+- Done: Phase 1 should implement a provider seam first (`disabled | http | local_onnx`), keep `disabled` as default, and use HTTP/TEI as the first shippable provider if legal eval proves a rerank gain.
+- Done: local ONNX through Rust `ort` is feasible enough for a benchmark spike, but not selected as default before latency, tokenizer, runtime packaging, and model-cache policy tests.
+- Done: local GPU acceleration is not a Phase 1 dependency; this workstation exposes AMD Radeon 8060S through ROCm, while the practical first measurements should be CPU and HTTP.
+
 ### 0.8 Official API Client Foundation
 
 Tasks:
