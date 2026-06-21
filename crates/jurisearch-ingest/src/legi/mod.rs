@@ -87,7 +87,7 @@ pub struct ParsedTextVersion {
     pub title: String,
     pub title_full: Option<String>,
     pub status: String,
-    pub nature: String,
+    pub nature: Option<String>,
     pub valid_from: String,
     pub valid_to: Option<String>,
     pub valid_to_raw: Option<String>,
@@ -926,7 +926,7 @@ impl RawTextVersion {
     ) -> Result<ParsedTextVersion, LegiParseError> {
         let id = required("text_version", "META_COMMUN/ID", self.id)?;
         validate_id("META_COMMUN/ID", &id, "LEGITEXT", "LEGITEXT[0-9]{12}")?;
-        let nature = required("text_version", "META_COMMUN/NATURE", self.nature)?;
+        let nature = optional_non_empty(self.nature);
         let title = required("text_version", "META_TEXTE_VERSION/TITRE", self.title)?;
         let status = required("text_version", "META_TEXTE_VERSION/ETAT", self.status)?;
         let valid_from = normalize_required_date(
@@ -956,7 +956,10 @@ impl RawTextVersion {
             source_payload_hash,
             source_archive: provenance.archive_name,
             source_member_path: provenance.member_path,
-            canonical_version: format!("legi_text_version:v1:nature={nature}"),
+            canonical_version: format!(
+                "legi_text_version:v1:nature={}",
+                nature.as_deref().unwrap_or("absent")
+            ),
         })
     }
 }
@@ -1749,6 +1752,7 @@ mod tests {
         assert_eq!(text.text_id, "LEGITEXT000006070721");
         assert_eq!(text.title, "Code civil");
         assert_eq!(text.title_full.as_deref(), Some("Code civil complet"));
+        assert_eq!(text.nature.as_deref(), Some("CODE"));
         assert_eq!(text.valid_from, "2024-01-01");
         assert_eq!(text.valid_to, None);
         assert_eq!(text.valid_to_raw.as_deref(), Some("2999-01-01"));
@@ -1757,6 +1761,42 @@ mod tests {
             Some("Freemium_legi_global.tar.gz")
         );
         assert!(text.source_payload_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn parses_text_version_with_empty_nature_as_absent() {
+        let parsed = parse_legi_xml(
+            r#"
+<TEXTE_VERSION>
+  <META>
+    <META_COMMUN>
+      <ID>LEGITEXT000049371154</ID>
+      <URL>/id/LEGITEXT000049371154</URL>
+      <NATURE/>
+    </META_COMMUN>
+    <META_SPEC>
+      <META_TEXTE_VERSION>
+        <TITRE>Arrete du 12 avril 1956</TITRE>
+        <ETAT>VIGUEUR</ETAT>
+        <DATE_DEBUT>1956-04-12</DATE_DEBUT>
+        <DATE_FIN>2999-01-01</DATE_FIN>
+      </META_TEXTE_VERSION>
+    </META_SPEC>
+  </META>
+</TEXTE_VERSION>
+"#,
+            provenance(),
+        )
+        .unwrap();
+
+        let ParsedLegiXml::TextVersion(text) = parsed else {
+            panic!("expected TEXTE_VERSION metadata root");
+        };
+        assert_eq!(text.text_id, "LEGITEXT000049371154");
+        assert_eq!(text.nature, None);
+        assert_eq!(text.canonical_version, "legi_text_version:v1:nature=absent");
+        assert_eq!(text.valid_from, "1956-04-12");
+        assert_eq!(text.valid_to, None);
     }
 
     #[test]
