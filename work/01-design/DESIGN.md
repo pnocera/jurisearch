@@ -569,7 +569,7 @@ index/
   ```toml
   [embedding]
   provider  = "openai_compatible"        # default; "in_process" for offline single-binary
-  base_url  = "http://127.0.0.1:8080/v1" # llama.cpp on loopback, or a hosted API URL
+  base_url  = "http://127.0.0.1:8097/v1" # llama.cpp on loopback, or a hosted API URL
   model     = "bge-m3"                    # a DEDICATED embedding model, not a chat model
   api_key   = "no-key"                    # or via JURISEARCH_EMBED_API_KEY
   dimension = 1024                        # validated against the index; mismatch = hard error

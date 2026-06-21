@@ -1,10 +1,16 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+use url::Host;
 
 pub const PHASE0_EMBEDDING_MODEL: &str = "bge-m3";
 pub const PHASE0_EMBEDDING_DIMENSION: usize = 1024;
 pub const PHASE0_EMBEDDING_POOLING: &str = "cls";
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const NORMALIZED_L2_TOLERANCE: f32 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +183,7 @@ impl EmbeddingVector {
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleClient {
     config: EmbeddingConfig,
+    agent: ureq::Agent,
 }
 
 impl OpenAiCompatibleClient {
@@ -195,7 +202,11 @@ impl OpenAiCompatibleClient {
         {
             return Err(EmbeddingError::MissingBaseUrl);
         }
-        Ok(Self { config })
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(READ_TIMEOUT)
+            .build();
+        Ok(Self { config, agent })
     }
 
     pub fn embed_query(
@@ -212,7 +223,10 @@ impl OpenAiCompatibleClient {
                 .expect("base_url checked by constructor")
                 .trim_end_matches('/')
         );
-        let mut request = ureq::post(&url).set("Content-Type", "application/json");
+        let mut request = self
+            .agent
+            .post(&url)
+            .set("Content-Type", "application/json");
         if let Some(api_key) = self
             .config
             .api_key
@@ -227,7 +241,7 @@ impl OpenAiCompatibleClient {
                 "model": self.config.model,
                 "input": input,
             }))
-            .map_err(|error| EmbeddingError::Endpoint(error.to_string()))?;
+            .map_err(endpoint_error)?;
         let response = response
             .into_json::<OpenAiEmbeddingResponse>()
             .map_err(|error| EmbeddingError::InvalidResponse(error.to_string()))?;
@@ -246,10 +260,18 @@ impl OpenAiCompatibleClient {
             });
         }
 
-        Ok(EmbeddingVector {
+        let vector = EmbeddingVector {
             values: embedding,
             fingerprint: self.config.fingerprint(),
-        })
+        };
+        if expected.normalize && (vector.l2_norm() - 1.0).abs() > NORMALIZED_L2_TOLERANCE {
+            return Err(EmbeddingError::NormalizationMismatch {
+                model: self.config.model.clone(),
+                norm: vector.l2_norm(),
+            });
+        }
+
+        Ok(vector)
     }
 }
 
@@ -264,17 +286,31 @@ struct OpenAiEmbeddingData {
 }
 
 pub fn base_url_class(base_url: &str) -> BaseUrlClass {
-    let lower = base_url.to_ascii_lowercase();
-    if lower.starts_with("http://127.")
-        || lower.starts_with("http://localhost")
-        || lower.starts_with("http://[::1]")
-        || lower.starts_with("https://127.")
-        || lower.starts_with("https://localhost")
-        || lower.starts_with("https://[::1]")
-    {
-        BaseUrlClass::LocalLoopback
-    } else {
-        BaseUrlClass::Hosted
+    let Ok(url) = url::Url::parse(base_url) else {
+        return BaseUrlClass::Hosted;
+    };
+    match url.host() {
+        Some(Host::Domain(host)) if host.eq_ignore_ascii_case("localhost") => {
+            BaseUrlClass::LocalLoopback
+        }
+        Some(Host::Ipv4(address)) if address.is_loopback() => BaseUrlClass::LocalLoopback,
+        Some(Host::Ipv6(address)) if address.is_loopback() => BaseUrlClass::LocalLoopback,
+        _ => BaseUrlClass::Hosted,
+    }
+}
+
+fn endpoint_error(error: ureq::Error) -> EmbeddingError {
+    match error {
+        ureq::Error::Status(code, response) => {
+            let body = response.into_string().unwrap_or_default();
+            let body = body.trim();
+            if body.is_empty() {
+                EmbeddingError::Endpoint(format!("http status {code}"))
+            } else {
+                EmbeddingError::Endpoint(format!("http status {code}: {body}"))
+            }
+        }
+        other => EmbeddingError::Endpoint(other.to_string()),
     }
 }
 
@@ -298,6 +334,10 @@ pub enum EmbeddingError {
         expected: usize,
         actual: usize,
     },
+    #[error(
+        "embedding endpoint returned a vector for model `{model}` with L2 norm {norm:.4}, but the configured fingerprint requires normalized vectors"
+    )]
+    NormalizationMismatch { model: String, norm: f32 },
     #[error(
         "embedding fingerprint mismatch: configured {configured:?}, index requires {expected:?}; reconfigure the endpoint or run an explicit re-embed/index migration"
     )]
@@ -330,6 +370,14 @@ mod tests {
         assert_eq!(fingerprint.base_url_class, BaseUrlClass::LocalLoopback);
         assert_eq!(
             base_url_class("https://embeddings.example.invalid/v1"),
+            BaseUrlClass::Hosted
+        );
+        assert_eq!(
+            base_url_class("http://localhost.attacker.example/v1"),
+            BaseUrlClass::Hosted
+        );
+        assert_eq!(
+            base_url_class("http://127.0.0.1.attacker.example/v1"),
             BaseUrlClass::Hosted
         );
     }
@@ -370,6 +418,36 @@ mod tests {
     }
 
     #[test]
+    fn unnormalized_vector_is_rejected_when_fingerprint_requires_normalized() {
+        let base_url = spawn_embedding_server(r#"{"data":[{"embedding":[1.0,1.0,0.0]}]}"#);
+        let config = EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let error = client
+            .embed_query("responsabilite civile", &expected)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            EmbeddingError::NormalizationMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn http_status_error_preserves_endpoint_body() {
+        let base_url =
+            spawn_embedding_server_with_status("400 Bad Request", r#"{"error":"model not found"}"#);
+        let config = EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let error = client
+            .embed_query("responsabilite civile", &expected)
+            .unwrap_err();
+        assert!(error.to_string().contains("model not found"));
+    }
+
+    #[test]
     fn fingerprint_mismatch_fails_before_endpoint_call() {
         let config = EmbeddingConfig::phase0_bge_m3("http://127.0.0.1:9/v1", None);
         let mut expected = config.fingerprint();
@@ -392,6 +470,13 @@ mod tests {
     }
 
     fn spawn_embedding_server(response_body: &'static str) -> String {
+        spawn_embedding_server_with_status("200 OK", response_body)
+    }
+
+    fn spawn_embedding_server_with_status(
+        status: &'static str,
+        response_body: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         thread::spawn(move || {
@@ -401,7 +486,7 @@ mod tests {
             let request = String::from_utf8_lossy(&request[..read]);
             assert!(request.starts_with("POST /v1/embeddings "));
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 response_body.len(),
                 response_body
             );

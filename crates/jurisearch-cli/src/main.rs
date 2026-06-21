@@ -399,7 +399,6 @@ fn status_payload() -> Value {
     let mut embedding_config = embedding_config;
     if let Ok(model) = std::env::var("JURISEARCH_EMBED_MODEL") {
         embedding_config.model = model;
-        embedding_config.provisional = embedding_config.model == "bge-m3";
     }
     if let Ok(dimension) = std::env::var("JURISEARCH_EMBED_DIMENSION") {
         embedding_config.dimension = dimension.parse().unwrap_or(embedding_config.dimension);
