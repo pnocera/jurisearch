@@ -1241,6 +1241,12 @@ fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, Er
         "scope": "full",
         "hierarchy_backfilled_documents": report.documents_updated,
         "hierarchy_backfill_invalidated_embeddings": report.embeddings_invalidated,
+        "embedding_rebuild_required": report.embeddings_invalidated > 0,
+        "recommended_next_command": if report.embeddings_invalidated > 0 {
+            Some("jurisearch ingest embed-chunks")
+        } else {
+            None::<&str>
+        },
     }))
 }
 

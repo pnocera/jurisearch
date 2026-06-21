@@ -1033,7 +1033,7 @@ fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageErro
              VALUES
                 ('edge:1240:section', 'legi:LEGIARTI000006419320@1804-02-21',
                  'structure', 'publisher',
-                 '{"source_tag":"LIEN_SECTION_TA","to_source_uid":"LEGISCTA000006089696","debut":"1804-03-21","fin":"2999-01-01"}');"#,
+                 '{"source_tag":"LIEN_SECTION_TA","to_source_uid":"LEGISCTA000006089696","attributes":[{"key":"debut","value":"1804-03-21"},{"key":"fin","value":"2999-01-01"}]}');"#,
         )?;
         postgres.execute_sql(&format!(
             "INSERT INTO chunk_embeddings \
@@ -1061,6 +1061,29 @@ fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageErro
     assert_eq!(json["scope"], "full");
     assert_eq!(json["hierarchy_backfilled_documents"], 1);
     assert_eq!(json["hierarchy_backfill_invalidated_embeddings"], 1);
+    assert_eq!(json["embedding_rebuild_required"], true);
+    assert_eq!(
+        json["recommended_next_command"],
+        "jurisearch ingest embed-chunks"
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(root.path())
+        .args(["ingest", "backfill-legi-hierarchy"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["hierarchy_backfilled_documents"], 0);
+    assert_eq!(json["hierarchy_backfill_invalidated_embeddings"], 0);
+    assert_eq!(json["embedding_rebuild_required"], false);
+    assert!(json["recommended_next_command"].is_null());
 
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
     assert_eq!(
