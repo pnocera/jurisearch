@@ -334,10 +334,10 @@ fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()>
 }
 
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    let index_dir = require_existing_index_dir(index_dir)?;
     let query_text = parade_query_text(&args.query).ok_or_else(|| {
         ErrorObject::bad_input("search query must contain at least one searchable token")
     })?;
+    let index_dir = require_existing_index_dir(index_dir)?;
     let kind: LegalKind = args.kind.into();
     if matches!(kind, LegalKind::Decision) {
         return Err(ErrorObject::bad_input(
@@ -348,7 +348,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     let postgres = open_index(index_dir.as_path())?;
     let embedding_config = embedding_config_from_env();
     let expected_fingerprint = embedding_config.fingerprint();
-    let embedding_fingerprint = storage_embedding_fingerprint(&embedding_config);
+    let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
     let client = OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
     let embedding = client
         .embed_query(args.query.as_str(), &expected_fingerprint)
@@ -362,13 +362,27 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
             query_embedding: query_embedding.as_str(),
             embedding_fingerprint: embedding_fingerprint.as_str(),
             as_of: as_of.as_str(),
-            lexical_limit: args.top_k.saturating_mul(4).max(args.top_k),
-            dense_limit: args.top_k.saturating_mul(4).max(args.top_k),
+            kind_filter: if matches!(kind, LegalKind::Code) {
+                Some("article")
+            } else {
+                None
+            },
+            lexical_limit: args.top_k.saturating_mul(4),
+            dense_limit: args.top_k.saturating_mul(4),
             limit: args.top_k,
         },
     )
     .map_err(storage_error_object)?;
-    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+    let response: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if response["candidates"]
+        .as_array()
+        .is_some_and(|candidates| candidates.is_empty())
+    {
+        Err(no_results("search returned no candidates"))
+    } else {
+        Ok(response)
+    }
 }
 
 fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
@@ -379,20 +393,28 @@ fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
 }
 
 fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    if args.as_of.is_some() || args.part.is_some() {
+        return Err(ErrorObject::bad_input(
+            "fetch --as-of and --part are reserved for a later fetch slice and are not applied yet",
+        ));
+    }
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     let ids = args.ids.iter().map(String::as_str).collect::<Vec<_>>();
     let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
         .map_err(storage_error_object)?;
-    let mut response: Value = serde_json::from_str(&response)
+    let response: Value = serde_json::from_str(&response)
         .map_err(|error| dependency_unavailable(error.to_string()))?;
-    if let Some(as_of) = args.as_of {
-        response["as_of"] = Value::String(as_of);
+    if response["documents"]
+        .as_array()
+        .is_some_and(|documents| documents.is_empty())
+    {
+        Err(no_results(
+            "fetch returned no documents for the requested IDs",
+        ))
+    } else {
+        Ok(response)
     }
-    if let Some(part) = args.part {
-        response["part"] = Value::String(part);
-    }
-    Ok(response)
 }
 
 fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
@@ -631,6 +653,14 @@ fn dependency_unavailable(message: impl Into<String>) -> ErrorObject {
     }
 }
 
+fn no_results(message: impl Into<String>) -> ErrorObject {
+    ErrorObject {
+        code: ErrorCode::NoResults,
+        message: message.into(),
+        suggestions: vec!["Try a different query, ID, or --as-of date.".into()],
+    }
+}
+
 fn upstream_unavailable(message: impl Into<String>) -> ErrorObject {
     ErrorObject {
         code: ErrorCode::Upstream,
@@ -670,13 +700,6 @@ fn parade_query_text(query: &str) -> Option<String> {
     } else {
         Some(terms.join(" "))
     }
-}
-
-fn storage_embedding_fingerprint(config: &EmbeddingConfig) -> String {
-    format!(
-        "{}:{}:normalize:{}",
-        config.model, config.dimension, config.normalize
-    )
 }
 
 fn pgvector_literal(values: &[f32]) -> String {

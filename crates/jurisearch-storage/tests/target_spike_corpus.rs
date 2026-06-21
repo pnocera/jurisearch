@@ -42,6 +42,7 @@ fn target_spike_corpus_retrieval_stays_under_latency_budget() -> Result<(), Stor
         query_embedding: &target_vector,
         embedding_fingerprint: EMBEDDING_FINGERPRINT,
         as_of: "2024-06-01",
+        kind_filter: None,
         lexical_limit: 50,
         dense_limit: 50,
         limit: 8,

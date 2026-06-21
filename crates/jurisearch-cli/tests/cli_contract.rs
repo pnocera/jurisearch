@@ -166,6 +166,34 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     assert_eq!(json["id"], "fetch-one");
     assert_eq!(json["ok"], true);
     assert_eq!(json["result"]["documents"][0]["document_id"], document_id);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["fetch", "legi:LEGIARTI999999999999@2024-01-01"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "no_results");
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["fetch", document_id, "--as-of", "2024-01-01"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
     Ok(())
 }
 
@@ -188,6 +216,7 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
         std::env::var("JURISEARCH_EMBED_API_KEY").ok(),
     );
     let expected = embedding_config.fingerprint();
+    let storage_fingerprint = expected.storage_embedding_fingerprint();
     let client = OpenAiCompatibleClient::new(embedding_config)?;
     let embedding = client.embed_query(query, &expected)?;
     let embedding = pgvector_literal(&embedding.values);
@@ -210,11 +239,11 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
              VALUES \
                 ('chunk:1240:0', '{document_id}', 0, \
                  'responsabilite civile faute reparation dommage article 1240', \
-                 'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
+                 'sha256:article-1240', 'chunker:v0', '{storage_fingerprint}'); \
              INSERT INTO chunk_embeddings \
                 (chunk_id, embedding_fingerprint, embedding, model, dimension) \
              VALUES \
-                ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+                ('chunk:1240:0', '{storage_fingerprint}', '{}', 'bge-m3', 1024);",
             embedding
         ))?;
     }

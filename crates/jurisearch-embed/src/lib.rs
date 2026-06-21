@@ -126,6 +126,11 @@ impl EmbeddingConfig {
     }
 
     #[must_use]
+    pub fn storage_embedding_fingerprint(&self) -> String {
+        self.fingerprint().storage_embedding_fingerprint()
+    }
+
+    #[must_use]
     pub fn manifest(&self) -> EmbeddingManifest {
         EmbeddingManifest {
             fingerprint: self.fingerprint(),
@@ -160,6 +165,16 @@ impl EmbeddingConfig {
         Err(EmbeddingError::MissingLocalModel {
             model: self.model.clone(),
         })
+    }
+}
+
+impl EmbeddingFingerprint {
+    #[must_use]
+    pub fn storage_embedding_fingerprint(&self) -> String {
+        format!(
+            "{}:{}:normalize:{}",
+            self.model, self.dimension, self.normalize
+        )
     }
 }
 

@@ -83,7 +83,51 @@ pub fn compiled_schema() -> Value {
             "SearchResponse": {
                 "properties": {
                     "query": { "type": "string" },
-                    "results": { "type": "array" }
+                    "as_of": { "type": "string", "format": "date" },
+                    "limit": { "type": "integer" },
+                    "candidates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "chunk_id": { "type": "string" },
+                                "document_id": { "type": "string" },
+                                "source": { "type": "string" },
+                                "kind": { "type": "string" },
+                                "citation": { "type": ["string", "null"] },
+                                "title": { "type": ["string", "null"] },
+                                "source_url": { "type": ["string", "null"] },
+                                "snippet": { "type": "string" },
+                                "validity": { "type": "object" },
+                                "scores": { "type": "object" },
+                                "cursor": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            },
+            "FetchResponse": {
+                "properties": {
+                    "documents": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": { "type": "string" },
+                                "source": { "type": "string" },
+                                "kind": { "type": "string" },
+                                "source_uid": { "type": "string" },
+                                "version_group": { "type": ["string", "null"] },
+                                "citation": { "type": ["string", "null"] },
+                                "title": { "type": ["string", "null"] },
+                                "body": { "type": "string" },
+                                "validity": { "type": "object" },
+                                "source_url": { "type": ["string", "null"] },
+                                "source_payload_hash": { "type": "string" },
+                                "chunks": { "type": "array" }
+                            }
+                        }
+                    }
                 }
             },
             "StatusResponse": {

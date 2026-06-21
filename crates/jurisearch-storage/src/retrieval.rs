@@ -10,6 +10,7 @@ pub struct HybridCandidateQuery<'a> {
     pub query_embedding: &'a str,
     pub embedding_fingerprint: &'a str,
     pub as_of: &'a str,
+    pub kind_filter: Option<&'a str>,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,
@@ -28,6 +29,10 @@ pub fn hybrid_candidates_json(
     let query_embedding = sql_string_literal(query.query_embedding);
     let embedding_fingerprint = sql_string_literal(query.embedding_fingerprint);
     let as_of = sql_string_literal(query.as_of);
+    let kind_predicate = query
+        .kind_filter
+        .map(|kind| format!("AND d.kind = {}", sql_string_literal(kind)))
+        .unwrap_or_default();
     let dense_pool_limit = query
         .dense_limit
         .saturating_mul(DENSE_TEMPORAL_OVERFETCH_FACTOR)
@@ -46,6 +51,7 @@ WITH lexical AS (
     WHERE c.body @@@ {query_text}
       AND (d.valid_from IS NULL OR d.valid_from <= {as_of}::date)
       AND (d.valid_to IS NULL OR d.valid_to > {as_of}::date)
+      {kind_predicate}
     ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id
     LIMIT {lexical_limit}
 ),
@@ -72,6 +78,7 @@ dense AS (
     JOIN documents d ON d.document_id = c.document_id
     WHERE (d.valid_from IS NULL OR d.valid_from <= {as_of}::date)
       AND (d.valid_to IS NULL OR d.valid_to > {as_of}::date)
+      {kind_predicate}
     ORDER BY dp.dense_rank, dp.chunk_id
     LIMIT {dense_limit}
 ),
@@ -156,6 +163,7 @@ SELECT jsonb_build_object(
         query_embedding = query_embedding,
         embedding_fingerprint = embedding_fingerprint,
         as_of = as_of,
+        kind_predicate = kind_predicate,
         lexical_limit = query.lexical_limit,
         dense_limit = query.dense_limit,
         dense_pool_limit = dense_pool_limit,
