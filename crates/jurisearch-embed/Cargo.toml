@@ -9,5 +9,9 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokenizers.workspace = true
 ureq.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

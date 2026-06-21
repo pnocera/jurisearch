@@ -1,15 +1,20 @@
-use std::{fmt, time::Duration};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+use tokenizers::Tokenizer;
 use url::Host;
 
 pub const PHASE0_EMBEDDING_MODEL: &str = "bge-m3";
 pub const PHASE0_EMBEDDING_DIMENSION: usize = 1024;
 pub const PHASE0_EMBEDDING_POOLING: &str = "cls";
-// Keep the Phase 0 character ceiling below the rough bge-m3 token ceiling; a
-// tokenizer-grade splitter belongs with Phase 1.2 chunk hardening.
+// Keep the default character ceiling below the rough bge-m3 token ceiling; a
+// configured tokenizer can apply the endpoint-specific token budget exactly.
 pub const PHASE0_EMBEDDING_MAX_INPUT_CHARS: usize = 24_000;
 pub const PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS: usize = 8_192;
 pub const PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN: usize = 4;
@@ -31,6 +36,13 @@ pub enum BaseUrlClass {
     LocalLoopback,
     Hosted,
     InProcess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingTokenCountMethod {
+    EstimatedChars,
+    Tokenizer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +74,7 @@ pub struct EmbeddingConfig {
     pub max_input_chars: Option<usize>,
     pub max_estimated_tokens: Option<usize>,
     pub estimated_chars_per_token: usize,
+    pub tokenizer_path: Option<PathBuf>,
     pub provisional: bool,
     pub reembeddable: bool,
 }
@@ -86,6 +99,7 @@ impl EmbeddingConfig {
             max_input_chars: Some(PHASE0_EMBEDDING_MAX_INPUT_CHARS),
             max_estimated_tokens: Some(PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS),
             estimated_chars_per_token: PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN,
+            tokenizer_path: None,
             provisional: false,
             reembeddable: true,
         }
@@ -103,6 +117,7 @@ impl EmbeddingConfig {
             max_input_chars: Some(PHASE0_EMBEDDING_MAX_INPUT_CHARS),
             max_estimated_tokens: Some(PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS),
             estimated_chars_per_token: PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN,
+            tokenizer_path: None,
             provisional: true,
             reembeddable: true,
         }
@@ -120,6 +135,7 @@ impl EmbeddingConfig {
             max_input_chars: Some(PHASE0_EMBEDDING_MAX_INPUT_CHARS),
             max_estimated_tokens: Some(PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS),
             estimated_chars_per_token: PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN,
+            tokenizer_path: None,
             provisional: true,
             reembeddable: true,
         }
@@ -185,12 +201,33 @@ impl EmbeddingConfig {
     }
 
     pub fn preflight_input(&self, input: &str) -> Result<EmbeddingInputStats, EmbeddingError> {
+        self.preflight_input_with_tokenizer(input, None)
+    }
+
+    pub fn preflight_input_with_tokenizer(
+        &self,
+        input: &str,
+        tokenizer: Option<&Tokenizer>,
+    ) -> Result<EmbeddingInputStats, EmbeddingError> {
         let chars = input.chars().count();
         let chars_per_token = self.estimated_chars_per_token.max(1);
         let estimated_tokens = chars.div_ceil(chars_per_token);
+        let (tokens, token_count_method) = if let Some(tokenizer) = tokenizer {
+            let encoding = tokenizer
+                .encode(input, true)
+                .map_err(|error| EmbeddingError::TokenizerEncode(error.to_string()))?;
+            (
+                encoding.get_ids().len(),
+                EmbeddingTokenCountMethod::Tokenizer,
+            )
+        } else {
+            (estimated_tokens, EmbeddingTokenCountMethod::EstimatedChars)
+        };
         let stats = EmbeddingInputStats {
             chars,
+            tokens,
             estimated_tokens,
+            token_count_method,
             chars_per_token,
             max_chars: self.max_input_chars,
             max_estimated_tokens: self.max_estimated_tokens,
@@ -200,11 +237,20 @@ impl EmbeddingConfig {
             .is_some_and(|max_chars| chars > max_chars)
             || self
                 .max_estimated_tokens
-                .is_some_and(|max_tokens| estimated_tokens > max_tokens)
+                .is_some_and(|max_tokens| tokens > max_tokens)
         {
             return Err(EmbeddingError::InputTooLong(stats));
         }
         Ok(stats)
+    }
+
+    #[must_use]
+    pub fn configured_token_count_method(&self) -> EmbeddingTokenCountMethod {
+        if self.tokenizer_path.is_some() {
+            EmbeddingTokenCountMethod::Tokenizer
+        } else {
+            EmbeddingTokenCountMethod::EstimatedChars
+        }
     }
 }
 
@@ -238,7 +284,9 @@ impl EmbeddingVector {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddingInputStats {
     pub chars: usize,
+    pub tokens: usize,
     pub estimated_tokens: usize,
+    pub token_count_method: EmbeddingTokenCountMethod,
     pub chars_per_token: usize,
     pub max_chars: Option<usize>,
     pub max_estimated_tokens: Option<usize>,
@@ -246,16 +294,34 @@ pub struct EmbeddingInputStats {
 
 impl fmt::Display for EmbeddingInputStats {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} chars, estimated {} tokens using {} chars/token",
-            self.chars, self.estimated_tokens, self.chars_per_token
-        )?;
+        match self.token_count_method {
+            EmbeddingTokenCountMethod::EstimatedChars => {
+                write!(
+                    formatter,
+                    "{} chars, estimated {} tokens using {} chars/token",
+                    self.chars, self.estimated_tokens, self.chars_per_token
+                )?;
+            }
+            EmbeddingTokenCountMethod::Tokenizer => {
+                write!(
+                    formatter,
+                    "{} chars, tokenizer-counted {} tokens",
+                    self.chars, self.tokens
+                )?;
+            }
+        }
         if let Some(max_chars) = self.max_chars {
             write!(formatter, ", max chars {max_chars}")?;
         }
         if let Some(max_tokens) = self.max_estimated_tokens {
-            write!(formatter, ", max estimated tokens {max_tokens}")?;
+            match self.token_count_method {
+                EmbeddingTokenCountMethod::EstimatedChars => {
+                    write!(formatter, ", max estimated tokens {max_tokens}")?;
+                }
+                EmbeddingTokenCountMethod::Tokenizer => {
+                    write!(formatter, ", max tokens {max_tokens}")?;
+                }
+            }
         }
         Ok(())
     }
@@ -265,6 +331,7 @@ impl fmt::Display for EmbeddingInputStats {
 pub struct OpenAiCompatibleClient {
     config: EmbeddingConfig,
     agent: ureq::Agent,
+    tokenizer: Option<Tokenizer>,
 }
 
 impl OpenAiCompatibleClient {
@@ -287,7 +354,12 @@ impl OpenAiCompatibleClient {
             .timeout_connect(CONNECT_TIMEOUT)
             .timeout_read(READ_TIMEOUT)
             .build();
-        Ok(Self { config, agent })
+        let tokenizer = load_tokenizer(config.tokenizer_path.as_deref())?;
+        Ok(Self {
+            config,
+            agent,
+            tokenizer,
+        })
     }
 
     pub fn embed_query(
@@ -296,7 +368,8 @@ impl OpenAiCompatibleClient {
         expected: &EmbeddingFingerprint,
     ) -> Result<EmbeddingVector, EmbeddingError> {
         self.config.ensure_matches_index(expected)?;
-        self.config.preflight_input(input)?;
+        self.config
+            .preflight_input_with_tokenizer(input, self.tokenizer.as_ref())?;
         let url = format!(
             "{}/embeddings",
             self.config
@@ -435,6 +508,29 @@ pub enum EmbeddingError {
         "in-process embedding model `{model}` is missing; run `jurisearch model fetch {model}` or pass explicit download permission"
     )]
     MissingLocalModel { model: String },
+    #[error("embedding tokenizer `{}` could not be loaded: {message}", path.display())]
+    TokenizerLoad { path: PathBuf, message: String },
+    #[error("embedding tokenizer failed to count input tokens: {0}")]
+    TokenizerEncode(String),
+}
+
+fn load_tokenizer(path: Option<&Path>) -> Result<Option<Tokenizer>, EmbeddingError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let mut tokenizer =
+        Tokenizer::from_file(path).map_err(|error| EmbeddingError::TokenizerLoad {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    tokenizer
+        .with_truncation(None)
+        .map_err(|error| EmbeddingError::TokenizerLoad {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    tokenizer.with_padding(None);
+    Ok(Some(tokenizer))
 }
 
 #[cfg(test)]
@@ -442,11 +538,17 @@ mod tests {
     use std::{
         io::{Read, Write},
         net::TcpListener,
+        path::Path,
         thread,
     };
 
     use super::{
-        BaseUrlClass, EmbeddingConfig, EmbeddingError, OpenAiCompatibleClient, base_url_class,
+        BaseUrlClass, EmbeddingConfig, EmbeddingError, EmbeddingTokenCountMethod,
+        OpenAiCompatibleClient, base_url_class,
+    };
+    use tokenizers::{
+        Tokenizer, TruncationParams, models::wordlevel::WordLevel,
+        pre_tokenizers::whitespace::Whitespace,
     };
 
     #[test]
@@ -562,11 +664,111 @@ mod tests {
         let error = config.preflight_input("abcde").unwrap_err();
         match error {
             EmbeddingError::InputTooLong(stats) => {
+                assert_eq!(stats.tokens, 3);
+                assert_eq!(
+                    stats.token_count_method,
+                    EmbeddingTokenCountMethod::EstimatedChars
+                );
                 assert_eq!(stats.estimated_tokens, 3);
                 assert_eq!(stats.max_estimated_tokens, Some(2));
             }
             other => panic!("expected input-too-long error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tokenizer_budget_is_enforced_when_configured() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let tokenizer_path = tempdir.path().join("tokenizer.json");
+        write_test_tokenizer(&tokenizer_path);
+
+        let mut config = EmbeddingConfig::openai_compatible(
+            "http://127.0.0.1:9/v1",
+            None,
+            "bge-m3",
+            3,
+            true,
+            "cls",
+        );
+        config.max_input_chars = None;
+        config.max_estimated_tokens = Some(2);
+        config.estimated_chars_per_token = 100;
+        config.tokenizer_path = Some(tokenizer_path);
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let error = client
+            .embed_query("alpha beta gamma", &expected)
+            .unwrap_err();
+        match error {
+            EmbeddingError::InputTooLong(stats) => {
+                assert_eq!(stats.tokens, 3);
+                assert_eq!(stats.estimated_tokens, 1);
+                assert_eq!(
+                    stats.token_count_method,
+                    EmbeddingTokenCountMethod::Tokenizer
+                );
+                assert_eq!(stats.max_estimated_tokens, Some(2));
+            }
+            other => panic!("expected tokenizer-backed input-too-long error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tokenizer_preflight_ignores_embedded_truncation() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let tokenizer_path = tempdir.path().join("tokenizer.json");
+        write_truncating_test_tokenizer(&tokenizer_path, 2);
+
+        let mut config = EmbeddingConfig::openai_compatible(
+            "http://127.0.0.1:9/v1",
+            None,
+            "bge-m3",
+            3,
+            true,
+            "cls",
+        );
+        config.max_input_chars = None;
+        config.max_estimated_tokens = Some(2);
+        config.estimated_chars_per_token = 100;
+        config.tokenizer_path = Some(tokenizer_path);
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let error = client
+            .embed_query("alpha beta gamma", &expected)
+            .unwrap_err();
+        match error {
+            EmbeddingError::InputTooLong(stats) => {
+                assert_eq!(stats.tokens, 3);
+                assert_eq!(
+                    stats.token_count_method,
+                    EmbeddingTokenCountMethod::Tokenizer
+                );
+            }
+            other => panic!("expected full tokenizer count to exceed budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tokenizer_load_error_names_path() {
+        let mut config = EmbeddingConfig::openai_compatible(
+            "http://127.0.0.1:9/v1",
+            None,
+            "bge-m3",
+            3,
+            true,
+            "cls",
+        );
+        config.tokenizer_path = Some(Path::new("/tmp/jurisearch-missing-tokenizer.json").into());
+
+        let error = OpenAiCompatibleClient::new(config).unwrap_err();
+        assert!(matches!(error, EmbeddingError::TokenizerLoad { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("jurisearch-missing-tokenizer.json")
+        );
     }
 
     #[test]
@@ -629,5 +831,40 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         format!("http://{address}/v1")
+    }
+
+    fn write_test_tokenizer(path: &Path) {
+        write_test_tokenizer_with_truncation(path, None);
+    }
+
+    fn write_truncating_test_tokenizer(path: &Path, max_length: usize) {
+        write_test_tokenizer_with_truncation(path, Some(max_length));
+    }
+
+    fn write_test_tokenizer_with_truncation(path: &Path, max_length: Option<usize>) {
+        let vocab = [
+            ("[UNK]".to_owned(), 0u32),
+            ("alpha".to_owned(), 1),
+            ("beta".to_owned(), 2),
+            ("gamma".to_owned(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let model = WordLevel::builder()
+            .vocab(vocab)
+            .unk_token("[UNK]".to_owned())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        if let Some(max_length) = max_length {
+            tokenizer
+                .with_truncation(Some(TruncationParams {
+                    max_length,
+                    ..TruncationParams::default()
+                }))
+                .unwrap();
+        }
+        tokenizer.save(path, false).unwrap();
     }
 }

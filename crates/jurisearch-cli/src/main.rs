@@ -1464,6 +1464,8 @@ fn embed_chunks_payload(
             "max_input_chars": embedding_config.max_input_chars,
             "max_estimated_tokens": embedding_config.max_estimated_tokens,
             "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
+            "token_count_method": embedding_config.configured_token_count_method(),
+            "tokenizer_path": embedding_config.tokenizer_path.as_ref().map(|path| path.display().to_string()),
             "fingerprint": embedding_fingerprint,
             "provisional": embedding_config.provisional,
             "reembeddable": embedding_config.reembeddable
@@ -1545,6 +1547,9 @@ fn embedding_config_from_env() -> EmbeddingConfig {
         && parsed != 0
     {
         embedding_config.estimated_chars_per_token = parsed;
+    }
+    if let Ok(tokenizer_path) = std::env::var("JURISEARCH_EMBED_TOKENIZER_JSON") {
+        embedding_config.tokenizer_path = parse_optional_path_buf(&tokenizer_path);
     }
     embedding_config
 }
@@ -1630,6 +1635,8 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
             "max_input_chars": embedding_config.max_input_chars,
             "max_estimated_tokens": embedding_config.max_estimated_tokens,
             "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
+            "token_count_method": embedding_config.configured_token_count_method(),
+            "tokenizer_path": embedding_config.tokenizer_path.as_ref().map(|path| path.display().to_string()),
             "provisional": embedding_manifest.provisional,
             "reembeddable": embedding_manifest.reembeddable
         },
@@ -1964,6 +1971,15 @@ fn parse_optional_usize(value: &str) -> Option<Option<usize>> {
         return Some(None);
     }
     value.parse::<usize>().ok().map(Some)
+}
+
+fn parse_optional_path_buf(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("none") || value == "0" {
+        None
+    } else {
+        Some(PathBuf::from(value))
+    }
 }
 
 fn unix_seconds() -> u64 {

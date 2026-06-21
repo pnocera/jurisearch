@@ -77,6 +77,8 @@ fn status_returns_json_without_index() {
     assert_eq!(json["embedding"]["max_input_chars"], 24_000);
     assert_eq!(json["embedding"]["max_estimated_tokens"], 8_192);
     assert_eq!(json["embedding"]["estimated_chars_per_token"], 4);
+    assert_eq!(json["embedding"]["token_count_method"], "estimated_chars");
+    assert!(json["embedding"]["tokenizer_path"].is_null());
     assert_eq!(json["embedding"]["provisional"], true);
     assert_eq!(json["embedding"]["reembeddable"], true);
 }
@@ -89,6 +91,10 @@ fn status_reports_embedding_budget_env_overrides() {
         .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "0")
         .env("JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS", "none")
         .env("JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN", "3")
+        .env(
+            "JURISEARCH_EMBED_TOKENIZER_JSON",
+            "/tmp/jurisearch-tokenizer.json",
+        )
         .arg("status")
         .assert()
         .success()
@@ -101,6 +107,11 @@ fn status_reports_embedding_budget_env_overrides() {
     assert!(json["embedding"]["max_input_chars"].is_null());
     assert!(json["embedding"]["max_estimated_tokens"].is_null());
     assert_eq!(json["embedding"]["estimated_chars_per_token"], 3);
+    assert_eq!(json["embedding"]["token_count_method"], "tokenizer");
+    assert_eq!(
+        json["embedding"]["tokenizer_path"],
+        "/tmp/jurisearch-tokenizer.json"
+    );
 }
 
 #[test]
