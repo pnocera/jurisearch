@@ -568,7 +568,7 @@ fn embed_chunks_payload(
     for input in &inputs {
         let embedding = client
             .embed_query(input.embedding_text.as_str(), &expected_fingerprint)
-            .map_err(embedding_error_object)?;
+            .map_err(|error| embedding_error_object_with_context(error, &input.chunk_id))?;
         owned_embeddings.push((input.chunk_id.clone(), pgvector_literal(&embedding.values)));
     }
     let embeddings = owned_embeddings
@@ -839,6 +839,15 @@ fn embedding_error_object(error: jurisearch_embed::EmbeddingError) -> ErrorObjec
         | jurisearch_embed::EmbeddingError::EmptyResponse => upstream_unavailable(message),
         _ => dependency_unavailable(message),
     }
+}
+
+fn embedding_error_object_with_context(
+    error: jurisearch_embed::EmbeddingError,
+    chunk_id: &str,
+) -> ErrorObject {
+    let mut object = embedding_error_object(error);
+    object.message = format!("embedding chunk `{chunk_id}` failed: {}", object.message);
+    object
 }
 
 fn parade_query_text(query: &str) -> Option<String> {

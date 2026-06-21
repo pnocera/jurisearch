@@ -65,6 +65,27 @@ fn status_returns_json_without_index() {
 }
 
 #[test]
+fn status_reports_embedding_budget_env_overrides() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "0")
+        .env("JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS", "none")
+        .env("JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN", "3")
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert!(json["embedding"]["max_input_chars"].is_null());
+    assert!(json["embedding"]["max_estimated_tokens"].is_null());
+    assert_eq!(json["embedding"]["estimated_chars_per_token"], 3);
+}
+
+#[test]
 fn bad_input_is_json_and_uses_exit_code_2() {
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
@@ -233,6 +254,61 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "bad_input");
+    Ok(())
+}
+
+#[test]
+fn ingest_embed_chunks_budget_error_names_offending_chunk() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI embed chunk budget failure")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-embed-budget.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Texte long pour le test.', \
+                 '1804-02-21', 'sha256:article-1240', \
+                 '{\"chunks\":[{\"contextualized_body\":\"abcde\"}]}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'abcde', \
+                 'sha256:article-1240', 'chunker:v0', NULL);",
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "4")
+        .args(["ingest", "embed-chunks", "--index-lists", "1"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    let message = json["error"]["message"].as_str().unwrap();
+    assert!(message.contains("chunk:1240:0"));
+    assert!(message.contains("embedding input is too long"));
+
     Ok(())
 }
 

@@ -8,6 +8,8 @@ use url::Host;
 pub const PHASE0_EMBEDDING_MODEL: &str = "bge-m3";
 pub const PHASE0_EMBEDDING_DIMENSION: usize = 1024;
 pub const PHASE0_EMBEDDING_POOLING: &str = "cls";
+// Keep the Phase 0 character ceiling below the rough bge-m3 token ceiling; a
+// tokenizer-grade splitter belongs with Phase 1.2 chunk hardening.
 pub const PHASE0_EMBEDDING_MAX_INPUT_CHARS: usize = 24_000;
 pub const PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS: usize = 8_192;
 pub const PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN: usize = 4;
