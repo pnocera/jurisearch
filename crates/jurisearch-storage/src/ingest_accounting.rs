@@ -124,6 +124,8 @@ pub struct IngestResumeDecision {
     pub reason: String,
     pub previous_run_id: Option<String>,
     pub previous_status: Option<IngestMemberStatus>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mismatched_fields: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -373,6 +375,7 @@ pub fn ingest_resume_decision(
             reason: "new_member".to_owned(),
             previous_run_id: None,
             previous_status: None,
+            mismatched_fields: Vec::new(),
         });
     };
 
@@ -382,16 +385,22 @@ pub fn ingest_resume_decision(
     let schema_version: String = row.get(3);
     let code_version: String = row.get(4);
     let source_payload_hash: String = row.get(5);
-    let compatible = parser_version == compatibility.parser_version
-        && schema_version == compatibility.schema_version
-        && code_version == compatibility.code_version
-        && source_payload_hash == compatibility.source_payload_hash;
-    if !compatible {
+    let mismatched_fields = compatibility_mismatches(
+        (
+            &parser_version,
+            &schema_version,
+            &code_version,
+            &source_payload_hash,
+        ),
+        compatibility,
+    );
+    if !mismatched_fields.is_empty() {
         return Ok(IngestResumeDecision {
             action: IngestResumeAction::BlockedIncompatible,
             reason: "compatibility_mismatch".to_owned(),
             previous_run_id: Some(previous_run_id),
             previous_status: Some(status),
+            mismatched_fields,
         });
     }
 
@@ -410,6 +419,7 @@ pub fn ingest_resume_decision(
         reason: reason.to_owned(),
         previous_run_id: Some(previous_run_id),
         previous_status: Some(status),
+        mismatched_fields: Vec::new(),
     })
 }
 
@@ -528,4 +538,24 @@ fn percentage(covered: i64, total: i64) -> Option<f64> {
     } else {
         Some((covered as f64 / total as f64) * 100.0)
     }
+}
+
+fn compatibility_mismatches(
+    actual: (&str, &str, &str, &str),
+    expected: IngestCompatibility<'_>,
+) -> Vec<String> {
+    let mut mismatches = Vec::new();
+    if actual.0 != expected.parser_version {
+        mismatches.push("parser_version".to_owned());
+    }
+    if actual.1 != expected.schema_version {
+        mismatches.push("schema_version".to_owned());
+    }
+    if actual.2 != expected.code_version {
+        mismatches.push("code_version".to_owned());
+    }
+    if actual.3 != expected.source_payload_hash {
+        mismatches.push("source_payload_hash".to_owned());
+    }
+    mismatches
 }

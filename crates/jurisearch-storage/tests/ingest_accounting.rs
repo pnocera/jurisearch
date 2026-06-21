@@ -60,6 +60,22 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(inserted.status, IngestMemberStatus::Inserted);
     assert_eq!(inserted.attempt_count, 1);
 
+    let repeated_inserted = record_ingest_member(
+        &postgres,
+        &IngestMemberInput {
+            run_id: "run-1",
+            archive_name: "Freemium_legi_global_20240101-000000.tar.gz",
+            member_path: "legi/articles/LEGIARTI000006419320.xml",
+            source: "legi",
+            source_entity: Some("LEGIARTI000006419320"),
+            date_anchor: Some("1804-02-21"),
+            status: IngestMemberStatus::Inserted,
+            compatibility,
+        },
+    )?;
+    assert_eq!(repeated_inserted.member_id, inserted.member_id);
+    assert_eq!(repeated_inserted.attempt_count, 2);
+
     let compatible_inserted = ingest_resume_decision(
         &postgres,
         "Freemium_legi_global_20240101-000000.tar.gz",
@@ -82,6 +98,25 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
         },
     )?;
     assert_eq!(incompatible.action, IngestResumeAction::BlockedIncompatible);
+    assert_eq!(incompatible.mismatched_fields, vec!["parser_version"]);
+
+    let payload_incompatible = ingest_resume_decision(
+        &postgres,
+        "Freemium_legi_global_20240101-000000.tar.gz",
+        "legi/articles/LEGIARTI000006419320.xml",
+        IngestCompatibility {
+            source_payload_hash: "sha256:changed",
+            ..compatibility
+        },
+    )?;
+    assert_eq!(
+        payload_incompatible.action,
+        IngestResumeAction::BlockedIncompatible
+    );
+    assert_eq!(
+        payload_incompatible.mismatched_fields,
+        vec!["source_payload_hash"]
+    );
 
     let failed = record_ingest_member(
         &postgres,
@@ -158,6 +193,18 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     )?;
     assert_eq!(unfinished_retry.action, IngestResumeAction::Retry);
     assert_eq!(unfinished_retry.reason, "previous_unfinished");
+
+    let missing_member_update =
+        update_ingest_member_status(&postgres, -1, IngestMemberStatus::Failed, None);
+    assert!(matches!(
+        missing_member_update,
+        Err(StorageError::IngestAccounting { .. })
+    ));
+    let non_terminal_finish = finish_ingest_run(&postgres, "run-1", IngestRunStatus::Running, None);
+    assert!(matches!(
+        non_terminal_finish,
+        Err(StorageError::IngestAccounting { .. })
+    ));
 
     insert_projection_fixture(&postgres)?;
     finish_ingest_run(&postgres, "run-1", IngestRunStatus::Completed, None)?;
