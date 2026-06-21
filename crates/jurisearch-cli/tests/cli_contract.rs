@@ -36,6 +36,8 @@ fn jurisearch_command_without_embedding_env() -> Command {
         "JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS",
         "JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN",
         "JURISEARCH_EMBED_TOKENIZER_JSON",
+        "JURISEARCH_MODEL_DIR",
+        "XDG_CACHE_HOME",
     ] {
         command.env_remove(name);
     }
@@ -126,6 +128,16 @@ fn help_schema_json_is_valid_and_lists_commands() {
             && command["status"] == "implemented"
             && command["response_schema"] == "CiteResponse"
     }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|command| {
+        command["name"] == "model fetch"
+            && command["status"] == "implemented"
+            && command["response_schema"] == "ModelFetchResponse"
+    }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|command| {
+        command["name"] == "setup"
+            && command["status"] == "implemented"
+            && command["response_schema"] == "SetupResponse"
+    }));
     assert_eq!(
         json["schemas"]["CiteRequest"]["properties"]["as_of"]["format"],
         "date"
@@ -133,6 +145,18 @@ fn help_schema_json_is_valid_and_lists_commands() {
     assert_eq!(
         json["schemas"]["CiteResponse"]["properties"]["state"]["enum"][0],
         "exact"
+    );
+    assert_eq!(
+        json["schemas"]["StatusResponse"]["properties"]["embedding"]["properties"]["model_cache"]["$ref"],
+        "#/schemas/ModelCacheStatus"
+    );
+    assert_eq!(
+        json["schemas"]["ModelFetchRequest"]["properties"]["allow_download"]["default"],
+        false
+    );
+    assert_eq!(
+        json["schemas"]["SetupResponse"]["properties"]["embedding"]["properties"]["model_cache"]["$ref"],
+        "#/schemas/ModelCacheStatus"
     );
 }
 
@@ -357,6 +381,7 @@ reembeddable = false
     );
     assert_eq!(json["embedding"]["config_loaded"], true);
     assert!(json["embedding"]["config_error"].is_null());
+    assert_eq!(json["embedding"]["endpoint"]["state"], "not_checked");
 }
 
 #[test]
@@ -431,6 +456,7 @@ max_estimated_tokens = 0
     let output = jurisearch_command_without_embedding_env()
         .env_remove("JURISEARCH_INDEX_DIR")
         .env("XDG_CONFIG_HOME", config_home.path())
+        .env("JURISEARCH_MODEL_DIR", config_home.path().join("models"))
         .arg("status")
         .assert()
         .success()
@@ -451,6 +477,48 @@ max_estimated_tokens = 0
     assert!(json["embedding"]["max_estimated_tokens"].is_null());
     assert_eq!(json["embedding"]["config_loaded"], true);
     assert!(json["embedding"]["config_error"].is_null());
+    assert_eq!(json["embedding"]["endpoint"]["state"], "not_applicable");
+    assert_eq!(json["embedding"]["model_cache"]["required"], true);
+    assert_eq!(json["embedding"]["model_cache"]["state"], "missing");
+    assert_eq!(json["embedding"]["model_cache"]["model_present"], false);
+    assert_eq!(
+        json["embedding"]["model_cache"]["missing_files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let model_path = config_home
+        .path()
+        .join("models")
+        .join("embeddings")
+        .join("local-bge-m3");
+    fs::create_dir_all(&model_path).unwrap();
+    fs::write(model_path.join("model.onnx"), b"placeholder").unwrap();
+    fs::write(model_path.join("tokenizer.json"), b"{}").unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("XDG_CONFIG_HOME", config_home.path())
+        .env("JURISEARCH_MODEL_DIR", config_home.path().join("models"))
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["model_cache"]["state"], "ready");
+    assert_eq!(json["embedding"]["model_cache"]["model_present"], true);
+    assert!(
+        json["embedding"]["model_cache"]["missing_files"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -475,6 +543,123 @@ fn status_env_in_process_provider_clears_unused_api_key() {
     assert_eq!(json["embedding"]["base_url"], "");
     assert_eq!(json["embedding"]["base_url_class"], "in_process");
     assert!(json["embedding"]["config_error"].is_null());
+}
+
+#[test]
+fn status_reports_loopback_endpoint_reachability() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env(
+            "JURISEARCH_EMBED_BASE_URL",
+            format!("http://127.0.0.1:{port}/v1"),
+        )
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    drop(listener);
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["embedding"]["endpoint"]["checked"], true);
+    assert_eq!(json["embedding"]["endpoint"]["state"], "reachable");
+    assert_eq!(json["embedding"]["endpoint"]["reachable"], true);
+}
+
+#[test]
+fn model_fetch_and_setup_report_in_process_model_cache() {
+    let model_root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-model-cache.")
+        .tempdir()
+        .unwrap();
+    let missing_output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_MODEL_DIR", model_root.path())
+        .env("JURISEARCH_EMBED_PROVIDER", "in_process")
+        .args(["model", "fetch", "local-bge-m3"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(&missing_output, "bad_input", "missing required cache files");
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_MODEL_DIR", model_root.path())
+        .env("JURISEARCH_EMBED_PROVIDER", "in_process")
+        .env("JURISEARCH_EMBED_MODEL", "local-bge-m3")
+        .arg("setup")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ready"], false);
+    assert_eq!(json["embedding"]["model_cache"]["state"], "missing");
+
+    let model_path = model_root.path().join("embeddings").join("local-bge-m3");
+    fs::create_dir_all(&model_path).unwrap();
+    fs::write(model_path.join("model.onnx"), b"placeholder").unwrap();
+    fs::write(model_path.join("tokenizer.json"), b"{}").unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_MODEL_DIR", model_root.path())
+        .env("JURISEARCH_EMBED_PROVIDER", "in_process")
+        .args(["model", "fetch", "local-bge-m3"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["action"], "already_cached");
+    assert_eq!(json["model_cache"]["state"], "ready");
+
+    let input = concat!(
+        "{\"id\":\"setup\",\"command\":\"setup\"}\n",
+        "{\"id\":\"fetch\",\"command\":\"model fetch\",\"args\":{\"model\":\"local-bge-m3\"}}\n",
+    );
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_MODEL_DIR", model_root.path())
+        .env("JURISEARCH_EMBED_PROVIDER", "in_process")
+        .env("JURISEARCH_EMBED_MODEL", "local-bge-m3")
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["id"], "setup");
+    assert_eq!(values[0]["ok"], true);
+    assert_eq!(values[0]["result"]["ready"], true);
+    assert_eq!(values[1]["id"], "fetch");
+    assert_eq!(values[1]["ok"], true);
+    assert_eq!(values[1]["result"]["action"], "already_cached");
 }
 
 #[test]

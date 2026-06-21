@@ -857,6 +857,7 @@ dependencies = [
  "tar",
  "tempfile",
  "toml",
+ "url",
 ]
 
 [[package]]

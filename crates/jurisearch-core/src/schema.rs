@@ -324,10 +324,80 @@ pub fn compiled_schema() -> Value {
                             "normalize": { "type": "boolean" },
                             "pooling": { "type": "string" },
                             "provisional": { "type": "boolean" },
-                            "reembeddable": { "type": "boolean" }
+                            "reembeddable": { "type": "boolean" },
+                            "config_path": { "type": ["string", "null"] },
+                            "config_loaded": { "type": "boolean" },
+                            "config_error": { "type": ["string", "null"] },
+                            "model_cache": { "$ref": "#/schemas/ModelCacheStatus" },
+                            "endpoint": { "$ref": "#/schemas/EmbeddingEndpointStatus" }
                         }
                     },
                     "ingest_health": { "type": "object" }
+                }
+            },
+            "ModelFetchRequest": {
+                "properties": {
+                    "model": { "type": "string" },
+                    "allow_download": { "type": "boolean", "default": false }
+                }
+            },
+            "ModelFetchResponse": {
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "provider": { "enum": ["openai_compatible", "in_process"] },
+                    "model": { "type": "string" },
+                    "action": { "enum": ["not_required", "already_cached"] },
+                    "allow_download": { "type": "boolean" },
+                    "model_cache": { "$ref": "#/schemas/ModelCacheStatus" },
+                    "message": { "type": "string" }
+                }
+            },
+            "SetupRequest": {
+                "properties": {}
+            },
+            "SetupResponse": {
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "ready": { "type": "boolean" },
+                    "embedding": {
+                        "type": "object",
+                        "properties": {
+                            "provider": { "enum": ["openai_compatible", "in_process"] },
+                            "model": { "type": "string" },
+                            "dimension": { "type": "integer" },
+                            "config_path": { "type": ["string", "null"] },
+                            "config_loaded": { "type": "boolean" },
+                            "config_error": { "type": ["string", "null"] },
+                            "model_cache": { "$ref": "#/schemas/ModelCacheStatus" },
+                            "endpoint": { "$ref": "#/schemas/EmbeddingEndpointStatus" }
+                        }
+                    }
+                }
+            },
+            "ModelCacheStatus": {
+                "properties": {
+                    "required": { "type": "boolean" },
+                    "state": { "enum": ["not_required", "ready", "missing"] },
+                    "model_dir": { "type": "string" },
+                    "model_cache_key": { "type": "string" },
+                    "model_path": { "type": ["string", "null"] },
+                    "model_present": { "type": ["boolean", "null"] },
+                    "required_files": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "missing_files": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                }
+            },
+            "EmbeddingEndpointStatus": {
+                "properties": {
+                    "checked": { "type": "boolean" },
+                    "state": { "enum": ["not_applicable", "not_checked", "reachable", "unreachable", "invalid"] },
+                    "reachable": { "type": ["boolean", "null"] },
+                    "message": { "type": "string" }
                 }
             },
             "IngestResponse": {

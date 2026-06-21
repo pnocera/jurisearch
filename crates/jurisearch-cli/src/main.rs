@@ -2,9 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, BufRead, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::ExitCode,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
@@ -54,10 +55,13 @@ use jurisearch_storage::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
+use url::Url;
 
 const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v4";
 const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v3";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
+const MODEL_CACHE_REQUIRED_FILES: &[&str] = &["model.onnx", "tokenizer.json"];
+const LOOPBACK_ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -447,11 +451,8 @@ fn run() -> anyhow::Result<()> {
                 emit_expand(args)
             }
         }
-        Command::Model(args) => emit_error(ErrorObject::not_implemented(match args.command {
-            Some(ModelSubcommand::Fetch { .. }) => "model fetch",
-            None => "model",
-        })),
-        Command::Setup => emit_error(ErrorObject::not_implemented("setup")),
+        Command::Model(args) => emit_model(args),
+        Command::Setup => write_json(&setup_payload()),
         Command::Sync(args) => emit_error(ErrorObject::not_implemented(&format!(
             "sync source={} since={}",
             args.source.as_deref().unwrap_or("unspecified"),
@@ -504,6 +505,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     ensure_query_readiness(&postgres, readiness_gate)?;
     let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
         let embedding_config = embedding_config_from_env();
+        ensure_embedding_runtime_ready(&embedding_config, false)?;
         let expected_fingerprint = embedding_config.fingerprint();
         let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
         let client =
@@ -636,6 +638,21 @@ fn emit_expand(args: QueryArgs) -> anyhow::Result<()> {
     match expand_payload(args) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
+    }
+}
+
+fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
+    match args.command {
+        Some(ModelSubcommand::Fetch {
+            model,
+            allow_download,
+        }) => match model_fetch_payload(model, allow_download) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
+        None => emit_error(ErrorObject::bad_input(
+            "model requires a subcommand; supported subcommand: `fetch`",
+        )),
     }
 }
 
@@ -1652,6 +1669,7 @@ fn embed_chunks_payload(
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     let embedding_config = embedding_config_from_env();
+    ensure_embedding_runtime_ready(&embedding_config, false)?;
     let expected_fingerprint = embedding_config.fingerprint();
     let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
     let dimension = i32::try_from(embedding_config.dimension).map_err(|_| {
@@ -1823,6 +1841,32 @@ struct EmbeddingConfigFile {
     tokenizer_path: Option<PathBuf>,
     provisional: Option<bool>,
     reembeddable: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct ModelCacheStatus {
+    required: bool,
+    model_dir: PathBuf,
+    model_cache_key: String,
+    model_path: Option<PathBuf>,
+    required_files: Vec<String>,
+    missing_files: Vec<String>,
+}
+
+impl ModelCacheStatus {
+    fn model_present(&self) -> bool {
+        self.required && self.missing_files.is_empty()
+    }
+
+    fn state(&self) -> &'static str {
+        if !self.required {
+            "not_required"
+        } else if self.model_present() {
+            "ready"
+        } else {
+            "missing"
+        }
+    }
 }
 
 fn embedding_config_from_env() -> EmbeddingConfig {
@@ -2060,6 +2104,178 @@ fn clear_unused_in_process_secret_fields(config: &mut EmbeddingConfig) {
     }
 }
 
+fn model_cache_status(config: &EmbeddingConfig) -> ModelCacheStatus {
+    let model_dir = model_cache_dir();
+    let required = matches!(config.provider, EmbeddingProvider::InProcess);
+    let model_cache_key = model_cache_key(&config.model);
+    let required_files = MODEL_CACHE_REQUIRED_FILES
+        .iter()
+        .map(|file| (*file).to_owned())
+        .collect::<Vec<_>>();
+
+    if !required {
+        return ModelCacheStatus {
+            required,
+            model_dir,
+            model_cache_key,
+            model_path: None,
+            required_files,
+            missing_files: Vec::new(),
+        };
+    }
+
+    let model_path = model_dir.join("embeddings").join(&model_cache_key);
+    let missing_files = MODEL_CACHE_REQUIRED_FILES
+        .iter()
+        .filter(|file| !model_path.join(file).is_file())
+        .map(|file| (*file).to_owned())
+        .collect::<Vec<_>>();
+
+    ModelCacheStatus {
+        required,
+        model_dir,
+        model_cache_key,
+        model_path: Some(model_path),
+        required_files,
+        missing_files,
+    }
+}
+
+fn model_cache_status_json(status: &ModelCacheStatus) -> Value {
+    json!({
+        "required": status.required,
+        "state": status.state(),
+        "model_dir": status.model_dir.display().to_string(),
+        "model_cache_key": status.model_cache_key,
+        "model_path": status.model_path.as_ref().map(|path| path.display().to_string()),
+        "model_present": if status.required { Some(status.model_present()) } else { None },
+        "required_files": status.required_files,
+        "missing_files": status.missing_files,
+    })
+}
+
+fn model_cache_dir() -> PathBuf {
+    if let Some(model_dir) = std::env::var_os("JURISEARCH_MODEL_DIR")
+        && !model_dir.is_empty()
+    {
+        return PathBuf::from(model_dir);
+    }
+
+    if let Some(cache_home) = std::env::var_os("XDG_CACHE_HOME")
+        && !cache_home.is_empty()
+    {
+        return PathBuf::from(cache_home).join("jurisearch").join("models");
+    }
+
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".cache")
+                .join("jurisearch")
+                .join("models")
+        })
+        .unwrap_or_else(|| PathBuf::from(".jurisearch").join("models"))
+}
+
+fn model_cache_key(model: &str) -> String {
+    let mut key = String::with_capacity(model.len());
+    for character in model.trim().chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+            key.push(character);
+        } else if character == '/' || character == '\\' {
+            key.push_str("__");
+        } else {
+            key.push('_');
+        }
+    }
+    if key.is_empty() {
+        "model".to_owned()
+    } else {
+        key
+    }
+}
+
+fn embedding_endpoint_status_json(config: &EmbeddingConfig) -> Value {
+    if !matches!(config.provider, EmbeddingProvider::OpenAiCompatible) {
+        return json!({
+            "checked": false,
+            "state": "not_applicable",
+            "reachable": Value::Null,
+            "message": "in-process embedding providers do not use an HTTP endpoint"
+        });
+    }
+
+    let Some(base_url) = config.base_url.as_deref() else {
+        return json!({
+            "checked": true,
+            "state": "invalid",
+            "reachable": false,
+            "message": "embedding base_url is not configured"
+        });
+    };
+
+    let fingerprint = config.fingerprint();
+    if !matches!(
+        fingerprint.base_url_class,
+        jurisearch_embed::BaseUrlClass::LocalLoopback
+    ) {
+        return json!({
+            "checked": false,
+            "state": "not_checked",
+            "reachable": Value::Null,
+            "message": "hosted endpoints are not probed by status to avoid unsolicited external network calls"
+        });
+    }
+
+    match loopback_endpoint_reachable(base_url) {
+        Ok(true) => json!({
+            "checked": true,
+            "state": "reachable",
+            "reachable": true,
+            "message": "loopback embedding endpoint accepted a TCP connection"
+        }),
+        Ok(false) => json!({
+            "checked": true,
+            "state": "unreachable",
+            "reachable": false,
+            "message": "loopback embedding endpoint did not accept a TCP connection"
+        }),
+        Err(message) => json!({
+            "checked": true,
+            "state": "invalid",
+            "reachable": false,
+            "message": message
+        }),
+    }
+}
+
+fn loopback_endpoint_reachable(base_url: &str) -> Result<bool, String> {
+    let parsed =
+        Url::parse(base_url).map_err(|error| format!("invalid embedding base_url: {error}"))?;
+    let Some(host) = parsed.host_str() else {
+        return Err("embedding base_url has no host".to_owned());
+    };
+    let port = parsed.port_or_known_default().ok_or_else(|| {
+        format!(
+            "embedding base_url scheme `{}` has no default port",
+            parsed.scheme()
+        )
+    })?;
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("failed to resolve embedding endpoint `{host}:{port}`: {error}"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(format!(
+            "embedding endpoint `{host}:{port}` resolved no addresses"
+        ));
+    }
+    Ok(addresses.into_iter().any(|address| {
+        TcpStream::connect_timeout(&address, LOOPBACK_ENDPOINT_CONNECT_TIMEOUT).is_ok()
+    }))
+}
+
 fn toml_parse_error_message(path: &Path, contents: &str, error: &toml::de::Error) -> String {
     if let Some(span) = error.span() {
         let (line, column) = line_column_for_offset(contents, span.start);
@@ -2137,9 +2353,9 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "cite" => session_cite_payload(args),
         "context" => session_context_payload(args),
         "expand" => session_expand_payload(args),
-        "related" | "model fetch" | "setup" | "ingest" | "sync" => {
-            Err(ErrorObject::not_implemented(command))
-        }
+        "model fetch" => session_model_fetch_payload(args),
+        "setup" => Ok(setup_payload()),
+        "related" | "ingest" | "sync" => Err(ErrorObject::not_implemented(command)),
         _ => Err(ErrorObject::bad_input(format!(
             "unknown session command `{command}`"
         ))),
@@ -2151,9 +2367,117 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct SessionModelFetchArgs {
+    model: Option<String>,
+    #[serde(default)]
+    allow_download: bool,
+}
+
+fn session_model_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionModelFetchArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid model fetch args: {error}")))?;
+    model_fetch_payload(args.model, args.allow_download)
+}
+
+fn model_fetch_payload(model: Option<String>, allow_download: bool) -> Result<Value, ErrorObject> {
+    let mut embedding_config = embedding_config_from_env();
+    if let Some(model) = nonempty_string(model) {
+        embedding_config.model = model;
+    }
+    let model_cache = model_cache_status(&embedding_config);
+    let provider = embedding_config.provider;
+
+    if !model_cache.required {
+        return Ok(json!({
+            "schema_version": SCHEMA_VERSION,
+            "provider": provider,
+            "model": embedding_config.model,
+            "action": "not_required",
+            "allow_download": allow_download,
+            "model_cache": model_cache_status_json(&model_cache),
+            "message": "the configured embedding provider does not use the in-process model cache"
+        }));
+    }
+
+    if model_cache.model_present() {
+        return Ok(json!({
+            "schema_version": SCHEMA_VERSION,
+            "provider": provider,
+            "model": embedding_config.model,
+            "action": "already_cached",
+            "allow_download": allow_download,
+            "model_cache": model_cache_status_json(&model_cache),
+            "message": "in-process embedding model cache is already populated"
+        }));
+    }
+
+    let missing = model_cache.missing_files.join(", ");
+    if !allow_download {
+        return Err(ErrorObject::bad_input(format!(
+            "in-process embedding model `{}` is missing required cache files ({missing}); rerun with `--allow-download` once a download backend is packaged, or pre-stage the files under `{}`",
+            embedding_config.model,
+            model_cache
+                .model_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| model_cache.model_dir.display().to_string())
+        )));
+    }
+
+    Err(dependency_unavailable(format!(
+        "automatic download for in-process embedding model `{}` is not packaged yet; pre-stage model.onnx and tokenizer.json under `{}`",
+        embedding_config.model,
+        model_cache
+            .model_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| model_cache.model_dir.display().to_string())
+    )))
+}
+
+fn setup_payload() -> Value {
+    let loaded_embedding = loaded_embedding_config();
+    let embedding_config = loaded_embedding.config;
+    let model_cache = model_cache_status(&embedding_config);
+    let endpoint = embedding_endpoint_status_json(&embedding_config);
+    let endpoint_ready = endpoint["state"]
+        .as_str()
+        .is_none_or(|state| !matches!(state, "unreachable" | "invalid"));
+    let model_ready = !model_cache.required || model_cache.model_present();
+    let ready = loaded_embedding.config_error.is_none() && endpoint_ready && model_ready;
+
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "ready": ready,
+        "embedding": {
+            "provider": embedding_config.provider,
+            "model": embedding_config.model,
+            "dimension": embedding_config.dimension,
+            "config_path": loaded_embedding.config_path.as_ref().map(|path| path.display().to_string()),
+            "config_loaded": loaded_embedding.config_loaded,
+            "config_error": loaded_embedding.config_error,
+            "model_cache": model_cache_status_json(&model_cache),
+            "endpoint": endpoint
+        }
+    })
+}
+
+fn ensure_embedding_runtime_ready(
+    embedding_config: &EmbeddingConfig,
+    allow_download: bool,
+) -> Result<(), ErrorObject> {
+    let model_cache = model_cache_status(embedding_config);
+    embedding_config
+        .ensure_in_process_ready(model_cache.model_present(), allow_download)
+        .map_err(embedding_error_object)
+}
+
 fn status_payload(index_dir: Option<&Path>) -> Value {
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
+    let model_cache = model_cache_status(&embedding_config);
+    let endpoint = embedding_endpoint_status_json(&embedding_config);
     let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint;
@@ -2179,7 +2503,9 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
             "reembeddable": embedding_manifest.reembeddable,
             "config_path": loaded_embedding.config_path.as_ref().map(|path| path.display().to_string()),
             "config_loaded": loaded_embedding.config_loaded,
-            "config_error": loaded_embedding.config_error
+            "config_error": loaded_embedding.config_error,
+            "model_cache": model_cache_status_json(&model_cache),
+            "endpoint": endpoint
         },
         "ingest_health": ingest_health
     })

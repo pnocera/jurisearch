@@ -116,14 +116,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "model fetch",
         summary: "Explicitly fetch local in-process models; never implicit during search.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "ModelFetchRequest",
         response_schema: "ModelFetchResponse",
     },
     CommandSpec {
         name: "setup",
         summary: "Check or prepare local configuration and optional model caches.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "SetupRequest",
         response_schema: "SetupResponse",
     },
