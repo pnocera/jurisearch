@@ -116,6 +116,24 @@ fn ingest_embed_chunks_rejects_zero_limit_before_opening_index() {
 }
 
 #[test]
+fn ingest_embed_chunks_rejects_zero_index_lists_before_opening_index() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["ingest", "embed-chunks", "--index-lists", "0"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+}
+
+#[test]
 fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI fetch existing index")? else {
         return Ok(());

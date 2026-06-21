@@ -195,8 +195,10 @@ enum IngestSubcommand {
     },
     /// Embed stored canonical chunks and finalize the dense ANN index.
     EmbedChunks {
+        /// Maximum chunk count allowed for this run; refuses larger indexes instead of finalizing partial coverage.
         #[arg(long)]
         limit: Option<u32>,
+        /// Number of ivfflat lists to use when rebuilding the dense vector index.
         #[arg(long, default_value_t = 32)]
         index_lists: u32,
     },
@@ -579,6 +581,8 @@ fn embed_chunks_payload(
             dimension: embedding_config.dimension,
         })
         .collect::<Vec<_>>();
+    // Embedding upserts and dense finalization are separate recoverable steps:
+    // re-running the command converges before the manifest/index is advertised.
     let embeddings_inserted =
         insert_chunk_embeddings(&postgres, &embeddings).map_err(storage_error_object)?;
     let rebuild = finalize_dense_rebuild(
