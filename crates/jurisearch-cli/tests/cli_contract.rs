@@ -629,7 +629,11 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     let archive_path = archives
         .path()
         .join("Freemium_legi_global_20250101-000000.tar.gz");
-    let article = article_fixture();
+    let article = article_fixture().replace(
+        "  </LIENS>",
+        r#"    <LIEN_SECTION_TA id="LEGISCTA000006089696" debut="1804-03-21" fin="2999-01-01"/>
+  </LIENS>"#,
+    );
     write_tar_gz(
         archive_path.as_path(),
         &[
@@ -642,6 +646,12 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
   <CONTEXTE>
     <TEXTE cid="LEGITEXT000006070721">
       <TITRE_TXT debut="1804-03-21" fin="2999-01-01">Code civil</TITRE_TXT>
+      <TM>
+        <TITRE_TM>Livre III : Des differentes manieres dont on acquiert la propriete</TITRE_TM>
+        <TM>
+          <TITRE_TM>Titre IV : Des engagements qui se forment sans convention</TITRE_TM>
+        </TM>
+      </TM>
     </TEXTE>
   </CONTEXTE>
 </SECTION_TA>"#,
@@ -724,6 +734,8 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["inserted_documents"], 1);
     assert_eq!(json["parsed_metadata_members"], 3);
     assert_eq!(json["persisted_metadata_members"], 3);
+    assert_eq!(json["hierarchy_backfilled_documents"], 1);
+    assert_eq!(json["hierarchy_backfill_invalidated_embeddings"], 0);
     assert_eq!(json["skipped_members"], 3);
     assert_eq!(json["failed_members"], 1);
     assert_eq!(json["quarantined_payloads"], 1);
@@ -784,6 +796,23 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
              WHERE root_kind = 'TEXTELR';",
         )?,
         "civil"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>3 \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "Titre preliminaire"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT (canonical_json->'chunks'->0->>'contextualized_body') \
+                    LIKE '%Titre preliminaire%Article 1240%' \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "t"
     );
     assert_eq!(
         postgres.execute_sql(

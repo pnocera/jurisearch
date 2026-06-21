@@ -1,9 +1,11 @@
 mod common;
 
-use common::discover_pg_config;
+use common::{discover_pg_config, vector_literal};
 use jurisearch_ingest::legi::{ParsedLegiXml, SourceProvenance, parse_legi_xml};
 use jurisearch_storage::{
-    projection::{LegiMetadataRoot, insert_legi_metadata_roots},
+    projection::{
+        LegiMetadataRoot, backfill_legi_article_hierarchy_from_metadata, insert_legi_metadata_roots,
+    },
     runtime::{ManagedPostgres, StorageError},
 };
 
@@ -143,6 +145,70 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              WHERE root_kind = 'TEXTE_VERSION';",
         )?,
         "absent"
+    );
+
+    postgres.execute_sql(&format!(
+        "INSERT INTO documents \
+            (document_id, source, kind, source_uid, version_group, citation, title, body, \
+             valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+            ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+             'LEGIARTI000006419320', 'LEGIARTI000006419320', 'Code civil article 1240', \
+             'Article 1240', 'Tout fait quelconque de l''homme...', '1804-02-21', \
+             'sha256:article-1240', \
+             '{{\"title\":\"Article 1240\",\"body\":\"Tout fait quelconque de l''homme...\",\
+                \"hierarchy_path\":[\"Code civil\"],\
+                \"chunks\":[{{\"body\":\"Tout fait quelconque de l''homme...\",\
+                              \"contextualized_body\":\"Code civil > Article 1240\\n\\nTout fait quelconque de l''homme...\",\
+                              \"hierarchy_path\":[\"Code civil\"]}}]}}'); \
+         INSERT INTO chunks \
+            (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+             chunk_builder_version, embedding_fingerprint) \
+         VALUES \
+            ('chunk:legi:LEGIARTI000006419320@1804-02-21:0', \
+             'legi:LEGIARTI000006419320@1804-02-21', 0, \
+             'Tout fait quelconque de l''homme...', 'sha256:article-1240', \
+             'chunker:v0', 'bge-m3:1024:normalize:true'); \
+         INSERT INTO chunk_embeddings \
+            (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES \
+            ('chunk:legi:LEGIARTI000006419320@1804-02-21:0', \
+             'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024); \
+         INSERT INTO graph_edges \
+            (edge_id, from_document_id, edge_kind, edge_source, payload) \
+         VALUES \
+            ('edge:article-section', 'legi:LEGIARTI000006419320@1804-02-21', \
+             'refers_to', 'publisher', \
+             '{{\"source_tag\":\"LIEN_SECTION_TA\",\
+                \"to_source_uid\":\"LEGISCTA000006089696\"}}');",
+        vector_literal(0)
+    ))?;
+
+    let backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
+    assert_eq!(backfill.documents_updated, 1);
+    assert_eq!(backfill.embeddings_invalidated, 1);
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>1 \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "Titre preliminaire"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text FROM chunk_embeddings \
+             WHERE chunk_id = 'chunk:legi:LEGIARTI000006419320@1804-02-21:0';",
+        )?,
+        "0"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT coalesce(embedding_fingerprint, 'null') \
+             FROM chunks \
+             WHERE chunk_id = 'chunk:legi:LEGIARTI000006419320@1804-02-21:0';",
+        )?,
+        "null"
     );
 
     Ok(())

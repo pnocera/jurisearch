@@ -17,6 +17,12 @@ pub struct LegiMetadataInsertReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegiHierarchyBackfillReport {
+    pub documents_updated: usize,
+    pub embeddings_invalidated: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkEmbeddingInsert<'a> {
     pub chunk_id: &'a str,
     pub embedding_fingerprint: &'a str,
@@ -238,6 +244,98 @@ pub fn insert_legi_metadata_roots(
     })
 }
 
+pub fn backfill_legi_article_hierarchy_from_metadata(
+    postgres: &ManagedPostgres,
+) -> Result<LegiHierarchyBackfillReport, StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    let rows = client
+        .query(
+            "SELECT DISTINCT ON (d.document_id) \
+                d.document_id, d.canonical_json::text, section.canonical_json::text \
+             FROM documents d \
+             JOIN graph_edges edge \
+               ON edge.from_document_id = d.document_id \
+              AND edge.edge_source = 'publisher' \
+              AND edge.payload->>'source_tag' = 'LIEN_SECTION_TA' \
+             JOIN legi_metadata_roots section \
+               ON section.root_kind = 'SECTION_TA' \
+              AND section.source_uid = edge.payload->>'to_source_uid' \
+             WHERE d.source = 'legi' \
+               AND d.kind = 'article' \
+             ORDER BY d.document_id, section.valid_from DESC NULLS LAST, section.metadata_key;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+
+    let mut updates = Vec::<(String, String)>::new();
+    for row in rows {
+        let document_id: String = row.get(0);
+        let document_json: String = row.get(1);
+        let section_json: String = row.get(2);
+        if let Some(enriched) = enriched_article_hierarchy_json(&document_json, &section_json)? {
+            updates.push((document_id, enriched));
+        }
+    }
+
+    if updates.is_empty() {
+        return Ok(LegiHierarchyBackfillReport {
+            documents_updated: 0,
+            embeddings_invalidated: 0,
+        });
+    }
+
+    let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    let update_document = transaction
+        .prepare(
+            "UPDATE documents \
+             SET canonical_json = $2::text::jsonb, \
+                 updated_at = now() \
+             WHERE document_id = $1;",
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let clear_chunk_fingerprints = transaction
+        .prepare(
+            "UPDATE chunks \
+             SET embedding_fingerprint = NULL \
+             WHERE document_id = $1;",
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let delete_embeddings = transaction
+        .prepare(
+            "DELETE FROM chunk_embeddings embedding \
+             USING chunks chunk \
+             WHERE embedding.chunk_id = chunk.chunk_id \
+               AND chunk.document_id = $1;",
+        )
+        .map_err(StorageError::PostgresClient)?;
+
+    let mut embeddings_invalidated = 0usize;
+    for (document_id, canonical_json) in &updates {
+        let deleted = transaction
+            .execute(&delete_embeddings, &[document_id])
+            .map_err(StorageError::PostgresClient)?;
+        embeddings_invalidated +=
+            usize::try_from(deleted).map_err(|_| StorageError::Projection {
+                message: format!(
+                    "embedding invalidation count too large for document `{document_id}`: {deleted}"
+                ),
+            })?;
+        transaction
+            .execute(&clear_chunk_fingerprints, &[document_id])
+            .map_err(StorageError::PostgresClient)?;
+        transaction
+            .execute(&update_document, &[document_id, canonical_json])
+            .map_err(StorageError::PostgresClient)?;
+    }
+
+    transaction.commit().map_err(StorageError::PostgresClient)?;
+    Ok(LegiHierarchyBackfillReport {
+        documents_updated: updates.len(),
+        embeddings_invalidated,
+    })
+}
+
 pub fn insert_chunk_embeddings(
     postgres: &ManagedPostgres,
     embeddings: &[ChunkEmbeddingInsert<'_>],
@@ -304,6 +402,76 @@ pub fn insert_chunk_embeddings(
 
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(embeddings.len())
+}
+
+fn enriched_article_hierarchy_json(
+    document_json: &str,
+    section_json: &str,
+) -> Result<Option<String>, StorageError> {
+    let mut document: serde_json::Value = serde_json::from_str(document_json)?;
+    let section: serde_json::Value = serde_json::from_str(section_json)?;
+    let mut hierarchy = string_array_field(&section, "hierarchy_path");
+    if let Some(section_title) = section.get("title").and_then(serde_json::Value::as_str)
+        && hierarchy.last().is_none_or(|last| last != section_title)
+    {
+        hierarchy.push(section_title.to_owned());
+    }
+    let current_hierarchy = string_array_field(&document, "hierarchy_path");
+    if hierarchy.is_empty()
+        || hierarchy == current_hierarchy
+        || hierarchy.len() <= current_hierarchy.len()
+    {
+        return Ok(None);
+    }
+
+    let title = document
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let hierarchy_json = serde_json::json!(hierarchy);
+    document["hierarchy_path"] = hierarchy_json.clone();
+
+    if let Some(chunks) = document
+        .get_mut("chunks")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for chunk in chunks {
+            chunk["hierarchy_path"] = hierarchy_json.clone();
+            if let Some(body) = chunk.get("body").and_then(serde_json::Value::as_str) {
+                chunk["contextualized_body"] = serde_json::json!(contextualized_article_body(
+                    &hierarchy,
+                    title.as_deref(),
+                    body
+                ));
+            }
+        }
+    }
+
+    Ok(Some(serde_json::to_string(&document)?))
+}
+
+fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn contextualized_article_body(hierarchy: &[String], title: Option<&str>, body: &str) -> String {
+    let mut parts = hierarchy.to_vec();
+    if let Some(title) = title {
+        parts.push(title.to_owned());
+    }
+    let context = parts.join(" > ");
+    if context.is_empty() {
+        body.to_owned()
+    } else {
+        format!("{context}\n\n{body}")
+    }
 }
 
 struct LegiMetadataRow {

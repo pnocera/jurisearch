@@ -37,8 +37,8 @@ use jurisearch_storage::{
         record_ingest_member, start_ingest_run, update_ingest_member_status,
     },
     projection::{
-        ChunkEmbeddingInsert, LegiMetadataRoot, insert_chunk_embeddings, insert_legi_documents,
-        insert_legi_metadata_roots,
+        ChunkEmbeddingInsert, LegiMetadataRoot, backfill_legi_article_hierarchy_from_metadata,
+        insert_chunk_embeddings, insert_legi_documents, insert_legi_metadata_roots,
     },
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
@@ -618,6 +618,8 @@ struct LegiArchiveIngestCounters {
     inserted_publisher_edges: usize,
     parsed_metadata_members: usize,
     persisted_metadata_members: usize,
+    hierarchy_backfilled_documents: usize,
+    hierarchy_backfill_invalidated_embeddings: usize,
     skipped_members: usize,
     skipped_compatible_members: usize,
     failed_members: usize,
@@ -706,6 +708,18 @@ fn ingest_legi_archives_payload(
         }
     }
 
+    if fatal_error.is_none() {
+        match backfill_legi_article_hierarchy_from_metadata(&postgres) {
+            Ok(report) => {
+                counters.hierarchy_backfilled_documents = report.documents_updated;
+                counters.hierarchy_backfill_invalidated_embeddings = report.embeddings_invalidated;
+            }
+            Err(error) => {
+                fatal_error = Some(storage_error_object(error));
+            }
+        }
+    }
+
     let run_status = if counters.failed_members == 0 && fatal_error.is_none() {
         IngestRunStatus::Completed
     } else {
@@ -739,6 +753,8 @@ fn ingest_legi_archives_payload(
         "inserted_publisher_edges": counters.inserted_publisher_edges,
         "parsed_metadata_members": counters.parsed_metadata_members,
         "persisted_metadata_members": counters.persisted_metadata_members,
+        "hierarchy_backfilled_documents": counters.hierarchy_backfilled_documents,
+        "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
         "skipped_members": counters.skipped_members,
         "skipped_compatible_members": counters.skipped_compatible_members,
         "failed_members": counters.failed_members,
