@@ -66,6 +66,8 @@ This is locked (D3). It *was* the highest-risk prerequisite; with the two in-hou
 
 **Recommendation:** time-box the `pg_search`-on-embedded-Postgres spike early. If it stalls, the native-FTS fallback (already validated in `juridocs`) keeps Phase 0 moving without reopening the backend decision.
 
+**Phase 0 policy recorded:** see [`storage-backend-policy.md`](./storage-backend-policy.md). The accepted Phase 0 path is Linux x86_64, PostgreSQL 18 through a pgrx-managed or pgrx-like `pg_config` prefix, and pre-staged matching `pg_search`/`pgvector` artifacts for offline installs.
+
 ---
 
 ## 3. Embeddings infrastructure  — ✅ provisional endpoint verified
@@ -204,10 +206,10 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 
 ## 11. Hardware, platform & network
 
-- **Platform:** v1 Linux-only is acceptable (record the policy in 0.3). Embedded-Postgres + extension packaging is the platform-sensitive part.
+- **Platform:** Phase 0/v1 is Linux x86_64 only; macOS/Windows require a separate extension-packaging proof. See [`storage-backend-policy.md`](./storage-backend-policy.md).
 - **Disk:** raw archives + extracted XML + canonical records + Postgres data dir + pgvector indexes + (optional) local models. Size for the spike first, then the full LEGI baseline.
 - **RAM/CPU:** memory-mapped index reads keep query startup small; ingestion (parsing + embedding) is the resource-heavy phase.
-- **Network:** required for first-time acquisition (Postgres binaries, crates, models, official dumps, API). The **offline-install story** is itself a 0.3 acceptance criterion — capture what must be pre-staged for an air-gapped build.
+- **Network:** required for first-time acquisition (Postgres binaries, crates, models, official dumps, API). Offline/air-gapped installs must pre-stage the PG18 runtime, matching `pg_search`/`pgvector` assets, model files, official archives/DTDs, and config pointing `JURISEARCH_PG_CONFIG` at the staged runtime.
 
 ---
 
@@ -257,10 +259,10 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 
 ## 15. Open decisions to resolve before kickoff
 
-1. **PG major + ABI-match strategy for `pg_search`** — pick the major supported by both `postgresql_embedded` and the fork (17 or 18); decide whether to build `pg_search` directly against the embedded binaries (if they ship `pg_config`/headers) or against a matching official PG and copy artifacts in. *(Drives 0.3; now a scoped ABI question, not an open backend risk — see §2.)*
+1. **PG major + ABI-match strategy for `pg_search`** — Phase 0 uses PostgreSQL **18** and requires `pg_search`/`pgvector` artifacts built against the same `pg_config` prefix used at runtime. See [`storage-backend-policy.md`](./storage-backend-policy.md).
 2. **Phase 0 embeddings endpoint** — local `llama.cpp` vs hosted API for the spike. *(Drives 0.4/0.6.)*
-3. **Platform policy** — confirm v1 Linux-only and record macOS/Windows policy. *(0.3 acceptance.)*
-4. **Offline-install scope** — must Phase 0 support air-gapped build, or is online acquisition acceptable for v1? *(0.3 acceptance.)*
+3. **Platform policy** — resolved for Phase 0: Linux x86_64 only; macOS/Windows need a separate packaging proof.
+4. **Offline-install scope** — resolved for Phase 0: online acquisition is acceptable for development; offline installs must pre-stage the runtime/extensions/models/corpora listed in [`storage-backend-policy.md`](./storage-backend-policy.md).
 5. **Legal reviewer engagement** — who, and on what cadence, for gold labels and vocabulary seeds. *(W2 gates.)*
 6. **DILA bulk jurisprudence (2.2a)** — accept or leave parked. *(Phase 2 scope; already deferable.)*
 
@@ -270,7 +272,8 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 
 - [ ] Pin Rust toolchain (`rust-toolchain.toml`); install C toolchain, `pkg-config`, `psql`.
 - [ ] Decide embedded-Postgres binary source; obtain Postgres + `pgvector` + `pg_search` builds that match; prove `CREATE EXTENSION vector` and `pg_search` in a throwaway data dir.
-  - 2026-06-21 proof: `work/03-implementation/00-setup/smoke-pg-extensions.sh` and `crates/jurisearch-storage/tests/extension_smoke.rs` prove the throwaway-data-dir extension path against the current pgrx-managed PG 18 prefix. `crates/jurisearch-storage/tests/durable_lifecycle.rs` now proves persistent PGDATA restart, concurrent-owner rejection, extension bootstrap, and vector query behavior. Remaining for this checkbox: the actual embedded binary source, offline-install story, and platform policy.
+  - 2026-06-21 proof: `work/03-implementation/00-setup/smoke-pg-extensions.sh` and `crates/jurisearch-storage/tests/extension_smoke.rs` prove the throwaway-data-dir extension path against the current pgrx-managed PG 18 prefix. `crates/jurisearch-storage/tests/durable_lifecycle.rs` now proves persistent PGDATA restart, concurrent-owner rejection, extension bootstrap, and vector query behavior. Remaining for this checkbox: package/pre-stage the actual runtime artifacts for a distributable/offline install.
+- [x] Record Phase 0 storage platform/offline policy in [`storage-backend-policy.md`](./storage-backend-policy.md).
 - [ ] Stand up a `bge-m3` OpenAI-compatible endpoint (local `llama.cpp` or hosted) and confirm a 1024-dim vector with mean pooling.
 - [ ] Download a representative LEGI XML subset + the matching official DTDs.
 - [ ] Fetch ≥1 baseline + ≥1 delta LEGI archive for ordering tests.
