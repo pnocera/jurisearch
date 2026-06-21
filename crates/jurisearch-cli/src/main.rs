@@ -19,8 +19,8 @@ use jurisearch_core::{
 use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
 use jurisearch_ingest::{
     archive::{
-        ArchiveMember, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
-        for_each_xml_member_until, plan_from_dir,
+        ArchiveMember, ArchivePlan, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
+        PlannedArchive, for_each_xml_member_until, plan_from_dir,
     },
     legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
@@ -35,6 +35,7 @@ use jurisearch_storage::{
         finish_ingest_run, ingest_resume_decision, load_ingest_embedding_coverage,
         load_ingest_health, load_ingest_projection_coverage, record_ingest_error,
         record_ingest_member, start_ingest_run, update_ingest_member_status,
+        update_ingest_run_manifest,
     },
     projection::{
         ChunkEmbeddingInsert, LegiMetadataRoot, backfill_legi_article_hierarchy_from_metadata,
@@ -628,6 +629,56 @@ struct LegiArchiveIngestCounters {
     unsupported_roots: BTreeMap<String, usize>,
 }
 
+fn legi_archive_manifest(plan: &ArchivePlan, counters: &LegiArchiveIngestCounters) -> Value {
+    let latest_archive = plan.deltas.last().unwrap_or(&plan.baseline);
+    json!({
+        "source": "legi",
+        "dataset": "LEGI",
+        "parser_version": LEGI_PARSER_VERSION,
+        "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
+        "code_version": CLI_CODE_VERSION,
+        "source_version": latest_archive.timestamp.to_string(),
+        "freshness": {
+            "latest_archive": latest_archive.file_name.as_str(),
+            "latest_archive_kind": latest_archive.kind,
+            "latest_archive_timestamp": latest_archive.timestamp.to_string(),
+            "latest_archive_timestamp_compact": latest_archive.timestamp.compact()
+        },
+        "archive_plan": {
+            "baseline": planned_archive_manifest(&plan.baseline),
+            "deltas": plan.deltas.iter().map(planned_archive_manifest).collect::<Vec<_>>(),
+            "skipped_count": plan.skipped.len(),
+            "skipped": &plan.skipped
+        },
+        "coverage": {
+            "visited_members": counters.visited_members,
+            "inserted_documents": counters.inserted_documents,
+            "inserted_chunks": counters.inserted_chunks,
+            "inserted_publisher_edges": counters.inserted_publisher_edges,
+            "parsed_metadata_members": counters.parsed_metadata_members,
+            "persisted_metadata_members": counters.persisted_metadata_members,
+            "hierarchy_backfilled_documents": counters.hierarchy_backfilled_documents,
+            "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
+            "skipped_members": counters.skipped_members,
+            "skipped_compatible_members": counters.skipped_compatible_members,
+            "failed_members": counters.failed_members,
+            "quarantined_payloads": counters.quarantined_payloads,
+            "parsed_metadata_roots": &counters.parsed_metadata_roots,
+            "unsupported_roots": &counters.unsupported_roots
+        }
+    })
+}
+
+fn planned_archive_manifest(archive: &PlannedArchive) -> Value {
+    json!({
+        "source": archive.source,
+        "kind": archive.kind,
+        "timestamp": archive.timestamp.to_string(),
+        "timestamp_compact": archive.timestamp.compact(),
+        "file_name": archive.file_name.as_str()
+    })
+}
+
 fn ingest_legi_archives_payload(
     index_dir: Option<&Path>,
     archives_dir: &Path,
@@ -645,6 +696,9 @@ fn ingest_legi_archives_payload(
     let run_id = run_id.unwrap_or_else(default_legi_run_id);
     let archive_plan_json =
         serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
+    let initial_manifest = legi_archive_manifest(&plan, &LegiArchiveIngestCounters::default());
+    let initial_manifest_json = serde_json::to_string(&initial_manifest)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
 
     start_ingest_run(
         &postgres,
@@ -656,7 +710,7 @@ fn ingest_legi_archives_payload(
             code_version: CLI_CODE_VERSION,
             safe_mode,
             archive_plan_json: Some(archive_plan_json.as_str()),
-            manifest_json: None,
+            manifest_json: Some(initial_manifest_json.as_str()),
         },
     )
     .map_err(storage_error_object)?;
@@ -720,6 +774,14 @@ fn ingest_legi_archives_payload(
         }
     }
 
+    let final_manifest = legi_archive_manifest(&plan, &counters);
+    let final_manifest_json = serde_json::to_string(&final_manifest)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if let Err(error) = update_ingest_run_manifest(&postgres, run_id.as_str(), &final_manifest_json)
+    {
+        fatal_error = Some(storage_error_object(error));
+    }
+
     let run_status = if counters.failed_members == 0 && fatal_error.is_none() {
         IngestRunStatus::Completed
     } else {
@@ -745,6 +807,7 @@ fn ingest_legi_archives_payload(
             "deltas": plan.deltas.iter().map(|archive| archive.file_name.as_str()).collect::<Vec<_>>(),
             "skipped": plan.skipped
         },
+        "manifest": final_manifest,
         "limit_members": limit_members,
         "max_member_bytes": max_member_bytes,
         "visited_members": counters.visited_members,

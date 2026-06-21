@@ -742,6 +742,18 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["parsed_metadata_roots"]["SECTION_TA"], 1);
     assert_eq!(json["parsed_metadata_roots"]["TEXTELR"], 1);
     assert_eq!(json["parsed_metadata_roots"]["TEXTE_VERSION"], 1);
+    assert_eq!(json["manifest"]["source"], "legi");
+    assert_eq!(json["manifest"]["dataset"], "LEGI");
+    assert_eq!(json["manifest"]["source_version"], "20250101-000000");
+    assert_eq!(
+        json["manifest"]["freshness"]["latest_archive"],
+        "Freemium_legi_global_20250101-000000.tar.gz"
+    );
+    assert_eq!(json["manifest"]["coverage"]["visited_members"], 5);
+    assert_eq!(
+        json["manifest"]["coverage"]["hierarchy_backfilled_documents"],
+        1
+    );
     assert!(json["unsupported_roots"].as_object().unwrap().is_empty());
 
     let quarantine_entries =
@@ -821,6 +833,28 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         "validation_missing_required_field"
     );
     drop(postgres);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ingest_health"]["latest_manifest"]["source"], "legi");
+    assert_eq!(
+        json["ingest_health"]["latest_manifest"]["freshness"]["latest_archive_timestamp"],
+        "20250101-000000"
+    );
+    assert_eq!(
+        json["ingest_health"]["latest_manifest"]["coverage"]["persisted_metadata_members"],
+        3
+    );
 
     let output = Command::cargo_bin("jurisearch")
         .unwrap()

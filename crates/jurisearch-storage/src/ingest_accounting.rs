@@ -134,6 +134,7 @@ pub struct IngestHealthReport {
     pub latest_run_id: Option<String>,
     pub latest_run_status: Option<String>,
     pub latest_completed_run_id: Option<String>,
+    pub latest_manifest: serde_json::Value,
     pub total_members: i64,
     pub inserted_members: i64,
     pub skipped_members: i64,
@@ -245,6 +246,30 @@ pub fn finish_ingest_run(
              SET status = $2, error_message = $3, completed_at = now(), updated_at = now() \
              WHERE run_id = $1;",
             &[&run_id, &status.as_str(), &error_message],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::IngestAccounting {
+            message: format!("ingest run `{run_id}` does not exist"),
+        })
+    }
+}
+
+pub fn update_ingest_run_manifest(
+    postgres: &ManagedPostgres,
+    run_id: &str,
+    manifest_json: &str,
+) -> Result<(), StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    let updated = client
+        .execute(
+            "UPDATE ingest_run \
+             SET manifest = $2::text::jsonb, updated_at = now() \
+             WHERE run_id = $1;",
+            &[&run_id, &manifest_json],
         )
         .map_err(StorageError::PostgresClient)?;
     if updated == 1 {
@@ -453,7 +478,7 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         .map_err(StorageError::PostgresClient)?;
     let latest = client
         .query_opt(
-            "SELECT run_id, status \
+            "SELECT run_id, status, manifest::text \
              FROM ingest_run \
              ORDER BY started_at DESC, run_id DESC \
              LIMIT 1;",
@@ -462,6 +487,12 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         .map_err(StorageError::PostgresClient)?;
     let latest_run_id = latest.as_ref().map(|row| row.get::<_, String>(0));
     let latest_run_status = latest.as_ref().map(|row| row.get::<_, String>(1));
+    let latest_manifest = latest
+        .as_ref()
+        .map(|row| row.get::<_, String>(2))
+        .map(|manifest| serde_json::from_str(&manifest))
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
     let latest_completed_run_id = client
         .query_opt(
             "SELECT run_id \
@@ -536,6 +567,7 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         latest_run_id,
         latest_run_status,
         latest_completed_run_id,
+        latest_manifest,
         total_members,
         inserted_members,
         skipped_members,
