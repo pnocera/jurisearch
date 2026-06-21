@@ -1440,6 +1440,137 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
 }
 
 #[test]
+fn context_returns_hierarchy_and_siblings_from_existing_index() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI context existing index")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-context.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let document_id = "legi:LEGIARTI000006419320@1804-02-21";
+
+    {
+        let postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, valid_to, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Responsabilite civile.', '1804-02-21', NULL, \
+                 'sha256:article-1240', \
+                 '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
+                ('legi:LEGIARTI000006419321@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419321', 'Code civil article 1241', \
+                 'Article 1241', 'Responsabilite voisine.', '1804-02-21', NULL, \
+                 'sha256:article-1241', \
+                 '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
+                ('legi:LEGIARTI000006419322@2025-01-01', 'legi', 'article', \
+                 'LEGIARTI000006419322', 'Code civil article futur', \
+                 'Article futur', 'Future section article.', '2025-01-01', NULL, \
+                 'sha256:article-future', \
+                 '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, chunking, \
+                 boundary, hierarchy_path, source_payload_hash, chunk_builder_version) \
+             VALUES \
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'Responsabilite civile.', 'Code civil > Livre III > Titre IV > Article 1240', \
+                 'structural', 'article', '[\"Code civil\",\"Livre III\",\"Titre IV\"]', \
+                 'sha256:article-1240', 'chunker:v1'), \
+                ('chunk:1241:0', 'legi:LEGIARTI000006419321@1804-02-21', 0, \
+                 'Responsabilite voisine.', 'Code civil > Livre III > Titre IV > Article 1241', \
+                 'structural', 'article', '[\"Code civil\",\"Livre III\",\"Titre IV\"]', \
+                 'sha256:article-1241', 'chunker:v1'), \
+                ('chunk:future:0', 'legi:LEGIARTI000006419322@2025-01-01', 0, \
+                 'Future section article.', 'Code civil > Livre III > Titre IV > Article futur', \
+                 'structural', 'article', '[\"Code civil\",\"Livre III\",\"Titre IV\"]', \
+                 'sha256:article-future', 'chunker:v1');",
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args([
+            "context",
+            document_id,
+            "--siblings",
+            "--as-of",
+            "2024-01-01",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["target"]["document_id"], document_id);
+    assert_eq!(json["ancestry"][0]["title"], "Code civil");
+    assert_eq!(json["sibling_count"], 1);
+    assert_eq!(json["sibling_limit"], 50);
+    assert_eq!(json["sibling_truncated"], false);
+    assert_eq!(
+        json["siblings"][0]["document_id"],
+        "legi:LEGIARTI000006419321@1804-02-21"
+    );
+
+    let input = format!(
+        "{{\"id\":\"context-one\",\"command\":\"context\",\"args\":{{\"id\":\"{document_id}\",\"siblings\":true,\"as_of\":\"2024-01-01\"}}}}\n"
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["id"], "context-one");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["result"]["target"]["document_id"], document_id);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["context", document_id, "--as-of", "20240101"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["context", document_id, "--as-of", "2024-13-01"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+
+    Ok(())
+}
+
+#[test]
 fn ingest_embed_chunks_budget_error_names_offending_chunk() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI embed chunk budget failure")? else {
         return Ok(());

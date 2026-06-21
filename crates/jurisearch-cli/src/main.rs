@@ -44,7 +44,8 @@ use jurisearch_storage::{
         insert_legi_documents, insert_legi_metadata_roots,
     },
     retrieval::{
-        FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
+        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, context_documents_json,
+        fetch_documents_json, hybrid_candidates_json,
     },
     runtime::{ManagedPostgres, PgConfig, StorageError},
 };
@@ -138,6 +139,17 @@ struct SessionFetchArgs {
     as_of: Option<String>,
     #[serde(default)]
     part: Option<String>,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionContextArgs {
+    id: String,
+    #[serde(default)]
+    siblings: bool,
+    #[serde(default)]
+    as_of: Option<String>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -362,12 +374,15 @@ fn run() -> anyhow::Result<()> {
             args.id,
             args.rel.as_deref().unwrap_or("any")
         ))),
-        Command::Context(args) => emit_error(ErrorObject::not_implemented(&format!(
-            "context id={} siblings={} as_of={}",
-            args.id,
-            args.siblings,
-            args.as_of.as_deref().unwrap_or("none")
-        ))),
+        Command::Context(args) => {
+            if args.id.trim().is_empty() {
+                emit_error(ErrorObject::bad_input(
+                    "context requires a non-empty stable ID",
+                ))
+            } else {
+                emit_context(args, index_dir.as_deref())
+            }
+        }
         Command::Expand(args) => {
             if args.query.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("expand query must not be empty"))
@@ -455,6 +470,13 @@ fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
+fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match context_payload(args, index_dir) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
 fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     if args.as_of.is_some() || args.part.is_some() {
         return Err(ErrorObject::bad_input(
@@ -475,6 +497,31 @@ fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, Err
     {
         Err(no_results(
             "fetch returned no documents for the requested IDs",
+        ))
+    } else {
+        Ok(response)
+    }
+}
+
+fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    validate_as_of(args.as_of.as_deref())?;
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let response = context_documents_json(
+        &postgres,
+        &ContextDocumentsQuery {
+            document_id: args.id.as_str(),
+            as_of: args.as_of.as_deref(),
+            include_siblings: args.siblings,
+        },
+    )
+    .map_err(storage_error_object)?;
+    let response: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if response["target"].is_null() {
+        Err(no_results(
+            "context returned no valid document for the requested ID and --as-of date",
         ))
     } else {
         Ok(response)
@@ -516,6 +563,25 @@ fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
             ids: args.ids,
             as_of: args.as_of,
             part: args.part,
+        },
+        index_dir.as_deref(),
+    )
+}
+
+fn session_context_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionContextArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid context args: {error}")))?;
+    if args.id.trim().is_empty() {
+        return Err(ErrorObject::bad_input(
+            "context requires a non-empty stable ID",
+        ));
+    }
+    let index_dir = args.index_dir;
+    context_payload(
+        ContextArgs {
+            id: args.id,
+            siblings: args.siblings,
+            as_of: args.as_of,
         },
         index_dir.as_deref(),
     )
@@ -1528,7 +1594,8 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "status" => session_status_payload(args),
         "search" => session_search_payload(args),
         "fetch" => session_fetch_payload(args),
-        "cite" | "related" | "context" | "expand" | "model fetch" | "setup" | "ingest" | "sync" => {
+        "context" => session_context_payload(args),
+        "cite" | "related" | "expand" | "model fetch" | "setup" | "ingest" | "sync" => {
             Err(ErrorObject::not_implemented(command))
         }
         _ => Err(ErrorObject::bad_input(format!(
@@ -1794,6 +1861,49 @@ fn upstream_unavailable(message: impl Into<String>) -> ErrorObject {
         message: message.into(),
         suggestions: vec!["Check the configured OpenAI-compatible embeddings endpoint.".into()],
     }
+}
+
+fn validate_as_of(as_of: Option<&str>) -> Result<(), ErrorObject> {
+    if let Some(as_of) = as_of
+        && !is_valid_iso_date(as_of)
+    {
+        return Err(ErrorObject::bad_input(format!(
+            "--as-of must be a valid ISO date in YYYY-MM-DD format, got `{as_of}`"
+        )));
+    }
+    Ok(())
+}
+
+fn is_valid_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let valid_shape = bytes.len() == 10
+        && bytes[0..4].iter().all(u8::is_ascii_digit)
+        && bytes[4] == b'-'
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[7] == b'-'
+        && bytes[8..10].iter().all(u8::is_ascii_digit);
+    if !valid_shape {
+        return false;
+    }
+
+    let year = value[0..4].parse::<u16>().unwrap_or_default();
+    let month = value[5..7].parse::<u8>().unwrap_or_default();
+    let day = value[8..10].parse::<u8>().unwrap_or_default();
+    day > 0 && day <= days_in_month(year, month).unwrap_or_default()
+}
+
+fn days_in_month(year: u16, month: u8) -> Option<u8> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if is_leap_year(year) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+fn is_leap_year(year: u16) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 fn storage_error_object(error: StorageError) -> ErrorObject {

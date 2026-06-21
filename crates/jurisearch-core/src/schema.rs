@@ -130,6 +130,36 @@ pub fn compiled_schema() -> Value {
                     }
                 }
             },
+            "ContextRequest": {
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "siblings": { "type": "boolean", "default": false },
+                    "as_of": { "type": "string", "format": "date" }
+                }
+            },
+            "ContextResponse": {
+                "properties": {
+                    "id": { "type": "string" },
+                    "as_of": { "type": ["string", "null"], "format": "date" },
+                    "requested_as_of": { "type": ["string", "null"], "format": "date" },
+                    "target": { "type": ["object", "null"] },
+                    "ancestry": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "depth": { "type": "integer" },
+                                "title": { "type": "string" }
+                            }
+                        }
+                    },
+                    "siblings": { "type": "array" },
+                    "sibling_count": { "type": "integer" },
+                    "sibling_limit": { "type": "integer" },
+                    "sibling_truncated": { "type": "boolean" }
+                }
+            },
             "StatusResponse": {
                 "properties": {
                     "schema_version": { "type": "string" },

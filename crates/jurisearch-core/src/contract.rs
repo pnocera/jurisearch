@@ -86,7 +86,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "context",
         summary: "Return structural neighbourhood: ancestry, siblings, or decision zones.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "ContextRequest",
         response_schema: "ContextResponse",
     },
