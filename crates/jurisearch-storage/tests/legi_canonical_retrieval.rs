@@ -113,7 +113,7 @@ fn real_legi_canonical_subset_is_searchable_and_fetchable() -> Result<(), Box<dy
         "SELECT c.chunk_id \
          FROM chunks c \
          JOIN documents d ON d.document_id = c.document_id \
-         WHERE c.body @@@ {} \
+         WHERE c.contextualized_body @@@ {} \
            AND (d.valid_from IS NULL OR d.valid_from <= {}::date) \
            AND (d.valid_to IS NULL OR d.valid_to > {}::date) \
          ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id \

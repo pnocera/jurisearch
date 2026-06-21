@@ -53,7 +53,7 @@ fn target_spike_corpus_retrieval_stays_under_latency_budget() -> Result<(), Stor
         "SELECT c.chunk_id \
          FROM chunks c \
          JOIN documents d ON d.document_id = c.document_id \
-         WHERE c.body @@@ 'responsabilite faute dommage' \
+         WHERE c.contextualized_body @@@ 'responsabilite faute dommage' \
            AND (d.valid_from IS NULL OR d.valid_from <= '2024-06-01'::date) \
            AND (d.valid_to IS NULL OR d.valid_to > '2024-06-01'::date) \
          ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id \
@@ -156,12 +156,20 @@ SELECT
 FROM generate_series(1, {decision_fixtures}) AS n;
 
 INSERT INTO chunks
-    (chunk_id, document_id, chunk_index, body, source_payload_hash,
+    (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash,
      chunk_builder_version, embedding_fingerprint)
 SELECT
     'chunk:legi:' || n || ':0',
     'legi:LEGIARTI' || lpad(n::text, 12, '0') || '@2024-01-01',
     0,
+    CASE
+        WHEN n = 1240 THEN 'responsabilite civile faute dommage reparation article 1240 responsabilite faute dommage'
+        WHEN n BETWEEN 1 AND 10 THEN 'responsabilite civile faute dommage reparation version inactive ' || n
+        WHEN n % 1000 = 0 THEN 'responsabilite administrative service public article ' || n
+        ELSE 'article legislatif procedure obligations contrats fiscalite famille numero ' || n
+    END,
+    -- Mirrors production's hierarchy/header prefix followed by raw chunk body.
+    'Code civil > Article ' || n || E'\n' ||
     CASE
         WHEN n = 1240 THEN 'responsabilite civile faute dommage reparation article 1240 responsabilite faute dommage'
         WHEN n BETWEEN 1 AND 10 THEN 'responsabilite civile faute dommage reparation version inactive ' || n
@@ -174,12 +182,18 @@ SELECT
 FROM generate_series(1, {article_fixtures}) AS n;
 
 INSERT INTO chunks
-    (chunk_id, document_id, chunk_index, body, source_payload_hash,
+    (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash,
      chunk_builder_version, embedding_fingerprint)
 SELECT
     'chunk:judilibre:' || n || ':0',
     'judilibre:JURI' || lpad(n::text, 12, '0') || '@2024-01-01',
     0,
+    CASE
+        WHEN n % 500 = 0 THEN 'decision responsabilite contractuelle procedure preuve numero ' || n
+        ELSE 'decision contentieux commercial social penal procedure numero ' || n
+    END,
+    -- Mirrors production's title/zone prefix followed by raw chunk body.
+    'Decision fixture ' || n || E'\n' ||
     CASE
         WHEN n % 500 = 0 THEN 'decision responsabilite contractuelle procedure preuve numero ' || n
         ELSE 'decision contentieux commercial social penal procedure numero ' || n

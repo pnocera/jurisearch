@@ -252,28 +252,38 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
                               \"contextualized_body\":\"Code civil > Article 1243\\n\\nArticle avant section TEXTELR...\",\
                               \"hierarchy_path\":[\"Code civil\"]}}]}}'); \
          INSERT INTO chunks \
-            (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+            (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
              chunk_builder_version, embedding_fingerprint) \
          VALUES \
             ('chunk:legi:LEGIARTI000006419320@1804-02-21:0', \
              'legi:LEGIARTI000006419320@1804-02-21', 0, \
-             'Tout fait quelconque de l''homme...', 'sha256:article-1240', \
+             'Tout fait quelconque de l''homme...', \
+             'Code civil > Article 1240\n\nTout fait quelconque de l''homme...', \
+             'sha256:article-1240', \
              'chunker:v0', 'bge-m3:1024:normalize:true'), \
             ('chunk:legi:LEGIARTI000052000001@2020-01-01:0', \
              'legi:LEGIARTI000052000001@2020-01-01', 0, \
-             'Version contemporaine...', 'sha256:article-boundary', \
+             'Version contemporaine...', \
+             'Code civil > Article 1240 bis\n\nVersion contemporaine...', \
+             'sha256:article-boundary', \
              'chunker:v0', NULL), \
             ('chunk:legi:LEGIARTI000052000002@1804-03-21:0', \
              'legi:LEGIARTI000052000002@1804-03-21', 0, \
-             'Article hors perimetre...', 'sha256:article-out-of-scope', \
+             'Article hors perimetre...', \
+             'Code civil > Article 1241\n\nArticle hors perimetre...', \
+             'sha256:article-out-of-scope', \
              'chunker:v0', NULL), \
             ('chunk:legi:LEGIARTI000052000003@1804-03-21:0', \
              'legi:LEGIARTI000052000003@1804-03-21', 0, \
-             'Article seulement relie par TEXTELR...', 'sha256:article-textelr-linked', \
+             'Article seulement relie par TEXTELR...', \
+             'Code civil > Article 1242\n\nArticle seulement relie par TEXTELR...', \
+             'sha256:article-textelr-linked', \
              'chunker:v0', NULL), \
             ('chunk:legi:LEGIARTI000052000004@1804-03-21:0', \
              'legi:LEGIARTI000052000004@1804-03-21', 0, \
-             'Article avant section TEXTELR...', 'sha256:article-textelr-no-section', \
+             'Article avant section TEXTELR...', \
+             'Code civil > Article 1243\n\nArticle avant section TEXTELR...', \
+             'sha256:article-textelr-no-section', \
              'chunker:v0', NULL); \
          INSERT INTO chunk_embeddings \
             (chunk_id, embedding_fingerprint, embedding, model, dimension) \

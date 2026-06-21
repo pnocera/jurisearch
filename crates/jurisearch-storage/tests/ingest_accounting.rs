@@ -301,14 +301,18 @@ fn insert_projection_fixture(postgres: &ManagedPostgres) -> Result<(), StorageEr
             'Article fixture', 'Document deliberately left without chunks.', '2024-01-01', \
             'sha256:article-without-chunks', '{{\"official\":true}}'); \
          INSERT INTO chunks \
-           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
-            'responsabilite civile article 1240', 'sha256:article-1240', \
+            'responsabilite civile article 1240', \
+            'Code civil > Article 1240\nresponsabilite civile article 1240', \
+            'sha256:article-1240', \
             'chunker:v0', 'bge-m3:1024:normalize:true'), \
            ('chunk:1240:1', 'legi:LEGIARTI000006419320@1804-02-21', 1, \
-            'dommage faute reparation', 'sha256:article-1240', \
+            'dommage faute reparation', \
+            'Code civil > Article 1240\ndommage faute reparation', \
+            'sha256:article-1240', \
             'chunker:v0', 'bge-m3:1024:normalize:true'); \
          INSERT INTO chunk_embeddings \
            (chunk_id, embedding_fingerprint, embedding, model, dimension) \

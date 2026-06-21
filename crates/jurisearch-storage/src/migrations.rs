@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 7;
+pub const CURRENT_SCHEMA_VERSION: i32 = 8;
 
 struct Migration {
     version: i32,
@@ -309,6 +309,38 @@ ON documents (source, kind, (md5(hierarchy_path::text)));
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 7), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 8,
+        name: "chunk_contextualized_bm25_index",
+        sql: r#"
+UPDATE chunks
+SET contextualized_body = body
+WHERE contextualized_body IS NULL
+   OR btrim(contextualized_body) = '';
+
+ALTER TABLE chunks
+    ALTER COLUMN contextualized_body SET NOT NULL;
+
+ALTER TABLE chunks
+    DROP CONSTRAINT IF EXISTS chunks_contextualized_body_not_empty;
+
+ALTER TABLE chunks
+    ADD CONSTRAINT chunks_contextualized_body_not_empty
+    CHECK (btrim(contextualized_body) <> '');
+
+DROP INDEX IF EXISTS chunks_bm25_idx;
+
+CREATE INDEX chunks_bm25_idx
+ON chunks USING bm25 (chunk_id, contextualized_body)
+WITH (key_field = 'chunk_id');
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 8), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

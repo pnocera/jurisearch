@@ -56,7 +56,7 @@ WITH lexical AS (
         row_number() OVER (ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id) AS lexical_rank
     FROM chunks c
     JOIN documents d ON d.document_id = c.document_id
-    WHERE c.body @@@ {query_text}
+    WHERE c.contextualized_body @@@ {query_text}
       AND (d.valid_from IS NULL OR d.valid_from <= {as_of}::date)
       AND (d.valid_to IS NULL OR d.valid_to > {as_of}::date)
       {kind_predicate}

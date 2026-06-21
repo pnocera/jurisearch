@@ -45,14 +45,16 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
             'Article cuisine', 'Recette de tarte aux pommes avec cannelle.', \
             '2024-01-01', 'sha256:recipe', '{{\"official\":true}}'); \
          INSERT INTO chunks \
-           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
             'responsabilite civile faute reparation dommage article 1240', \
+            'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
             'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'), \
            ('chunk:recipe:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
             'recette tarte pommes cannelle dessert', \
+            'Code de cuisine > Article 1\nrecette tarte pommes cannelle dessert', \
             'sha256:recipe', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
          INSERT INTO chunk_embeddings \
            (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -65,7 +67,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     let lexical = postgres.execute_sql(
         "SELECT chunk_id \
          FROM chunks \
-         WHERE body @@@ 'responsabilite faute dommage' \
+         WHERE contextualized_body @@@ 'code civil' \
          ORDER BY paradedb.score(chunk_id) DESC \
          LIMIT 1;",
     )?;
@@ -83,7 +85,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     let candidates = hybrid_candidates_json(
         &postgres,
         &HybridCandidateQuery {
-            query_text: "responsabilite faute dommage",
+            query_text: "code civil",
             query_embedding: &legal_vector,
             embedding_fingerprint: "bge-m3:1024:normalize:true",
             as_of: "2024-01-01",
@@ -95,7 +97,7 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
     )?;
     let candidates: serde_json::Value =
         serde_json::from_str(&candidates).expect("retrieval response is stable JSON");
-    assert_eq!(candidates["query"], "responsabilite faute dommage");
+    assert_eq!(candidates["query"], "code civil");
     assert_eq!(candidates["candidates"][0]["chunk_id"], "chunk:1240:0");
     assert_eq!(
         candidates["candidates"][0]["scores"]["lexical_rank"].as_u64(),
@@ -290,12 +292,15 @@ fn context_documents_json_reconstructs_hierarchy_and_date_filtered_siblings()
             '1804-02-21', 'sha256:empty-other', '[]'::jsonb, \
             '{\"hierarchy_path\":[]}'::jsonb); \
          INSERT INTO chunks \
-           (chunk_id, document_id, chunk_index, body, source_payload_hash, chunk_builder_version) \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+            chunk_builder_version) \
          VALUES \
            ('chunk:empty-target:0', 'legi:empty-path-target@1804-02-21', 0, \
-            'Empty hierarchy target.', 'sha256:empty-target', 'chunker:v1'), \
+            'Empty hierarchy target.', 'Empty hierarchy target.', \
+            'sha256:empty-target', 'chunker:v1'), \
            ('chunk:empty-other:0', 'legi:empty-path-other@1804-02-21', 0, \
-            'Empty hierarchy other.', 'sha256:empty-other', 'chunker:v1');",
+            'Empty hierarchy other.', 'Empty hierarchy other.', \
+            'sha256:empty-other', 'chunker:v1');",
     )?;
     let empty_hierarchy = context_documents_json(
         &postgres,

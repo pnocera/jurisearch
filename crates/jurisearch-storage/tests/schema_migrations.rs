@@ -39,6 +39,7 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         assert!(migrations.contains("5:documents_source_uid_index"));
         assert!(migrations.contains("6:chunk_provenance_columns"));
         assert!(migrations.contains("7:document_hierarchy_path_index"));
+        assert!(migrations.contains("8:chunk_contextualized_bm25_index"));
         assert_eq!(
             postgres.execute_sql(
                 "SELECT count(*)::text \
@@ -54,6 +55,15 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
                  FROM pg_indexes \
                  WHERE schemaname = current_schema() \
                    AND indexname = 'documents_context_hierarchy_idx';",
+            )?,
+            "true"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT (indexdef LIKE '%contextualized_body%')::text \
+                 FROM pg_indexes \
+                 WHERE schemaname = current_schema() \
+                   AND indexname = 'chunks_bm25_idx';",
             )?,
             "true"
         );
@@ -82,6 +92,25 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
             )?,
             "boundary,chunking,contextualized_body,hierarchy_path"
         );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT is_nullable \
+                 FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = 'chunks' \
+                   AND column_name = 'contextualized_body';",
+            )?,
+            "NO"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT count(*)::text \
+                 FROM pg_constraint \
+                 WHERE conrelid = 'chunks'::regclass \
+                   AND conname = 'chunks_contextualized_body_not_empty';",
+            )?,
+            "1"
+        );
 
         postgres.execute_sql(&format!(
             "INSERT INTO documents \
@@ -97,14 +126,18 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
                 'Article cuisine', 'Recette sans rapport juridique', '2024-01-01', \
                 'sha256:recipe', '{{\"official\":true}}'); \
              INSERT INTO chunks \
-               (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+               (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                 chunk_builder_version, embedding_fingerprint) \
              VALUES \
                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
-                'responsabilite civile article 1240', 'sha256:article-1240', \
+                'responsabilite civile article 1240', \
+                'Code civil > Article 1240\nresponsabilite civile article 1240', \
+                'sha256:article-1240', \
                 'chunker:v0', 'bge-m3:1024:normalize:true'), \
                ('chunk:recipe:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
-                'recette de tarte aux pommes', 'sha256:recipe', \
+                'recette de tarte aux pommes', \
+                'Code de cuisine > Article 1\nrecette de tarte aux pommes', \
+                'sha256:recipe', \
                 'chunker:v0', 'bge-m3:1024:normalize:true'); \
              INSERT INTO chunk_embeddings \
                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -177,7 +210,7 @@ fn chunk_provenance_backfill_sql_materializes_existing_canonical_json() -> Resul
          VALUES \
            ('chunk:article-1:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
             'Disposition generale.', 'sha256:article-1', 'chunker:v0', \
-            NULL, 'structural', 'unknown', '[]'::jsonb);",
+            'Disposition generale.', 'structural', 'unknown', '[]'::jsonb);",
     )?;
 
     postgres.execute_sql(

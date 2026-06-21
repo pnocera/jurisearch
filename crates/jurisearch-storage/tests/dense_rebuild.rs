@@ -39,14 +39,16 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
             'Article 1', 'Disposition generale.', \
             '2024-01-01', 'sha256:article-1', '{{\"official\":true}}'); \
          INSERT INTO chunks \
-           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
             'responsabilite civile faute reparation dommage article 1240', \
+            'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
             'sha256:article-1240', 'chunker:v0', NULL), \
            ('chunk:article-1:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
             'disposition generale article 1', \
+            'Code civil > Article 1\ndisposition generale article 1', \
             'sha256:article-1', 'chunker:v0', NULL); \
          INSERT INTO chunk_embeddings \
            (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -150,7 +152,7 @@ fn chunk_embedding_inputs_prefer_contextualized_body_and_honor_limit() -> Result
             'Code civil > Article 1\nDisposition generale contextualisee.', \
             'sha256:article-1', 'chunker:v0', NULL), \
            ('chunk:article-2:0', 'legi:LEGIARTI000000000002@2024-01-01', 0, \
-            'fallback body should be embedded', NULL, \
+            'fallback body should be embedded', 'fallback body should be embedded', \
             'sha256:article-2', 'chunker:v0', NULL);",
     )?;
 

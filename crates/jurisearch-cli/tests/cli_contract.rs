@@ -185,11 +185,12 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
                  'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
                  '1804-02-21', 'sha256:article-1240', '{{\"official\":true}}'); \
              INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
              VALUES \
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                  'responsabilite civile faute reparation dommage article 1240', \
+                 'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
                  'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
              INSERT INTO chunk_embeddings \
                 (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -352,11 +353,12 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
                  'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
                  '1804-02-21', 'sha256:article-1240', '{\"official\":true}'); \
              INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
              VALUES \
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                  'responsabilite civile faute reparation dommage article 1240', \
+                 'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
                  'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true');",
         )?;
     }
@@ -1223,11 +1225,13 @@ fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageErro
                  '1804-02-21', 'sha256:article-1240',
                  '{"title":"Article 1240","hierarchy_path":["Code civil"],"chunks":[{"body":"Texte initial pour le test.","hierarchy_path":["Code civil"],"contextualized_body":"Code civil\nArticle 1240\nTexte initial pour le test."}]}');
              INSERT INTO chunks
-                (chunk_id, document_id, chunk_index, body, source_payload_hash,
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash,
                  chunk_builder_version, embedding_fingerprint)
              VALUES
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0,
-                 'Texte initial pour le test.', 'sha256:article-1240',
+                 'Texte initial pour le test.',
+                 'Code civil\nArticle 1240\nTexte initial pour le test.',
+                 'sha256:article-1240',
                  'chunker:v0', 'bge-m3:1024:normalize:true');
              INSERT INTO graph_edges
                 (edge_id, from_document_id, edge_kind, edge_source, payload)
@@ -1363,11 +1367,12 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
                  'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
                  '1804-02-21', 'sha256:article-1240', '{\"official\":true}'); \
              INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
              VALUES \
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                  'responsabilite civile faute reparation dommage article 1240', \
+                 'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
                  'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true');",
         )?;
     }
@@ -1597,10 +1602,11 @@ fn ingest_embed_chunks_budget_error_names_offending_chunk() -> Result<(), Storag
                  '1804-02-21', 'sha256:article-1240', \
                  '{\"chunks\":[{\"contextualized_body\":\"abcde\"}]}'); \
              INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
              VALUES \
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'abcde', \
                  'abcde', \
                  'sha256:article-1240', 'chunker:v0', NULL);",
         )?;
@@ -1657,11 +1663,12 @@ fn ingest_embed_chunks_uses_live_endpoint_and_finalizes_dense_index()
                  '1804-02-21', 'sha256:article-1240', \
                  '{\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1240\\nresponsabilite civile faute reparation dommage\"}]}'); \
              INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
              VALUES \
                 ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                  'plain fallback chunk text', \
+                 'Code civil > Article 1240\nresponsabilite civile faute reparation dommage', \
                  'sha256:article-1240', 'chunker:v0', NULL);",
         )?;
     }
@@ -1745,11 +1752,12 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
                  'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
                  '1804-02-21', 'sha256:article-1240', '{{\"official\":true}}'); \
              INSERT INTO chunks \
-                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
                  chunk_builder_version, embedding_fingerprint) \
              VALUES \
                 ('chunk:1240:0', '{document_id}', 0, \
                  'responsabilite civile faute reparation dommage article 1240', \
+                 'Code civil > Article 1240\nresponsabilite civile faute reparation dommage article 1240', \
                  'sha256:article-1240', 'chunker:v0', '{storage_fingerprint}'); \
              INSERT INTO chunk_embeddings \
                 (chunk_id, embedding_fingerprint, embedding, model, dimension) \
