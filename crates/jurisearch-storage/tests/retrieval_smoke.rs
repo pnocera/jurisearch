@@ -1,7 +1,10 @@
 mod common;
 
 use common::{discover_pg_config, vector_literal};
-use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
+use jurisearch_storage::{
+    retrieval::{HybridCandidateQuery, hybrid_candidates_json},
+    runtime::{ManagedPostgres, StorageError},
+};
 
 #[test]
 fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), StorageError> {
@@ -73,6 +76,28 @@ fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), 
         legal_vector
     ))?;
     assert_eq!(vector, "chunk:1240:0");
+
+    let candidates = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "responsabilite faute dommage",
+            query_embedding: &legal_vector,
+            embedding_fingerprint: "bge-m3:1024:normalize:true",
+            as_of: "2024-01-01",
+            lexical_limit: 10,
+            dense_limit: 10,
+            limit: 3,
+        },
+    )?;
+    let candidates: serde_json::Value =
+        serde_json::from_str(&candidates).expect("retrieval response is stable JSON");
+    assert_eq!(candidates["query"], "responsabilite faute dommage");
+    assert_eq!(candidates["candidates"][0]["chunk_id"], "chunk:1240:0");
+    assert_eq!(
+        candidates["candidates"][0]["lexical_rank"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(candidates["candidates"][0]["dense_rank"].as_u64(), Some(1));
 
     Ok(())
 }

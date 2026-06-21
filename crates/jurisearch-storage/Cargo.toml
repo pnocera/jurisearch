@@ -10,3 +10,6 @@ fs2.workspace = true
 postgres.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

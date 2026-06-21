@@ -488,6 +488,7 @@ version = "0.1.0"
 dependencies = [
  "fs2",
  "postgres",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
