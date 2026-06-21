@@ -1542,6 +1542,34 @@ mod tests {
     }
 
     #[test]
+    fn preserves_article_status_and_temporal_variants() {
+        let cases = [
+            ("VIGUEUR", "2999-01-01", None),
+            ("MODIFIE", "2016-10-01", Some("2016-10-01")),
+            ("ABROGE", "2010-05-15", Some("2010-05-15")),
+            ("ABROGE_DIFF", "2999-12-31", None),
+        ];
+
+        for (status, date_fin, expected_valid_to) in cases {
+            let xml = article_fixture()
+                .replace("<ETAT>VIGUEUR</ETAT>", &format!("<ETAT>{status}</ETAT>"))
+                .replace(
+                    "<DATE_FIN>2999-01-01</DATE_FIN>",
+                    &format!("<DATE_FIN>{date_fin}</DATE_FIN>"),
+                );
+            let document = parse_article_fixture(&xml).unwrap();
+
+            assert_eq!(document.source_status.as_deref(), Some(status));
+            assert_eq!(document.valid_to.as_deref(), expected_valid_to);
+            assert_eq!(document.valid_to_raw.as_deref(), Some(date_fin));
+            assert_eq!(
+                document.canonical_version,
+                format!("legi_article:v1:nature=Article:etat={status}:type=AUTONOME")
+            );
+        }
+    }
+
+    #[test]
     fn preserves_entities_and_inline_text_continuity() {
         let xml = article_fixture().replace(
             "<p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>",
