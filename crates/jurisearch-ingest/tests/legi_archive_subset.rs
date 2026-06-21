@@ -182,10 +182,6 @@ fn real_archive_covers_article_status_and_temporal_variants() {
     let mut finite_valid_to_by_status = BTreeMap::<String, String>::new();
     let mut sentinel_2999_01_01 = None::<String>;
     let mut sentinel_2999_12_31 = None::<String>;
-    let mut version_dates_by_group = BTreeMap::<String, BTreeSet<String>>::new();
-    let mut same_day_versions_by_group = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    let mut multi_version_group = None::<(String, Vec<String>)>;
-    let mut same_day_version_group = None::<(String, String, Vec<String>)>;
     let mut article_parse_errors = 0usize;
     let mut article_parse_error_samples = Vec::<String>::new();
     let mut visited_members = 0usize;
@@ -225,34 +221,6 @@ fn real_archive_covers_article_status_and_temporal_variants() {
                             sentinel_2999_12_31.get_or_insert_with(|| member_path.clone());
                         }
                         _ => {}
-                    }
-
-                    let version_group = document
-                        .version_group
-                        .clone()
-                        .unwrap_or_else(|| document.source_uid.clone());
-                    let dates = version_dates_by_group
-                        .entry(version_group.clone())
-                        .or_default();
-                    dates.insert(document.valid_from.clone());
-                    if dates.len() > 1 && multi_version_group.is_none() {
-                        multi_version_group =
-                            Some((version_group.clone(), dates.iter().cloned().collect()));
-                    }
-
-                    let source_uids = same_day_versions_by_group
-                        .entry((version_group, document.valid_from.clone()))
-                        .or_default();
-                    source_uids.insert(document.source_uid.clone());
-                    if source_uids.len() > 1 && same_day_version_group.is_none() {
-                        same_day_version_group = Some((
-                            document
-                                .version_group
-                                .clone()
-                                .unwrap_or_else(|| document.source_uid.clone()),
-                            document.valid_from.clone(),
-                            source_uids.iter().cloned().collect(),
-                        ));
                     }
                 }
                 Ok(
@@ -318,17 +286,20 @@ fn real_archive_covers_article_status_and_temporal_variants() {
         sentinel_2999_01_01.is_some(),
         "expected at least one open-ended ARTICLE with DATE_FIN 2999-01-01"
     );
+    let article_attempts = article_members + article_parse_errors;
+    assert!(
+        article_parse_errors * 100 <= article_attempts,
+        "expected ARTICLE parse-error rate to stay at or below 1%, got {article_parse_errors}/{article_attempts}; samples: {article_parse_error_samples:?}"
+    );
 
     eprintln!(
-        "scanned {article_members} parsed ARTICLE members from `{}` after visiting {visited_xml} XML members; article parse errors: {article_parse_errors}; parse error samples: {:?}; statuses: {:?}; finite status examples: {:?}; 2999-01-01 sentinel: {:?}; 2999-12-31 sentinel: {:?}; multi-version group: {:?}; same-day version group: {:?}",
+        "scanned {article_members} parsed ARTICLE members from `{}` after visiting {visited_xml} XML members; article parse errors: {article_parse_errors}; parse error samples: {:?}; statuses: {:?}; finite status examples: {:?}; 2999-01-01 sentinel: {:?}; 2999-12-31 sentinel: {:?}",
         archive_path.display(),
         article_parse_error_samples,
         statuses,
         finite_valid_to_by_status,
         sentinel_2999_01_01,
-        sentinel_2999_12_31,
-        multi_version_group,
-        same_day_version_group
+        sentinel_2999_12_31
     );
 }
 
