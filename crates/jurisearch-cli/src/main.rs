@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
@@ -38,8 +38,9 @@ use jurisearch_storage::{
         update_ingest_run_manifest,
     },
     projection::{
-        ChunkEmbeddingInsert, LegiMetadataRoot, backfill_legi_article_hierarchy_from_metadata,
-        insert_chunk_embeddings, insert_legi_documents, insert_legi_metadata_roots,
+        ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot,
+        backfill_legi_article_hierarchy_from_metadata_scoped, insert_chunk_embeddings,
+        insert_legi_documents, insert_legi_metadata_roots,
     },
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
@@ -627,6 +628,8 @@ struct LegiArchiveIngestCounters {
     quarantined_payloads: usize,
     parsed_metadata_roots: BTreeMap<String, usize>,
     unsupported_roots: BTreeMap<String, usize>,
+    processed_article_document_ids: BTreeSet<String>,
+    processed_section_source_uids: BTreeSet<String>,
 }
 
 fn legi_archive_manifest(
@@ -663,6 +666,8 @@ fn legi_archive_manifest(
             "inserted_publisher_edges": counters.inserted_publisher_edges,
             "parsed_metadata_members": counters.parsed_metadata_members,
             "persisted_metadata_members": counters.persisted_metadata_members,
+            "hierarchy_backfill_scoped_documents": counters.processed_article_document_ids.len(),
+            "hierarchy_backfill_scoped_sections": counters.processed_section_source_uids.len(),
             "hierarchy_backfilled_documents": counters.hierarchy_backfilled_documents,
             "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
             "skipped_members": counters.skipped_members,
@@ -772,13 +777,28 @@ fn ingest_legi_archives_payload(
     }
 
     if fatal_error.is_none() {
-        match backfill_legi_article_hierarchy_from_metadata(&postgres) {
-            Ok(report) => {
-                counters.hierarchy_backfilled_documents = report.documents_updated;
-                counters.hierarchy_backfill_invalidated_embeddings = report.embeddings_invalidated;
-            }
-            Err(error) => {
-                fatal_error = Some(storage_error_object(error));
+        let backfill_scope = LegiHierarchyBackfillScope {
+            document_ids: counters
+                .processed_article_document_ids
+                .iter()
+                .cloned()
+                .collect(),
+            section_source_uids: counters
+                .processed_section_source_uids
+                .iter()
+                .cloned()
+                .collect(),
+        };
+        if !backfill_scope.is_empty() {
+            match backfill_legi_article_hierarchy_from_metadata_scoped(&postgres, &backfill_scope) {
+                Ok(report) => {
+                    counters.hierarchy_backfilled_documents = report.documents_updated;
+                    counters.hierarchy_backfill_invalidated_embeddings =
+                        report.embeddings_invalidated;
+                }
+                Err(error) => {
+                    fatal_error = Some(storage_error_object(error));
+                }
             }
         }
     }
@@ -829,6 +849,8 @@ fn ingest_legi_archives_payload(
         "inserted_publisher_edges": counters.inserted_publisher_edges,
         "parsed_metadata_members": counters.parsed_metadata_members,
         "persisted_metadata_members": counters.persisted_metadata_members,
+        "hierarchy_backfill_scoped_documents": counters.processed_article_document_ids.len(),
+        "hierarchy_backfill_scoped_sections": counters.processed_section_source_uids.len(),
         "hierarchy_backfilled_documents": counters.hierarchy_backfilled_documents,
         "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
         "skipped_members": counters.skipped_members,
@@ -919,6 +941,7 @@ fn process_legi_archive_member(
     match parse_legi_member(member) {
         Ok(ParsedLegiXml::Article(document)) => {
             let document = *document;
+            let document_id = document.document_id.clone();
             let record = record_legi_member(
                 postgres,
                 run_id,
@@ -941,6 +964,7 @@ fn process_legi_archive_member(
             counters.inserted_documents += report.documents;
             counters.inserted_chunks += report.chunks;
             counters.inserted_publisher_edges += report.publisher_edges;
+            counters.processed_article_document_ids.insert(document_id);
         }
         Ok(ParsedLegiXml::TextVersion(text)) => {
             process_legi_metadata_root(
@@ -957,6 +981,7 @@ fn process_legi_archive_member(
             )?;
         }
         Ok(ParsedLegiXml::SectionTa(section)) => {
+            let section_source_uid = section.section_id.clone();
             process_legi_metadata_root(
                 postgres,
                 run_id,
@@ -969,6 +994,11 @@ fn process_legi_archive_member(
                 Some(section.valid_from.as_str()),
                 LegiMetadataRoot::SectionTa(section.as_ref()),
             )?;
+            if let Some(section_source_uid) = section_source_uid {
+                counters
+                    .processed_section_source_uids
+                    .insert(section_source_uid);
+            }
         }
         Ok(ParsedLegiXml::TextStruct(text_struct)) => {
             process_legi_metadata_root(

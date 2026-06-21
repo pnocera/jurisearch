@@ -734,6 +734,8 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["inserted_documents"], 1);
     assert_eq!(json["parsed_metadata_members"], 3);
     assert_eq!(json["persisted_metadata_members"], 3);
+    assert_eq!(json["hierarchy_backfill_scoped_documents"], 1);
+    assert_eq!(json["hierarchy_backfill_scoped_sections"], 1);
     assert_eq!(json["hierarchy_backfilled_documents"], 1);
     assert_eq!(json["hierarchy_backfill_invalidated_embeddings"], 0);
     assert_eq!(json["skipped_members"], 3);
@@ -752,6 +754,14 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         "Freemium_legi_global_20250101-000000.tar.gz"
     );
     assert_eq!(json["manifest"]["coverage"]["visited_members"], 5);
+    assert_eq!(
+        json["manifest"]["coverage"]["hierarchy_backfill_scoped_documents"],
+        1
+    );
+    assert_eq!(
+        json["manifest"]["coverage"]["hierarchy_backfill_scoped_sections"],
+        1
+    );
     assert_eq!(
         json["manifest"]["coverage"]["hierarchy_backfilled_documents"],
         1

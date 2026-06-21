@@ -22,6 +22,19 @@ pub struct LegiHierarchyBackfillReport {
     pub embeddings_invalidated: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LegiHierarchyBackfillScope {
+    pub document_ids: Vec<String>,
+    pub section_source_uids: Vec<String>,
+}
+
+impl LegiHierarchyBackfillScope {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.document_ids.is_empty() && self.section_source_uids.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkEmbeddingInsert<'a> {
     pub chunk_id: &'a str,
@@ -247,8 +260,19 @@ pub fn insert_legi_metadata_roots(
 pub fn backfill_legi_article_hierarchy_from_metadata(
     postgres: &ManagedPostgres,
 ) -> Result<LegiHierarchyBackfillReport, StorageError> {
+    backfill_legi_article_hierarchy_from_metadata_scoped(
+        postgres,
+        &LegiHierarchyBackfillScope::default(),
+    )
+}
+
+pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
+    postgres: &ManagedPostgres,
+    scope: &LegiHierarchyBackfillScope,
+) -> Result<LegiHierarchyBackfillReport, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    let full_scope = scope.is_empty();
     let rows = client
         .query(
             // Prefer the section version whose validity contains the publisher
@@ -268,9 +292,14 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
               AND section.source_uid = edge.payload->>'to_source_uid' \
              WHERE d.source = 'legi' \
                AND d.kind = 'article' \
+               AND ( \
+                    $1::boolean \
+                    OR d.document_id = ANY($2::text[]) \
+                    OR edge.payload->>'to_source_uid' = ANY($3::text[]) \
+               ) \
              ORDER BY d.document_id, section.valid_from DESC NULLS LAST, \
                       section.metadata_key, edge.edge_id;",
-            &[],
+            &[&full_scope, &scope.document_ids, &scope.section_source_uids],
         )
         .map_err(StorageError::PostgresClient)?;
 

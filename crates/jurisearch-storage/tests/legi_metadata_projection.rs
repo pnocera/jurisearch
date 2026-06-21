@@ -4,7 +4,9 @@ use common::{discover_pg_config, vector_literal};
 use jurisearch_ingest::legi::{ParsedLegiXml, SourceProvenance, parse_legi_xml};
 use jurisearch_storage::{
     projection::{
-        LegiMetadataRoot, backfill_legi_article_hierarchy_from_metadata, insert_legi_metadata_roots,
+        LegiHierarchyBackfillScope, LegiMetadataRoot,
+        backfill_legi_article_hierarchy_from_metadata,
+        backfill_legi_article_hierarchy_from_metadata_scoped, insert_legi_metadata_roots,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -206,6 +208,15 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
                 \"hierarchy_path\":[\"Code civil\"],\
                 \"chunks\":[{{\"body\":\"Version contemporaine...\",\
                               \"contextualized_body\":\"Code civil > Article 1240 bis\\n\\nVersion contemporaine...\",\
+                              \"hierarchy_path\":[\"Code civil\"]}}]}}'), \
+            ('legi:LEGIARTI000052000002@1804-03-21', 'legi', 'article', \
+             'LEGIARTI000052000002', 'LEGIARTI000052000002', 'Code civil article 1241', \
+             'Article 1241', 'Article hors perimetre...', '1804-03-21', \
+             'sha256:article-out-of-scope', \
+             '{{\"title\":\"Article 1241\",\"body\":\"Article hors perimetre...\",\
+                \"hierarchy_path\":[\"Code civil\"],\
+                \"chunks\":[{{\"body\":\"Article hors perimetre...\",\
+                              \"contextualized_body\":\"Code civil > Article 1241\\n\\nArticle hors perimetre...\",\
                               \"hierarchy_path\":[\"Code civil\"]}}]}}'); \
          INSERT INTO chunks \
             (chunk_id, document_id, chunk_index, body, source_payload_hash, \
@@ -218,6 +229,10 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             ('chunk:legi:LEGIARTI000052000001@2020-01-01:0', \
              'legi:LEGIARTI000052000001@2020-01-01', 0, \
              'Version contemporaine...', 'sha256:article-boundary', \
+             'chunker:v0', NULL), \
+            ('chunk:legi:LEGIARTI000052000002@1804-03-21:0', \
+             'legi:LEGIARTI000052000002@1804-03-21', 0, \
+             'Article hors perimetre...', 'sha256:article-out-of-scope', \
              'chunker:v0', NULL); \
          INSERT INTO chunk_embeddings \
             (chunk_id, embedding_fingerprint, embedding, model, dimension) \
@@ -237,14 +252,38 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              'refers_to', 'publisher', \
              '{{\"source_tag\":\"LIEN_SECTION_TA\",\
                 \"to_source_uid\":\"LEGISCTA000006089696\",\
-                \"attributes\":[{{\"key\":\"debut\",\"value\":\"2020-01-01\"}}]}}');",
+                \"attributes\":[{{\"key\":\"debut\",\"value\":\"2020-01-01\"}}]}}'), \
+            ('edge:article-section-out-of-scope', \
+             'legi:LEGIARTI000052000002@1804-03-21', \
+             'refers_to', 'publisher', \
+             '{{\"source_tag\":\"LIEN_SECTION_TA\",\
+                \"to_source_uid\":\"LEGISCTA000006089696\",\
+                \"attributes\":[{{\"key\":\"debut\",\"value\":\"1804-03-21\"}}]}}');",
         vector_literal(0)
     ))?;
 
-    let backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
+    let backfill = backfill_legi_article_hierarchy_from_metadata_scoped(
+        &postgres,
+        &LegiHierarchyBackfillScope {
+            document_ids: vec![
+                "legi:LEGIARTI000006419320@1804-02-21".to_owned(),
+                "legi:LEGIARTI000052000001@2020-01-01".to_owned(),
+            ],
+            section_source_uids: Vec::new(),
+        },
+    )?;
     assert_eq!(backfill.documents_updated, 2);
     assert_eq!(backfill.embeddings_invalidated, 1);
-    let repeated_backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
+    let repeated_backfill = backfill_legi_article_hierarchy_from_metadata_scoped(
+        &postgres,
+        &LegiHierarchyBackfillScope {
+            document_ids: vec![
+                "legi:LEGIARTI000006419320@1804-02-21".to_owned(),
+                "legi:LEGIARTI000052000001@2020-01-01".to_owned(),
+            ],
+            section_source_uids: Vec::new(),
+        },
+    )?;
     assert_eq!(repeated_backfill.documents_updated, 0);
     assert_eq!(repeated_backfill.embeddings_invalidated, 0);
     assert_eq!(
@@ -262,6 +301,25 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              WHERE document_id = 'legi:LEGIARTI000052000001@2020-01-01';",
         )?,
         "Titre contemporain"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT coalesce(canonical_json->'hierarchy_path'->>1, 'absent') \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000052000002@1804-03-21';",
+        )?,
+        "absent"
+    );
+    let full_backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
+    assert_eq!(full_backfill.documents_updated, 1);
+    assert_eq!(full_backfill.embeddings_invalidated, 0);
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>1 \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000052000002@1804-03-21';",
+        )?,
+        "Titre preliminaire"
     );
     assert_eq!(
         postgres.execute_sql(
