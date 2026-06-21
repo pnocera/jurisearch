@@ -1,7 +1,9 @@
 use std::{
     fs::{self, File},
-    io::Cursor,
+    io::{Cursor, Read, Write},
+    net::TcpListener,
     path::Path,
+    thread,
 };
 
 use assert_cmd::Command;
@@ -2064,7 +2066,46 @@ fn cite_resolves_local_statutory_citations_and_strict_states() -> Result<(), Sto
 
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env_remove("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID")
+        .env_remove("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET")
+        .args(["cite", "not a citation", "--online"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "not_found");
+    assert_eq!(json["online"]["requested"], true);
+    assert_eq!(json["online"]["checked"], false);
+    assert!(
+        json["online"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("not sent"))
+    );
+
+    let online_base_url = spawn_server(2, |request| {
+        if request.starts_with("POST /api/oauth/token ") {
+            assert!(request.contains("grant_type=client_credentials"));
+            assert!(request.contains("scope=openid"));
+            ok_json(r#"{"access_token":"token-123","expires_in":3600}"#)
+        } else {
+            assert!(request.starts_with("POST /dila/legifrance/lf-engine-app/search "));
+            assert!(request.contains("\r\nAuthorization: Bearer token-123\r\n"));
+            assert!(request.contains(r#""query":"LEGIARTI999999999999""#));
+            ok_json(r#"{"results":[]}"#)
+        }
+    });
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
         .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_PISTE_ENV", "sandbox")
+        .env("JURISEARCH_PISTE_API_BASE_URL", &online_base_url)
+        .env("JURISEARCH_PISTE_OAUTH_BASE_URL", &online_base_url)
+        .env("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID", "client-id")
+        .env("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET", "client-secret")
         .args(["cite", "LEGIARTI999999999999", "--online"])
         .assert()
         .success()
@@ -2076,7 +2117,38 @@ fn cite_resolves_local_statutory_citations_and_strict_states() -> Result<(), Sto
     assert_eq!(json["state"], "source_unavailable");
     assert_eq!(json["local_state"], "not_found");
     assert_eq!(json["online"]["requested"], true);
-    assert_eq!(json["online"]["checked"], false);
+    assert_eq!(json["online"]["checked"], true);
+    assert_eq!(json["online"]["provider"], "legifrance");
+
+    let failing_online_base_url = spawn_server(2, |request| {
+        if request.starts_with("POST /api/oauth/token ") {
+            ok_json(r#"{"access_token":"token-500","expires_in":3600}"#)
+        } else {
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 11\r\n\r\nserver down".to_owned()
+        }
+    });
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_PISTE_ENV", "sandbox")
+        .env("JURISEARCH_PISTE_API_BASE_URL", &failing_online_base_url)
+        .env("JURISEARCH_PISTE_OAUTH_BASE_URL", &failing_online_base_url)
+        .env("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID", "client-id")
+        .env("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET", "client-secret")
+        .args([
+            "cite",
+            "Code civil article 1240",
+            "--as-of",
+            "2024-01-01",
+            "--online",
+        ])
+        .assert()
+        .code(5)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(&output, "upstream", "official API returned HTTP status 500");
 
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
@@ -2731,4 +2803,64 @@ fn unit_vector_literal(active_index: usize) -> String {
         .map(|index| if index == active_index { 1.0 } else { 0.0 })
         .collect::<Vec<_>>();
     pgvector_literal(&values)
+}
+
+fn spawn_server(
+    request_count: usize,
+    mut handler: impl FnMut(String) -> String + Send + 'static,
+) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for _ in 0..request_count {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_http_request(&mut stream);
+            let response = handler(request);
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+    });
+    format!("http://{address}")
+}
+
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 4096];
+    loop {
+        let read = stream.read(&mut buffer).unwrap();
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if request_is_complete(&bytes) {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn request_is_complete(bytes: &[u8]) -> bool {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let content_length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case("Content-Length") {
+            value.trim().parse::<usize>().ok()
+        } else {
+            None
+        }
+    });
+    let Some(content_length) = content_length else {
+        return true;
+    };
+    bytes.len() >= header_end + 4 + content_length
+}
+
+fn ok_json(body: &str) -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    )
 }

@@ -827,6 +827,7 @@ dependencies = [
  "jurisearch-core",
  "jurisearch-embed",
  "jurisearch-ingest",
+ "jurisearch-official-api",
  "jurisearch-storage",
  "predicates",
  "serde",

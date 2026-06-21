@@ -25,6 +25,7 @@ use jurisearch_ingest::{
     },
     legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
+use jurisearch_official_api::{OfficialApiConfig, PisteClient};
 use jurisearch_storage::{
     citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
     dense::{
@@ -714,17 +715,23 @@ fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, Error
         "online": {
             "requested": args.online,
             "checked": false,
-            "state": if args.online { Some(citation_state_name(CitationState::SourceUnavailable)) } else { None },
-            "note": if args.online {
-                Some("Online Légifrance confirmation is not wired yet; this response reports local index resolution.")
-            } else {
-                None
-            }
+            "state": null,
+            "note": null
         },
         "match_count": lookup["matches"].as_array().map_or(0, Vec::len),
         "matches": lookup["matches"].clone(),
     });
     annotate_valid_matches(&mut response, &effective_as_of);
+    if args.online && matches!(&parsed, ParsedCitationTarget::Malformed { .. }) {
+        response["online"] = json!({
+            "requested": true,
+            "checked": false,
+            "state": citation_state_name(CitationState::NotFound),
+            "note": "Malformed citations are classified locally and are not sent to the online Légifrance probe."
+        });
+    } else if args.online {
+        apply_online_citation_confirmation(&mut response, &args.cite)?;
+    }
 
     if args.strict && !matches!(state, CitationState::Exact | CitationState::Normalized) {
         return Err(strict_citation_error(&args.cite, state));
@@ -2478,6 +2485,49 @@ fn strict_citation_error(input: &str, state: CitationState) -> ErrorObject {
             "Pass --as-of for historical statutory versions.".into(),
         ],
     }
+}
+
+fn apply_online_citation_confirmation(
+    response: &mut Value,
+    query: &str,
+) -> Result<(), ErrorObject> {
+    let mut client = PisteClient::new(OfficialApiConfig::from_env());
+    let upstream = client
+        .legifrance_search(&json!({
+            "query": query,
+            "pageSize": 1,
+        }))
+        .map_err(|error| error.to_error_object())?;
+    response["online"] = json!({
+        "requested": true,
+        "checked": true,
+        "provider": "legifrance",
+        "state": response["state"].as_str(),
+        "response_summary": summarize_online_response(&upstream),
+        "note": "Online Légifrance search completed; citation state remains based on local index resolution until response-shape matching is specified."
+    });
+    Ok(())
+}
+
+fn summarize_online_response(response: &Value) -> Value {
+    let top_level_keys = response
+        .as_object()
+        .map(|object| object.keys().take(8).cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let result_count = response
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .or_else(|| {
+            response
+                .get("items")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        });
+    json!({
+        "top_level_keys": top_level_keys,
+        "result_count": result_count,
+    })
 }
 
 #[derive(Debug)]
