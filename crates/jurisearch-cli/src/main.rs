@@ -13,6 +13,7 @@ use jurisearch_core::{
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
 };
+use jurisearch_embed::EmbeddingConfig;
 use jurisearch_ingest::archive::{ArchiveSource, plan_from_dir};
 use serde_json::{Value, json};
 
@@ -389,6 +390,29 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
 }
 
 fn status_payload() -> Value {
+    let embedding_base_url = std::env::var("JURISEARCH_EMBED_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8097/v1".into());
+    let embedding_config = EmbeddingConfig::phase0_bge_m3(
+        embedding_base_url.clone(),
+        std::env::var("JURISEARCH_EMBED_API_KEY").ok(),
+    );
+    let mut embedding_config = embedding_config;
+    if let Ok(model) = std::env::var("JURISEARCH_EMBED_MODEL") {
+        embedding_config.model = model;
+        embedding_config.provisional = embedding_config.model == "bge-m3";
+    }
+    if let Ok(dimension) = std::env::var("JURISEARCH_EMBED_DIMENSION") {
+        embedding_config.dimension = dimension.parse().unwrap_or(embedding_config.dimension);
+    }
+    if let Ok(normalize) = std::env::var("JURISEARCH_EMBED_NORMALIZE") {
+        embedding_config.normalize = normalize.parse().unwrap_or(embedding_config.normalize);
+    }
+    if let Ok(pooling) = std::env::var("JURISEARCH_EMBED_POOLING") {
+        embedding_config.pooling = pooling;
+    }
+    let embedding_manifest = embedding_config.manifest();
+    let embedding_fingerprint = embedding_manifest.fingerprint;
+
     json!({
         "schema_version": SCHEMA_VERSION,
         "index": {
@@ -397,12 +421,15 @@ fn status_payload() -> Value {
             "message": "No index has been built yet; Phase 0 scaffold is installed."
         },
         "embedding": {
-            "provider": "openai_compatible",
-            "base_url": std::env::var("JURISEARCH_EMBED_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8097/v1".into()),
-            "model": std::env::var("JURISEARCH_EMBED_MODEL").unwrap_or_else(|_| "bge-m3".into()),
-            "dimension": 1024,
-            "normalize": true,
-            "pooling": "cls"
+            "provider": embedding_fingerprint.provider,
+            "base_url": embedding_base_url,
+            "base_url_class": embedding_fingerprint.base_url_class,
+            "model": embedding_fingerprint.model,
+            "dimension": embedding_fingerprint.dimension,
+            "normalize": embedding_fingerprint.normalize,
+            "pooling": embedding_fingerprint.pooling,
+            "provisional": embedding_manifest.provisional,
+            "reembeddable": embedding_manifest.reembeddable
         },
         "ingest_health": {
             "state": "pending",

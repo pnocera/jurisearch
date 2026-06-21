@@ -310,6 +310,13 @@ Acceptance:
 - `127.0.0.1` endpoint is treated as configured endpoint, not as an in-process shortcut.
 - In-process mode refuses missing local models unless `model fetch` or explicit download permission is used.
 
+Current status (2026-06-21):
+
+- Done: `jurisearch-embed` implements the OpenAI-compatible embeddings client, embedding fingerprint/manifest structs, hard fingerprint and dimension checks, local-loopback base-url classification, and the explicit in-process missing-model guard.
+- Done: `jurisearch status` now reports the Phase 0 embedding manifest fields: provider, base URL, base-url class, model, dimension, normalization, pooling, provisional status, and re-embeddable status.
+- Done: local `llama.cpp` compatibility is codified as an ignored live endpoint test. Local run on 2026-06-21: `cargo test -p jurisearch-embed --test live_endpoint -- --ignored --nocapture` passed against `http://127.0.0.1:8097/v1`, returning a 1024-d normalized `bge-m3` vector.
+- Remaining before 0.4 is complete: none from the current endpoint-contract checklist; move next to 0.5 unless review finds a gap.
+
 ### 0.5 Official LEGI XML Ingestion Spike
 
 Tasks:

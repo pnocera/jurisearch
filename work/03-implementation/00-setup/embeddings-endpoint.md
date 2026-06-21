@@ -38,6 +38,16 @@ Tested against `http://127.0.0.1:8097/v1/embeddings`:
 | cos(FR legal query, irrelevant pie recipe) | **0.276** |
 | Semantic discrimination | strong, correct (relevant ≫ irrelevant) — also validates `pooling=cls` |
 
+## Client contract check
+
+The Rust endpoint contract is codified in `jurisearch-embed`. With the local `llama.cpp` endpoint running:
+
+```bash
+cargo test -p jurisearch-embed --test live_endpoint -- --ignored --nocapture
+```
+
+This sends an OpenAI-compatible embedding request through the production client, verifies the configured Phase 0 fingerprint, and fails if the endpoint does not return a 1024-d normalized `bge-m3` vector.
+
 ## jurisearch config / index fingerprint (`DESIGN §11.2`)
 
 ```toml

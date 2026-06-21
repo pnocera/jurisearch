@@ -90,7 +90,20 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "schema_version": { "type": "string" },
                     "index": { "type": "object" },
-                    "embedding": { "type": "object" },
+                    "embedding": {
+                        "type": "object",
+                        "properties": {
+                            "provider": { "enum": ["openai_compatible", "in_process"] },
+                            "base_url": { "type": "string" },
+                            "base_url_class": { "enum": ["local_loopback", "hosted", "in_process"] },
+                            "model": { "type": "string" },
+                            "dimension": { "type": "integer" },
+                            "normalize": { "type": "boolean" },
+                            "pooling": { "type": "string" },
+                            "provisional": { "type": "boolean" },
+                            "reembeddable": { "type": "boolean" }
+                        }
+                    },
                     "ingest_health": { "type": "object" }
                 }
             },

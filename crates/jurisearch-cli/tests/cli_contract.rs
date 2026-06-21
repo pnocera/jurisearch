@@ -48,7 +48,13 @@ fn status_returns_json_without_index() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["schema_version"], "1");
     assert_eq!(json["index"]["query_ready"], false);
+    assert_eq!(json["embedding"]["provider"], "openai_compatible");
+    assert_eq!(json["embedding"]["base_url_class"], "local_loopback");
+    assert_eq!(json["embedding"]["model"], "bge-m3");
     assert_eq!(json["embedding"]["dimension"], 1024);
+    assert_eq!(json["embedding"]["pooling"], "cls");
+    assert_eq!(json["embedding"]["provisional"], true);
+    assert_eq!(json["embedding"]["reembeddable"], true);
 }
 
 #[test]
