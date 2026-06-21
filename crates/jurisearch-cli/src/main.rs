@@ -51,8 +51,8 @@ use jurisearch_storage::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v2";
-const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v2";
+const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v3";
+const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v3";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Parser)]

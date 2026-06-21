@@ -106,7 +106,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
     </META_SPEC>
   </META>
   <STRUCT>
-    <LIEN_TXT id="LEGITEXT000006070721" debut="1804-03-21"/>
+    <LIEN_TXT cid="LEGITEXT999999999999" debut="1804-03-21" id="LEGITEXT000006070721"/>
   </STRUCT>
 </TEXTELR>
 "#,

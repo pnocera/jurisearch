@@ -138,7 +138,9 @@ pub struct ParsedTextStructLink {
     pub order: usize,
     pub target_source_uid: Option<String>,
     pub level: Option<i32>,
+    /// Raw DILA `debut` attribute; consumers normalize sentinel dates when applying temporal logic.
     pub debut: Option<String>,
+    /// Raw DILA `fin` attribute; consumers normalize sentinel dates when applying temporal logic.
     pub fin: Option<String>,
     pub text: Option<String>,
     pub attributes: Vec<GraphEdgeAttribute>,
@@ -680,7 +682,7 @@ fn parse_text_struct(
                 } else {
                     None
                 };
-                if matches!(name.as_str(), "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART") {
+                if is_text_struct_link_tag(name.as_str()) {
                     assign_text_struct_date_hint(&mut raw, &start)?;
                 }
                 stack.push(name);
@@ -693,7 +695,7 @@ fn parse_text_struct(
                 if is_text_struct_link_tag(name.as_str()) {
                     push_text_struct_link(&mut raw, &start, name.as_str())?;
                 }
-                if matches!(name.as_str(), "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART") {
+                if is_text_struct_link_tag(name.as_str()) {
                     assign_text_struct_date_hint(&mut raw, &start)?;
                 }
                 stack.push(name);
@@ -1076,7 +1078,7 @@ impl RawTextStruct {
             source_payload_hash,
             source_archive: provenance.archive_name,
             source_member_path: provenance.member_path,
-            canonical_version: "legi_textelr:v1".to_owned(),
+            canonical_version: "legi_textelr:v2".to_owned(),
         })
     }
 }
@@ -1228,9 +1230,7 @@ fn push_text_struct_link(
     source_tag: &str,
 ) -> Result<usize, LegiParseError> {
     let attributes = collect_attributes(start)?;
-    let target_source_uid = attributes
-        .iter()
-        .find_map(|attribute| extract_known_source_uid(attribute.value.as_str()));
+    let target_source_uid = text_struct_link_target_source_uid(&attributes);
     let level =
         text_struct_link_attribute(&attributes, "niv").and_then(|value| value.parse::<i32>().ok());
     let debut = text_struct_link_attribute(&attributes, "debut");
@@ -1254,6 +1254,13 @@ fn text_struct_link_attribute(attributes: &[GraphEdgeAttribute], key: &str) -> O
         .iter()
         .find(|attribute| attribute.key == key)
         .and_then(|attribute| optional_non_empty(Some(attribute.value.clone())))
+}
+
+fn text_struct_link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Option<String> {
+    ["id", "cid", "cidtexte", "href"].iter().find_map(|key| {
+        text_struct_link_attribute(attributes, key)
+            .and_then(|value| extract_known_source_uid(value.as_str()))
+    })
 }
 
 fn assign_text_struct_link_text(raw: &mut RawTextStruct, link_stack: &[usize], value: &str) {
@@ -2072,8 +2079,9 @@ mod tests {
     </META_SPEC>
   </META>
   <STRUCT>
-    <LIEN_ART id="LEGIARTI000006419320" num="1" origine="LEGI" debut="1804-02-21" fin="2999-01-01" etat="VIGUEUR"/>
-    <LIEN_SECTION_TA id="LEGISCTA000006089696" debut="1804-03-21" fin="2999-01-01" niv="1" cid="LEGITEXT000006070721" url="/codes/section_lc/LEGISCTA000006089696" etat="VIGUEUR">Titre preliminaire</LIEN_SECTION_TA>
+    <LIEN_TXT cid="LEGITEXT999999999999" debut="1804-03-21" id="LEGITEXT000000000001">Texte lie</LIEN_TXT>
+    <LIEN_ART debut="1804-02-21" etat="VIGUEUR" fin="2999-01-01" id="LEGIARTI000006419320" num="1" origine="LEGI"/>
+    <LIEN_SECTION_TA cid="LEGISCTA000006089696" debut="1804-03-21" etat="VIGUEUR" fin="2999-01-01" id="LEGISCTA000006089696" niv="1" url="/codes/section_lc/LEGISCTA000006089696">Titre preliminaire</LIEN_SECTION_TA>
   </STRUCT>
 </TEXTELR>
 "#,
@@ -2092,30 +2100,40 @@ mod tests {
         );
         assert_eq!(text_struct.date_publi.as_deref(), Some("1804-03-21"));
         assert_eq!(text_struct.date_texte.as_deref(), Some("1804-03-21"));
-        assert_eq!(text_struct.structure_links.len(), 2);
-        assert_eq!(text_struct.structure_links[0].source_tag, "LIEN_ART");
+        assert_eq!(text_struct.structure_links.len(), 3);
+        assert_eq!(text_struct.structure_links[0].source_tag, "LIEN_TXT");
         assert_eq!(text_struct.structure_links[0].order, 0);
         assert_eq!(
             text_struct.structure_links[0].target_source_uid.as_deref(),
-            Some("LEGIARTI000006419320")
+            Some("LEGITEXT000000000001")
         );
         assert_eq!(
-            text_struct.structure_links[0].debut.as_deref(),
-            Some("1804-02-21")
+            text_struct.structure_links[0].text.as_deref(),
+            Some("Texte lie")
         );
-        assert_eq!(
-            text_struct.structure_links[0].fin.as_deref(),
-            Some("2999-01-01")
-        );
-        assert_eq!(text_struct.structure_links[1].source_tag, "LIEN_SECTION_TA");
+        assert_eq!(text_struct.structure_links[1].source_tag, "LIEN_ART");
         assert_eq!(text_struct.structure_links[1].order, 1);
         assert_eq!(
             text_struct.structure_links[1].target_source_uid.as_deref(),
+            Some("LEGIARTI000006419320")
+        );
+        assert_eq!(
+            text_struct.structure_links[1].debut.as_deref(),
+            Some("1804-02-21")
+        );
+        assert_eq!(
+            text_struct.structure_links[1].fin.as_deref(),
+            Some("2999-01-01")
+        );
+        assert_eq!(text_struct.structure_links[2].source_tag, "LIEN_SECTION_TA");
+        assert_eq!(text_struct.structure_links[2].order, 2);
+        assert_eq!(
+            text_struct.structure_links[2].target_source_uid.as_deref(),
             Some("LEGISCTA000006089696")
         );
-        assert_eq!(text_struct.structure_links[1].level, Some(1));
+        assert_eq!(text_struct.structure_links[2].level, Some(1));
         assert_eq!(
-            text_struct.structure_links[1].text.as_deref(),
+            text_struct.structure_links[2].text.as_deref(),
             Some("Titre preliminaire")
         );
     }
