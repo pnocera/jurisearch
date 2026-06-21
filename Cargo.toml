@@ -3,6 +3,7 @@ members = [
     "crates/jurisearch-core",
     "crates/jurisearch-cli",
     "crates/jurisearch-ingest",
+    "crates/jurisearch-storage",
 ]
 resolver = "3"
 
@@ -25,4 +26,3 @@ tar = "0.4.44"
 tempfile = "3.20.0"
 thiserror = "2.0.14"
 walkdir = "2.5.0"
-
