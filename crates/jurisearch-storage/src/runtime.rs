@@ -625,6 +625,8 @@ pub enum StorageError {
     Projection { message: String },
     #[error("dense rebuild failed: {message}")]
     DenseRebuild { message: String },
+    #[error("ingest accounting failed: {message}")]
+    IngestAccounting { message: String },
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("postgres client error: {0}")]

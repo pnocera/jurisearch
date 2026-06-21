@@ -34,6 +34,7 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         )?;
         assert!(migrations.contains("1:canonical_documents_chunks_vectors"));
         assert!(migrations.contains("2:chunk_bm25_index"));
+        assert!(migrations.contains("3:ingest_operational_accounting"));
 
         postgres.execute_sql(&format!(
             "INSERT INTO documents \

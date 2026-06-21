@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 2;
+pub const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 struct Migration {
     version: i32,
@@ -106,6 +106,80 @@ WITH (key_field = 'chunk_id');
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 2), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 3,
+        name: "ingest_operational_accounting",
+        sql: r#"
+CREATE TABLE IF NOT EXISTS ingest_run (
+    run_id text PRIMARY KEY,
+    source text NOT NULL,
+    status text NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
+    parser_version text NOT NULL,
+    schema_version text NOT NULL,
+    code_version text NOT NULL,
+    safe_mode boolean NOT NULL DEFAULT false,
+    archive_plan jsonb NOT NULL DEFAULT '{}'::jsonb,
+    manifest jsonb NOT NULL DEFAULT '{}'::jsonb,
+    error_message text,
+    started_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ingest_member (
+    member_id bigserial PRIMARY KEY,
+    run_id text NOT NULL REFERENCES ingest_run(run_id) ON DELETE CASCADE,
+    archive_name text NOT NULL,
+    member_path text NOT NULL,
+    source text NOT NULL,
+    source_entity text,
+    date_anchor date,
+    status text NOT NULL CHECK (status IN ('discovered', 'parsed', 'inserted', 'skipped', 'failed')),
+    parser_version text NOT NULL,
+    schema_version text NOT NULL,
+    code_version text NOT NULL,
+    source_payload_hash text NOT NULL,
+    attempt_count integer NOT NULL DEFAULT 1 CHECK (attempt_count > 0),
+    error_count integer NOT NULL DEFAULT 0 CHECK (error_count >= 0),
+    last_error_class text,
+    last_error_code text,
+    last_error_message text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (run_id, archive_name, member_path)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_error (
+    error_id bigserial PRIMARY KEY,
+    run_id text NOT NULL REFERENCES ingest_run(run_id) ON DELETE CASCADE,
+    member_id bigint REFERENCES ingest_member(member_id) ON DELETE SET NULL,
+    error_class text NOT NULL,
+    error_code text NOT NULL,
+    message text NOT NULL,
+    retry_policy text NOT NULL DEFAULT 'none',
+    context jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ingest_member_resume_idx
+ON ingest_member (archive_name, member_path, updated_at DESC, member_id DESC);
+
+CREATE INDEX IF NOT EXISTS ingest_member_run_status_idx
+ON ingest_member (run_id, status);
+
+CREATE INDEX IF NOT EXISTS ingest_member_payload_compat_idx
+ON ingest_member (archive_name, member_path, source_payload_hash, parser_version, schema_version, code_version);
+
+CREATE INDEX IF NOT EXISTS ingest_error_run_class_idx
+ON ingest_error (run_id, error_class, error_code);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 3), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

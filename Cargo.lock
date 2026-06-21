@@ -665,6 +665,7 @@ dependencies = [
  "fs2",
  "jurisearch-ingest",
  "postgres",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

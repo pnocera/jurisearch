@@ -9,6 +9,7 @@ license.workspace = true
 fs2.workspace = true
 jurisearch-ingest = { path = "../jurisearch-ingest" }
 postgres.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
