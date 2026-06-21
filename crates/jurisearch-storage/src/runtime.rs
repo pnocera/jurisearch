@@ -612,6 +612,15 @@ pub enum StorageError {
     PostgresStop { status: Option<i32>, stderr: String },
     #[error("psql failed with status {status:?}: {stderr}")]
     Psql { status: Option<i32>, stderr: String },
+    #[error(
+        "database schema version {database_version} is newer than this binary supports ({binary_version})"
+    )]
+    SchemaVersionAhead {
+        database_version: i32,
+        binary_version: i32,
+    },
+    #[error("invalid migration plan: {message}")]
+    MigrationPlan { message: String },
     #[error("postgres client error: {0}")]
     PostgresClient(postgres::Error),
     #[error(transparent)]

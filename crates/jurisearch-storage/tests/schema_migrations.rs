@@ -47,9 +47,14 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         .tempdir()
         .map_err(StorageError::Io)?;
     let query_vector = vector_literal(0);
+    let unrelated_vector = vector_literal(1);
 
     {
         let postgres = ManagedPostgres::start_durable(pg_config.clone(), root.path())?;
+        let report = postgres.run_migrations()?;
+        assert_eq!(report.current_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(report.applied, vec![CURRENT_SCHEMA_VERSION]);
+
         let migrations = postgres.execute_sql(
             "SELECT version::text || ':' || name \
              FROM schema_migrations \
@@ -67,19 +72,27 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
                 'LEGIARTI000006419320', 'LEGIARTI000006419320', 'Code civil article 1240', \
                 'Article 1240', 'Tout fait quelconque de l''homme...', '1804-02-21', \
-                'sha256:article-1240', '{{\"official\":true}}'); \
+                'sha256:article-1240', '{{\"official\":true}}'), \
+               ('legi:LEGIARTI000000000001@2024-01-01', 'legi', 'article', \
+                'LEGIARTI000000000001', 'LEGIARTI000000000001', 'Code de cuisine article 1', \
+                'Article cuisine', 'Recette sans rapport juridique', '2024-01-01', \
+                'sha256:recipe', '{{\"official\":true}}'); \
              INSERT INTO chunks \
                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
                 chunk_builder_version, embedding_fingerprint) \
              VALUES \
                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                 'responsabilite civile article 1240', 'sha256:article-1240', \
+                'chunker:v0', 'bge-m3:1024:normalize:true'), \
+               ('chunk:recipe:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
+                'recette de tarte aux pommes', 'sha256:recipe', \
                 'chunker:v0', 'bge-m3:1024:normalize:true'); \
              INSERT INTO chunk_embeddings \
                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
              VALUES \
-               ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
-            query_vector
+               ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024), \
+               ('chunk:recipe:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+            query_vector, unrelated_vector
         ))?;
     }
 

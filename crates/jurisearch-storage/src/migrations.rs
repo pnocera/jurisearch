@@ -10,6 +10,8 @@ struct Migration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationReport {
+    /// All schema versions present after the migration run, including versions
+    /// that were already present before this call.
     pub applied: Vec<i32>,
     pub current_version: i32,
 }
@@ -96,6 +98,7 @@ SET value = excluded.value,
 
 impl ManagedPostgres {
     pub fn run_migrations(&self) -> Result<MigrationReport, StorageError> {
+        validate_migration_list()?;
         self.execute_sql(
             "CREATE TABLE IF NOT EXISTS schema_migrations (\
              version integer PRIMARY KEY, \
@@ -108,16 +111,29 @@ impl ManagedPostgres {
             self.execute_sql("SELECT version::text FROM schema_migrations ORDER BY version;")?;
         let mut applied = applied_versions
             .lines()
-            .filter_map(|line| line.parse::<i32>().ok())
-            .collect::<Vec<_>>();
+            .map(|line| {
+                line.parse::<i32>()
+                    .map_err(|error| StorageError::MigrationPlan {
+                        message: format!("invalid schema_migrations version `{line}`: {error}"),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(database_version) = applied.iter().copied().max()
+            && database_version > CURRENT_SCHEMA_VERSION
+        {
+            return Err(StorageError::SchemaVersionAhead {
+                database_version,
+                binary_version: CURRENT_SCHEMA_VERSION,
+            });
+        }
 
         for migration in MIGRATIONS {
             if applied.contains(&migration.version) {
                 continue;
             }
-            self.execute_sql(migration.sql)?;
             self.execute_sql(&format!(
-                "INSERT INTO {} (version, name) VALUES ({}, {});",
+                "BEGIN;\n{}\nINSERT INTO {} (version, name) VALUES ({}, {});\nCOMMIT;",
+                migration.sql,
                 sql_identifier("schema_migrations"),
                 migration.version,
                 sql_string_literal(migration.name)
@@ -131,4 +147,30 @@ impl ManagedPostgres {
             current_version: CURRENT_SCHEMA_VERSION,
         })
     }
+}
+
+fn validate_migration_list() -> Result<(), StorageError> {
+    for (expected, migration) in (1..).zip(MIGRATIONS.iter()) {
+        if migration.version != expected {
+            return Err(StorageError::MigrationPlan {
+                message: format!(
+                    "migration versions must be contiguous from 1; expected {expected}, found {}",
+                    migration.version
+                ),
+            });
+        }
+    }
+
+    let latest = MIGRATIONS
+        .last()
+        .map(|migration| migration.version)
+        .unwrap_or(0);
+    if latest != CURRENT_SCHEMA_VERSION {
+        return Err(StorageError::MigrationPlan {
+            message: format!(
+                "CURRENT_SCHEMA_VERSION ({CURRENT_SCHEMA_VERSION}) must match latest migration ({latest})"
+            ),
+        });
+    }
+    Ok(())
 }
