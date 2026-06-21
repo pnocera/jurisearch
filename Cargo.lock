@@ -651,6 +651,7 @@ name = "jurisearch-storage"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "jurisearch-ingest",
  "postgres",
  "serde_json",
  "tempfile",

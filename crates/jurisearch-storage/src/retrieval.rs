@@ -15,6 +15,11 @@ pub struct HybridCandidateQuery<'a> {
     pub limit: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct FetchDocumentsQuery<'a> {
+    pub document_ids: &'a [&'a str],
+}
+
 pub fn hybrid_candidates_json(
     postgres: &ManagedPostgres,
     query: &HybridCandidateQuery<'_>,
@@ -101,6 +106,10 @@ limited AS (
         d.kind,
         d.citation,
         d.title,
+        d.source_url,
+        d.valid_from::text AS valid_from,
+        d.valid_to::text AS valid_to,
+        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
         r.lexical_rank,
         r.dense_rank,
         r.fused_score
@@ -123,9 +132,22 @@ SELECT jsonb_build_object(
                 'kind', kind,
                 'citation', citation,
                 'title', title,
+                'source_url', source_url,
+                'snippet', snippet,
+                'validity', jsonb_build_object(
+                    'from', valid_from,
+                    'to', valid_to,
+                    'to_exclusive', true
+                ),
                 'lexical_rank', lexical_rank,
                 'dense_rank', dense_rank,
-                'fused_score', round(fused_score::numeric, 8)
+                'fused_score', round(fused_score::numeric, 8),
+                'scores', jsonb_build_object(
+                    'rrf', round(fused_score::numeric, 8),
+                    'lexical_rank', lexical_rank,
+                    'dense_rank', dense_rank
+                ),
+                'cursor', chunk_id
             )
             ORDER BY fused_score DESC, chunk_id
         )
@@ -141,5 +163,93 @@ SELECT jsonb_build_object(
         dense_limit = query.dense_limit,
         dense_pool_limit = dense_pool_limit,
         limit = query.limit
+    ))
+}
+
+pub fn fetch_documents_json(
+    postgres: &ManagedPostgres,
+    query: &FetchDocumentsQuery<'_>,
+) -> Result<String, StorageError> {
+    if query.document_ids.is_empty() {
+        return Ok(r#"{"documents":[]}"#.to_owned());
+    }
+
+    let requested_values = query
+        .document_ids
+        .iter()
+        .enumerate()
+        .map(|(ordinal, document_id)| format!("({}, {})", sql_string_literal(document_id), ordinal))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    postgres.execute_sql(&format!(
+        r#"
+WITH requested(document_id, ordinal) AS (
+    VALUES {requested_values}
+),
+matched AS (
+    SELECT
+        r.ordinal,
+        d.document_id,
+        d.source,
+        d.kind,
+        d.source_uid,
+        d.version_group,
+        d.citation,
+        d.title,
+        d.body,
+        d.valid_from::text AS valid_from,
+        d.valid_to::text AS valid_to,
+        d.valid_to_raw,
+        d.source_url,
+        d.source_payload_hash
+    FROM requested r
+    JOIN documents d ON d.document_id = r.document_id
+)
+SELECT jsonb_build_object(
+    'documents', COALESCE((
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'document_id', m.document_id,
+                'source', m.source,
+                'kind', m.kind,
+                'source_uid', m.source_uid,
+                'version_group', m.version_group,
+                'citation', m.citation,
+                'title', m.title,
+                'body', m.body,
+                'validity', jsonb_build_object(
+                    'from', m.valid_from,
+                    'to', m.valid_to,
+                    'to_raw', m.valid_to_raw,
+                    'to_exclusive', true
+                ),
+                'source_url', m.source_url,
+                'source_payload_hash', m.source_payload_hash,
+                'chunks', COALESCE((
+                    SELECT jsonb_agg(
+                        jsonb_build_object(
+                            'chunk_id', c.chunk_id,
+                            'chunk_index', c.chunk_index,
+                            'chunk_kind', c.chunk_kind,
+                            'body', c.body,
+                            'source_fields', c.source_fields,
+                            'source_payload_hash', c.source_payload_hash,
+                            'chunk_builder_version', c.chunk_builder_version,
+                            'embedding_fingerprint', c.embedding_fingerprint
+                        )
+                        ORDER BY c.chunk_index
+                    )
+                    FROM chunks c
+                    WHERE c.document_id = m.document_id
+                ), '[]'::jsonb)
+            )
+            ORDER BY m.ordinal
+        )
+        FROM matched m
+    ), '[]'::jsonb)
+)::text;
+"#,
+        requested_values = requested_values
     ))
 }

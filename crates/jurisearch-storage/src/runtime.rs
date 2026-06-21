@@ -621,6 +621,10 @@ pub enum StorageError {
     },
     #[error("invalid migration plan: {message}")]
     MigrationPlan { message: String },
+    #[error("canonical projection failed: {message}")]
+    Projection { message: String },
+    #[error("json serialization failed: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("postgres client error: {0}")]
     PostgresClient(postgres::Error),
     #[error(transparent)]

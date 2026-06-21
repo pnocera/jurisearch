@@ -370,21 +370,25 @@ Acceptance:
 
 ### 0.6 Baseline Hybrid Retrieval
 
+Scope qualifier: this step is being landed in slices. The first slice proves storage projection plus retrieval on a small official LEGI subset; CLI command wiring and live endpoint embedding remain separate follow-ups.
+
 Tasks:
 
-- Insert canonical LEGI subset into Postgres.
-- Build BM25 fields through `pg_search`.
-- Store dense vectors through `pgvector` using the provisional `bge-m3` fingerprint.
-- Implement exact temporal prefilter.
-- Implement custom RRF.
-- Add basic `search` and `fetch` over the subset.
+- Done: `jurisearch-storage::projection` inserts parser-produced canonical LEGI documents into Postgres, including document metadata, full canonical JSON/provenance, structural chunks, chunk source-field JSON, publisher graph-edge candidates, and chunk embedding rows.
+- Done: the storage projection records the provisional dense fingerprint (`bge-m3:1024:normalize:true`) on chunks and inserts pgvector embeddings through prepared statements, so canonical records can be reprojected and re-embedded without losing provenance.
+- Done: `hybrid_candidates_json` now returns compact chunk/document IDs, citations, snippets, source URLs, validity blocks, RRF score details, and stable cursors while keeping the exact temporal prefilter and custom RRF over BM25 plus dense candidates.
+- Done: `fetch_documents_json` returns full document text plus chunk bodies/provenance for selected document IDs.
+- Done: ignored real-data storage smoke uses `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz` by default; local run on 2026-06-21 inserted 12 official LEGI articles, 12 chunks, and 53 publisher edges, then verified BM25/dense hybrid search, `--as-of` prefiltering before `valid_from`, and fetch full text.
+- Remaining: wire CLI `search` and `fetch` commands to the storage helpers with index-path/config loading.
+- Remaining: replace deterministic test vectors with live embedding endpoint calls in an ignored integration path once the CLI/index build path owns endpoint configuration.
+- Remaining: add full dense-index rebuild/re-embed command mechanics and manifest updates beyond the current reprojectable storage primitives.
 
 Acceptance:
 
-- `search` returns compact IDs, citations, snippets, source URLs, validity blocks, scores, and cursors.
-- `fetch` returns full text for selected IDs.
-- Historical `--as-of` queries do not leak current law in fixtures.
-- Dense index can be fully re-embedded and rebuilt from canonical records without losing provenance.
+- Met in storage layer: `search` returns compact IDs, citations, snippets, source URLs, validity blocks, scores, and cursors.
+- Met in storage layer: `fetch` returns full text for selected IDs.
+- Met in storage layer: historical `--as-of` queries do not leak future LEGI versions in the real-archive smoke.
+- Partially met: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance; full rebuild orchestration remains pending.
 
 ### 0.7 Reranker Feasibility Spike
 
