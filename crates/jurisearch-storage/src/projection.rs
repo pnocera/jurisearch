@@ -253,7 +253,8 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
         .query(
             // Prefer the section version whose validity contains the publisher
             // edge `debut` date, falling back to article validity and then to the
-            // latest section row when the source evidence is incomplete.
+            // latest section row when source dates are incomplete or no section
+            // validity window contains the available anchor.
             "SELECT d.document_id, d.canonical_json::text, d.valid_from::text, \
                     edge.payload::text, section.canonical_json::text, \
                     section.valid_from::text, section.valid_to::text \
@@ -450,6 +451,8 @@ fn section_validity_contains(
 }
 
 fn is_iso_date(value: &str) -> bool {
+    // Storage comparisons only need the canonical shape; ingest performs
+    // semantic date validation before records reach these tables.
     value.as_bytes().iter().enumerate().all(|(index, byte)| {
         if matches!(index, 4 | 7) {
             *byte == b'-'

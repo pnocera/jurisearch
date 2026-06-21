@@ -54,7 +54,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
   <TITRE_TA>Titre preliminaire</TITRE_TA>
   <CONTEXTE>
     <TEXTE cid="LEGITEXT000006070721">
-      <TITRE_TXT debut="1804-03-21" fin="2999-01-01">Code civil</TITRE_TXT>
+      <TITRE_TXT debut="1804-03-21" fin="2020-01-01">Code civil</TITRE_TXT>
     </TEXTE>
   </CONTEXTE>
 </SECTION_TA>
@@ -161,6 +161,14 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
     );
     assert_eq!(
         postgres.execute_sql(
+            "SELECT valid_to::text \
+             FROM legi_metadata_roots \
+             WHERE metadata_key = 'legi:SECTION_TA:LEGISCTA000006089696@1804-03-21';",
+        )?,
+        "2020-01-01"
+    );
+    assert_eq!(
+        postgres.execute_sql(
             "SELECT canonical_json->>'title' \
              FROM legi_metadata_roots \
              WHERE metadata_key = 'legi:SECTION_TA:LEGISCTA000006089696@2020-01-01';",
@@ -189,6 +197,15 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
                 \"hierarchy_path\":[\"Code civil\"],\
                 \"chunks\":[{{\"body\":\"Tout fait quelconque de l''homme...\",\
                               \"contextualized_body\":\"Code civil > Article 1240\\n\\nTout fait quelconque de l''homme...\",\
+                              \"hierarchy_path\":[\"Code civil\"]}}]}}'), \
+            ('legi:LEGIARTI000052000001@2020-01-01', 'legi', 'article', \
+             'LEGIARTI000052000001', 'LEGIARTI000052000001', 'Code civil article 1240 bis', \
+             'Article 1240 bis', 'Version contemporaine...', '2020-01-01', \
+             'sha256:article-boundary', \
+             '{{\"title\":\"Article 1240 bis\",\"body\":\"Version contemporaine...\",\
+                \"hierarchy_path\":[\"Code civil\"],\
+                \"chunks\":[{{\"body\":\"Version contemporaine...\",\
+                              \"contextualized_body\":\"Code civil > Article 1240 bis\\n\\nVersion contemporaine...\",\
                               \"hierarchy_path\":[\"Code civil\"]}}]}}'); \
          INSERT INTO chunks \
             (chunk_id, document_id, chunk_index, body, source_payload_hash, \
@@ -197,7 +214,11 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             ('chunk:legi:LEGIARTI000006419320@1804-02-21:0', \
              'legi:LEGIARTI000006419320@1804-02-21', 0, \
              'Tout fait quelconque de l''homme...', 'sha256:article-1240', \
-             'chunker:v0', 'bge-m3:1024:normalize:true'); \
+             'chunker:v0', 'bge-m3:1024:normalize:true'), \
+            ('chunk:legi:LEGIARTI000052000001@2020-01-01:0', \
+             'legi:LEGIARTI000052000001@2020-01-01', 0, \
+             'Version contemporaine...', 'sha256:article-boundary', \
+             'chunker:v0', NULL); \
          INSERT INTO chunk_embeddings \
             (chunk_id, embedding_fingerprint, embedding, model, dimension) \
          VALUES \
@@ -210,12 +231,18 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              'refers_to', 'publisher', \
              '{{\"source_tag\":\"LIEN_SECTION_TA\",\
                 \"to_source_uid\":\"LEGISCTA000006089696\",\
-                \"attributes\":[{{\"key\":\"debut\",\"value\":\"1804-03-21\"}}]}}');",
+                \"attributes\":[{{\"key\":\"debut\",\"value\":\"1804-03-21\"}}]}}'), \
+            ('edge:article-section-contemporary', \
+             'legi:LEGIARTI000052000001@2020-01-01', \
+             'refers_to', 'publisher', \
+             '{{\"source_tag\":\"LIEN_SECTION_TA\",\
+                \"to_source_uid\":\"LEGISCTA000006089696\",\
+                \"attributes\":[{{\"key\":\"debut\",\"value\":\"2020-01-01\"}}]}}');",
         vector_literal(0)
     ))?;
 
     let backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
-    assert_eq!(backfill.documents_updated, 1);
+    assert_eq!(backfill.documents_updated, 2);
     assert_eq!(backfill.embeddings_invalidated, 1);
     let repeated_backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
     assert_eq!(repeated_backfill.documents_updated, 0);
@@ -227,6 +254,14 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
         )?,
         "Titre preliminaire"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>1 \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000052000001@2020-01-01';",
+        )?,
+        "Titre contemporain"
     );
     assert_eq!(
         postgres.execute_sql(
