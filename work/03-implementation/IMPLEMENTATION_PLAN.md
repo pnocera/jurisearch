@@ -492,7 +492,7 @@ Current status (2026-06-21):
 - Done: storage schema migration `3` adds `ingest_run`, `ingest_member`, and `ingest_error` tables with run status, member archive/path/source/date/status fields, structured error fields, and recovery-compatibility metadata (`parser_version`, `schema_version`, `code_version`, `source_payload_hash`).
 - Done: `jurisearch-storage::ingest_accounting` provides repository APIs for run start/finish, idempotent member recording, member status updates, structured error recording, compatibility-based resume decisions (`process` / `skip` / `retry` / `blocked_incompatible`), and ingest-health metrics covering latest-run member/error counts plus projection and embedding coverage.
 - Done: storage integration tests cover compatible skip, failed/unfinished retry, incompatible replay blocking, structured error aggregation, and projection/embedding coverage metrics against managed Postgres.
-- Remaining for later 1.0 slices: wire the APIs into real LEGI archive ingest flow, implement quarantine file output, expose ingest-health in `status --json`, add safe-mode flags to ingest commands, and block/mark query access when required projection gates fail.
+- Remaining for later 1.0 slices: wire the APIs into real LEGI archive ingest flow, implement quarantine file output, expose ingest-health in `status --json`, compute replay snapshot status beyond the current `pending` storage placeholder, add safe-mode flags to ingest commands, and block/mark query access when required projection gates fail.
 
 ### 1.1 Full LEGI Canonicalization
 

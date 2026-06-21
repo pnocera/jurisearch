@@ -173,9 +173,9 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
         "validation_missing_required_field"
     );
     assert_eq!(health.projection_coverage.covered, 1);
-    assert_eq!(health.projection_coverage.total, 1);
-    assert_eq!(health.embedding_coverage.covered, 1);
-    assert_eq!(health.embedding_coverage.total, 1);
+    assert_eq!(health.projection_coverage.total, 2);
+    assert_eq!(health.embedding_coverage.covered, 2);
+    assert_eq!(health.embedding_coverage.total, 2);
     assert!(
         health
             .recovery_warnings
@@ -195,19 +195,28 @@ fn insert_projection_fixture(postgres: &ManagedPostgres) -> Result<(), StorageEr
            ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
             'LEGIARTI000006419320', 'Code civil article 1240', \
             'Article 1240', 'Tout fait quelconque de l''homme...', '1804-02-21', \
-            'sha256:article-1240', '{{\"official\":true}}'); \
+            'sha256:article-1240', '{{\"official\":true}}'), \
+           ('legi:LEGIARTI000000000001@2024-01-01', 'legi', 'article', \
+            'LEGIARTI000000000001', 'Unprojected fixture', \
+            'Article fixture', 'Document deliberately left without chunks.', '2024-01-01', \
+            'sha256:article-without-chunks', '{{\"official\":true}}'); \
          INSERT INTO chunks \
            (chunk_id, document_id, chunk_index, body, source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
             'responsabilite civile article 1240', 'sha256:article-1240', \
+            'chunker:v0', 'bge-m3:1024:normalize:true'), \
+           ('chunk:1240:1', 'legi:LEGIARTI000006419320@1804-02-21', 1, \
+            'dommage faute reparation', 'sha256:article-1240', \
             'chunker:v0', 'bge-m3:1024:normalize:true'); \
          INSERT INTO chunk_embeddings \
            (chunk_id, embedding_fingerprint, embedding, model, dimension) \
          VALUES \
-           ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
-        vector_literal(0)
+           ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024), \
+           ('chunk:1240:1', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+        vector_literal(0),
+        vector_literal(1)
     ))?;
     Ok(())
 }

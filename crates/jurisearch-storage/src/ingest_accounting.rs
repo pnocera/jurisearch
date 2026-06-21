@@ -464,7 +464,7 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
 
     let projection = client
         .query_one(
-            "SELECT count(*)::bigint, \
+            "SELECT count(DISTINCT d.document_id)::bigint, \
                     count(DISTINCT d.document_id) FILTER (WHERE c.chunk_id IS NOT NULL)::bigint \
              FROM documents d \
              LEFT JOIN chunks c ON c.document_id = d.document_id;",
