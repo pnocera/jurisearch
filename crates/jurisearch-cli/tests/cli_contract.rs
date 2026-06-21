@@ -332,6 +332,117 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
 }
 
 #[test]
+fn retrieval_commands_reject_incomplete_projection_coverage() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI retrieval projection gate")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-retrieval-projection-gate.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let document_id = "legi:LEGIARTI000006419320@1804-02-21";
+
+    {
+        let postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
+                 '1804-02-21', 'sha256:article-1240', '{\"official\":true}');",
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .args(["search", "responsabilite civile"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(
+        &output,
+        "index_unavailable",
+        "projection coverage gate is incomplete",
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["fetch", document_id])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(
+        &output,
+        "index_unavailable",
+        "projection coverage gate is incomplete",
+    );
+    Ok(())
+}
+
+#[test]
+fn retrieval_commands_reject_empty_initialized_index() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI retrieval empty index gate")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-retrieval-empty-gate.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let _postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .args(["search", "responsabilite civile"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(
+        &output,
+        "index_unavailable",
+        "projection coverage gate is incomplete",
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["fetch", "legi:LEGIARTI000006419320@1804-02-21"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(
+        &output,
+        "index_unavailable",
+        "projection coverage gate is incomplete",
+    );
+    Ok(())
+}
+
+#[test]
 fn bad_input_is_json_and_uses_exit_code_2() {
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
@@ -995,6 +1106,13 @@ fn discover_pg_config(test_name: &str) -> Result<Option<PgConfig>, StorageError>
     }
 
     Ok(Some(pg_config))
+}
+
+fn assert_json_error_contains(output: &[u8], code: &str, message: &str) {
+    let json: Value = serde_json::from_slice(output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], code);
+    assert!(json["error"]["message"].as_str().unwrap().contains(message));
 }
 
 fn write_tar_gz(path: &Path, members: &[(&str, &[u8])]) -> Result<(), Box<dyn std::error::Error>> {
