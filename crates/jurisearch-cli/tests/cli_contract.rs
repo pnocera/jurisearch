@@ -68,6 +68,15 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "string"
     );
     assert_eq!(
+        json["schemas"]["SearchResponse"]["properties"]["pagination"]["type"],
+        "object"
+    );
+    assert_eq!(
+        json["schemas"]["SearchResponse"]["properties"]["pagination"]["properties"]["cursor_note"]
+            ["type"],
+        "string"
+    );
+    assert_eq!(
         json["schemas"]["ExpandResponse"]["properties"]["expanded_terms"]["type"],
         "array"
     );
@@ -525,7 +534,14 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
         .unwrap()
         .env("JURISEARCH_INDEX_DIR", root.path())
         .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
-        .args(["search", "responsabilite civile", "--mode", "bm25"])
+        .args([
+            "search",
+            "responsabilite civile",
+            "--mode",
+            "bm25",
+            "--top-k",
+            "1",
+        ])
         .assert()
         .success()
         .stderr(predicate::str::is_empty())
@@ -548,6 +564,45 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
             .any(|term| term["term"] == "article 1240"
                 && term["source_seed_id"] == "civil-liability-fault-damage")
     );
+    assert_eq!(json["pagination"]["requested_top_k"], 1);
+    assert_eq!(json["pagination"]["returned"], 1);
+    assert_eq!(json["pagination"]["possibly_truncated"], true);
+    assert_eq!(json["pagination"]["cursor_supported"], false);
+    assert!(json["pagination"]["next_cursor"].is_null());
+    assert!(
+        json["pagination"]["cursor_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("reserved for future cursor pagination"))
+    );
+    assert!(
+        json["pagination"]["guidance"]
+            .as_str()
+            .is_some_and(|guidance| guidance.contains("Increase top_k"))
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .args([
+            "search",
+            "responsabilite civile",
+            "--mode",
+            "bm25",
+            "--top-k",
+            "10",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["pagination"]["requested_top_k"], 10);
+    assert_eq!(json["pagination"]["returned"], 1);
+    assert_eq!(json["pagination"]["possibly_truncated"], false);
+    assert!(json["pagination"]["guidance"].is_null());
     Ok(())
 }
 

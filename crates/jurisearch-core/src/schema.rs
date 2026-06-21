@@ -111,6 +111,18 @@ pub fn compiled_schema() -> Value {
                     },
                     "as_of": { "type": "string", "format": "date" },
                     "limit": { "type": "integer" },
+                    "pagination": {
+                        "type": "object",
+                        "properties": {
+                            "requested_top_k": { "type": "integer" },
+                            "returned": { "type": "integer" },
+                            "possibly_truncated": { "type": "boolean" },
+                            "cursor_supported": { "type": "boolean" },
+                            "next_cursor": { "type": ["string", "null"] },
+                            "cursor_note": { "type": "string" },
+                            "guidance": { "type": ["string", "null"] }
+                        }
+                    },
                     "candidates": {
                         "type": "array",
                         "items": {

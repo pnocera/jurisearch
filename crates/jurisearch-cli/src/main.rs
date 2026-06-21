@@ -503,6 +503,21 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     let expansion = expand_query(&args.query);
     response["expansion_seed_version"] = json!(expansion.seed_version);
     response["expanded_terms"] = json!(expansion.expanded_terms);
+    let returned = response["candidates"].as_array().map_or(0, Vec::len);
+    let possibly_truncated = returned as u32 >= args.top_k;
+    response["pagination"] = json!({
+        "requested_top_k": args.top_k,
+        "returned": returned,
+        "possibly_truncated": possibly_truncated,
+        "cursor_supported": false,
+        "next_cursor": null,
+        "cursor_note": "Candidate cursor values are reserved for future cursor pagination; search does not accept cursor input yet.",
+        "guidance": if possibly_truncated {
+            Some("The result window is full. Increase top_k (or --top-k on the CLI) to inspect more candidates; cursor pagination is not implemented yet.")
+        } else {
+            None
+        }
+    });
     if response["candidates"]
         .as_array()
         .is_some_and(|candidates| candidates.is_empty())
