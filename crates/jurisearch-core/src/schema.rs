@@ -193,6 +193,61 @@ pub fn compiled_schema() -> Value {
                     }
                 }
             },
+            "CiteRequest": {
+                "required": ["cite"],
+                "properties": {
+                    "cite": { "type": "string" },
+                    "strict": { "type": "boolean", "default": false },
+                    "online": { "type": "boolean", "default": false },
+                    "as_of": { "type": "string", "format": "date" }
+                }
+            },
+            "CiteResponse": {
+                "properties": {
+                    "query": { "type": "string" },
+                    "input_class": {
+                        "enum": ["document_id", "legiarti", "legitext", "legiscta", "nor", "free_text_article", "malformed"]
+                    },
+                    "normalized": { "type": ["string", "null"] },
+                    "as_of": { "type": "string", "format": "date" },
+                    "requested_as_of": { "type": ["string", "null"], "format": "date" },
+                    "state": {
+                        "enum": ["exact", "normalized", "ambiguous", "stale_version", "not_found", "source_unavailable"]
+                    },
+                    "local_state": {
+                        "enum": ["exact", "normalized", "ambiguous", "stale_version", "not_found", "source_unavailable"]
+                    },
+                    "strict": { "type": "boolean" },
+                    "online": { "type": "object" },
+                    "match_count": { "type": "integer" },
+                    "valid_match_count": { "type": "integer" },
+                    "matches": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "target_type": { "enum": ["document", "metadata_root"] },
+                                "document_id": { "type": ["string", "null"] },
+                                "metadata_key": { "type": ["string", "null"] },
+                                "source": { "type": "string" },
+                                "kind": { "type": "string" },
+                                "source_uid": { "type": ["string", "null"] },
+                                "version_group": { "type": ["string", "null"] },
+                                "root_kind": { "type": ["string", "null"] },
+                                "parent_source_uid": { "type": ["string", "null"] },
+                                "citation": { "type": ["string", "null"] },
+                                "title": { "type": ["string", "null"] },
+                                "nor": { "type": ["string", "null"] },
+                                "validity": { "type": "object" },
+                                "valid_on_as_of": { "type": "boolean" },
+                                "source_url": { "type": ["string", "null"] },
+                                "source_payload_hash": { "type": "string" },
+                                "exact_identifier_match": { "type": "boolean" }
+                            }
+                        }
+                    }
+                }
+            },
             "ContextRequest": {
                 "required": ["id"],
                 "properties": {

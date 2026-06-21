@@ -81,7 +81,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "cite",
         summary: "Verify citations and identifiers with explicit citation states.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "CiteRequest",
         response_schema: "CiteResponse",
     },

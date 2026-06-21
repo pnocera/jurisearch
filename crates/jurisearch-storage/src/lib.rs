@@ -1,3 +1,4 @@
+pub mod citation;
 pub mod dense;
 pub mod ingest_accounting;
 pub mod migrations;

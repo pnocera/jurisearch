@@ -97,6 +97,19 @@ fn help_schema_json_is_valid_and_lists_commands() {
         json["schemas"]["ExpandResponse"]["properties"]["expanded_terms"]["type"],
         "array"
     );
+    assert!(json["commands"].as_array().unwrap().iter().any(|command| {
+        command["name"] == "cite"
+            && command["status"] == "implemented"
+            && command["response_schema"] == "CiteResponse"
+    }));
+    assert_eq!(
+        json["schemas"]["CiteRequest"]["properties"]["as_of"]["format"],
+        "date"
+    );
+    assert_eq!(
+        json["schemas"]["CiteResponse"]["properties"]["state"]["enum"][0],
+        "exact"
+    );
 }
 
 #[test]
@@ -1806,6 +1819,356 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "bad_input");
+    Ok(())
+}
+
+#[test]
+fn cite_resolves_local_statutory_citations_and_strict_states() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI cite existing index")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-cite.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            r#"INSERT INTO documents
+                (document_id, source, kind, source_uid, citation, title, body,
+                 valid_from, valid_to, valid_to_raw, source_payload_hash, canonical_json)
+             VALUES
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article',
+                 'LEGIARTI000006419320', 'Code civil article 1240',
+                 'Article 1240', 'Responsabilite civile courante.',
+                 '1804-02-21', NULL, '2999-01-01', 'sha256:civil-1240',
+                 '{"official":true}'),
+                ('legi:LEGIARTI000000001240@2020-01-01', 'legi', 'article',
+                 'LEGIARTI000000001240', 'Code des assurances article 1240',
+                 'Article 1240', 'Autre article courant avec le meme numero.',
+                 '2020-01-01', NULL, '2999-01-01', 'sha256:assurance-1240',
+                 '{"official":true}'),
+                ('legi:LEGIARTI000000121001@2020-01-01', 'legi', 'article',
+                 'LEGIARTI000000121001', 'Code de la consommation article L121-1',
+                 'Article L121-1', 'Article prefixe courant.',
+                 '2020-01-01', NULL, '2999-01-01', 'sha256:conso-l121-1',
+                 '{"official":true}'),
+                ('legi:LEGIARTI000000000888@1900-01-01', 'legi', 'article',
+                 'LEGIARTI000000000888', 'Code civil article 88',
+                 'Article 88', 'Ancienne version historique.',
+                 '1900-01-01', '2000-01-01', '2000-01-01', 'sha256:article-88-old',
+                 '{"official":true}'),
+                ('legi:LEGIARTI000000000888@2000-01-01', 'legi', 'article',
+                 'LEGIARTI000000000888', 'Code civil article 88',
+                 'Article 88', 'Version courante.',
+                 '2000-01-01', NULL, '2999-01-01', 'sha256:article-88-current',
+                 '{"official":true}'),
+                ('legi:LEGIARTI000000000777@1900-01-01', 'legi', 'article',
+                 'LEGIARTI000000000777', 'Code civil article 777',
+                 'Article 777', 'Version abrogee.',
+                 '1900-01-01', '2000-01-01', '2000-01-01', 'sha256:article-777-old',
+                 '{"official":true}');
+             INSERT INTO chunks
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash,
+                 chunk_builder_version, embedding_fingerprint)
+             VALUES
+                ('chunk:civil-1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0,
+                 'Responsabilite civile courante.', 'Code civil > Article 1240',
+                 'sha256:civil-1240', 'chunker:v0', NULL),
+                ('chunk:assurance-1240:0', 'legi:LEGIARTI000000001240@2020-01-01', 0,
+                 'Autre article courant avec le meme numero.', 'Code des assurances > Article 1240',
+                 'sha256:assurance-1240', 'chunker:v0', NULL),
+                ('chunk:conso-l121-1:0', 'legi:LEGIARTI000000121001@2020-01-01', 0,
+                 'Article prefixe courant.', 'Code de la consommation > Article L121-1',
+                 'sha256:conso-l121-1', 'chunker:v0', NULL),
+                ('chunk:article-88-old:0', 'legi:LEGIARTI000000000888@1900-01-01', 0,
+                 'Ancienne version historique.', 'Code civil > Article 88',
+                 'sha256:article-88-old', 'chunker:v0', NULL),
+                ('chunk:article-88-current:0', 'legi:LEGIARTI000000000888@2000-01-01', 0,
+                 'Version courante.', 'Code civil > Article 88',
+                 'sha256:article-88-current', 'chunker:v0', NULL),
+                ('chunk:article-777-old:0', 'legi:LEGIARTI000000000777@1900-01-01', 0,
+                 'Version abrogee.', 'Code civil > Article 777',
+                 'sha256:article-777-old', 'chunker:v0', NULL);
+             INSERT INTO legi_metadata_roots
+                (metadata_key, root_kind, source_uid, parent_source_uid, title,
+                 valid_from, valid_to, valid_to_raw, source_payload_hash, canonical_version, canonical_json)
+             VALUES
+                ('legi:SECTION_TA:LEGISCTA000006089696@1804-03-21', 'SECTION_TA',
+                 'LEGISCTA000006089696', 'LEGITEXT000006070721', 'Titre preliminaire',
+                 '1804-03-21', NULL, '2999-01-01', 'sha256:section',
+                 'legi_section_ta:v1', '{"title":"Titre preliminaire"}'),
+                ('legi:TEXTELR:LEGITEXT000006070721@1804-03-21:nor', 'TEXTELR',
+                 'LEGITEXT000006070721', NULL, NULL,
+                 '1804-03-21', NULL, NULL, 'sha256:textelr',
+                 'legi_textelr:v1', '{"text_id":"LEGITEXT000006070721","nor":"JUSC2301234L"}');"#,
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "LEGIARTI000006419320", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "exact");
+    assert_eq!(json["input_class"], "legiarti");
+    assert_eq!(json["valid_match_count"], 1);
+    assert_eq!(
+        json["matches"][0]["document_id"],
+        "legi:LEGIARTI000006419320@1804-02-21"
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "Code civil article 1240", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "normalized");
+    assert_eq!(json["input_class"], "free_text_article");
+    assert_eq!(json["match_count"], 1);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args([
+            "cite",
+            "Code de la consommation article L. 121-1",
+            "--as-of",
+            "2024-01-01",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "normalized");
+    assert_eq!(json["normalized"], "l121-1");
+    assert_eq!(
+        json["matches"][0]["document_id"],
+        "legi:LEGIARTI000000121001@2020-01-01"
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args([
+            "cite",
+            "Code des assurances article 1240",
+            "--as-of",
+            "2024-01-01",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "normalized");
+    assert_eq!(
+        json["matches"][0]["document_id"],
+        "legi:LEGIARTI000000001240@2020-01-01"
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "article 1240", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "ambiguous");
+    assert_eq!(json["valid_match_count"], 2);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "LEGIARTI000000000888", "--as-of", "1999-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "exact");
+    assert!(json["matches"].as_array().unwrap().iter().any(|candidate| {
+        candidate["document_id"] == "legi:LEGIARTI000000000888@1900-01-01"
+            && candidate["valid_on_as_of"] == true
+    }));
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "LEGIARTI000000000777", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "stale_version");
+    assert_eq!(json["valid_match_count"], 0);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "JUSC2301234L", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "exact");
+    assert_eq!(json["input_class"], "nor");
+    assert_eq!(
+        json["matches"][0]["metadata_key"],
+        "legi:TEXTELR:LEGITEXT000006070721@1804-03-21:nor"
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["cite", "not a citation"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "not_found");
+    assert_eq!(json["input_class"], "malformed");
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "LEGIARTI999999999999", "--online"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "source_unavailable");
+    assert_eq!(json["local_state"], "not_found");
+    assert_eq!(json["online"]["requested"], true);
+    assert_eq!(json["online"]["checked"], false);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "article 1240", "--as-of", "2024-01-01", "--strict"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    assert_json_error_contains(&output, "no_results", "ambiguous");
+
+    let input = format!(
+        "{{\"id\":\"cite-one\",\"command\":\"cite\",\"args\":{{\"cite\":\"Code civil article 1240\",\"as_of\":\"2024-01-01\",\"index_dir\":\"{}\"}}}}\n",
+        root.path().display()
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["id"], "cite-one");
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["result"]["state"], "normalized");
+
+    Ok(())
+}
+
+#[test]
+fn cite_free_text_matches_ingested_legi_article_citation() -> Result<(), Box<dyn std::error::Error>>
+{
+    let Some(_pg_config) = discover_pg_config("CLI cite ingested LEGI article")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-cite-ingested.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-cite-archives.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_legi_global_20250101-000000.tar.gz");
+    let article = article_fixture();
+    write_tar_gz(
+        archive_path.as_path(),
+        &[("legi/articles/LEGIARTI000006419320.xml", article.as_bytes())],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-cite-ingested"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["inserted_documents"], 1);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["cite", "Code civil article 1240", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "normalized");
+    assert_eq!(json["match_count"], 1);
+    assert_eq!(
+        json["matches"][0]["document_id"],
+        "legi:LEGIARTI000006419320@1804-02-21"
+    );
+
     Ok(())
 }
 

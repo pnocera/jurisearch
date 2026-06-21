@@ -635,6 +635,13 @@ Acceptance:
 - `--online` uses the shared OAuth2/rate-limited client and maps upstream errors to exit code `5`.
 - `--strict` fails anything other than `exact` / `normalized`.
 
+Current status (2026-06-21):
+
+- Done: local-first `jurisearch cite` is implemented for one-shot CLI and JSONL session mode. It resolves internal `legi:<source_uid>@<date>` document IDs, `LEGIARTI` article IDs, `LEGITEXT`/`LEGISCTA` metadata roots, canonical-shape NOR identifiers from TEXTELR metadata, and free-text `article <num>` citations against the local index, including `L.`/`R.`/`D.` prefixed article numbers and a small set of common code-name hints.
+- Done: cite responses return explicit citation states (`exact`, `normalized`, `ambiguous`, `stale_version`, `not_found`, `source_unavailable`), effective/requested `as_of`, match counts, local candidates with validity metadata, and `valid_on_as_of` annotations. `--strict` exits with code `2` unless the state is `exact` or `normalized`.
+- Done: CLI contract coverage exercises exact LEGIARTI lookup, free-text normalization over both hand-written and LEGI-ingested rows, ambiguous article numbers, prefixed article numbers, historical `--as-of`, stale versions, malformed citations, strict failure, NOR metadata lookup, and session JSONL cite.
+- Remaining: wire `cite --online` to the shared Légifrance API client for configured online confirmation and upstream exit-code `5`; current `--online` responses disclose that online confirmation was requested but not checked and report the local index state.
+
 ### 1.5 JSONL Session and Batch
 
 Tasks:

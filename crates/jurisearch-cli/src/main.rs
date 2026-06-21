@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use jurisearch_core::{
     SCHEMA_VERSION,
-    contract::{LegalKind, OutputFormat, agent_help},
+    contract::{CitationState, LegalKind, OutputFormat, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
     expand::expand_query,
     schema::compiled_schema,
@@ -26,6 +26,7 @@ use jurisearch_ingest::{
     legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
 use jurisearch_storage::{
+    citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
     dense::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
@@ -157,6 +158,19 @@ struct SessionFetchArgs {
 }
 
 #[derive(Debug, Deserialize)]
+struct SessionCiteArgs {
+    cite: String,
+    #[serde(default)]
+    strict: bool,
+    #[serde(default)]
+    online: bool,
+    #[serde(default)]
+    as_of: Option<String>,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
 struct SessionContextArgs {
     id: String,
     #[serde(default)]
@@ -180,6 +194,8 @@ struct CiteArgs {
     strict: bool,
     #[arg(long)]
     online: bool,
+    #[arg(long)]
+    as_of: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -407,13 +423,7 @@ fn run() -> anyhow::Result<()> {
             if args.cite.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("cite requires a non-empty citation"))
             } else {
-                emit_error(ErrorObject::not_implemented(
-                    if args.strict || args.online {
-                        "cite --strict/--online"
-                    } else {
-                        "cite"
-                    },
-                ))
+                emit_cite(args, index_dir.as_deref())
             }
         }
         Command::Related(args) => emit_error(ErrorObject::not_implemented(&format!(
@@ -608,6 +618,13 @@ fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
+fn emit_cite(args: CiteArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match cite_payload(args, index_dir) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
 fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match context_payload(args, index_dir) {
         Ok(response) => write_json(&response),
@@ -646,6 +663,73 @@ fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, Err
     } else {
         Ok(response)
     }
+}
+
+fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    validate_as_of(args.as_of.as_deref())?;
+    let parsed = parse_citation_target(&args.cite);
+    let effective_as_of = args.as_of.clone().unwrap_or_else(today_utc);
+    let mut lookup = json!({ "matches": [] });
+    if let Some(lookup_target) = parsed.lookup() {
+        let index_dir = require_existing_index_dir(index_dir)?;
+        let postgres = open_index(index_dir.as_path())?;
+        ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+        let response = citation_lookup_json(
+            &postgres,
+            &CitationLookupQuery {
+                lookup: lookup_target,
+                limit: 25,
+            },
+        )
+        .map_err(storage_error_object)?;
+        lookup = serde_json::from_str(&response)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    }
+
+    let local_state = classify_citation_state(
+        &parsed,
+        &lookup,
+        effective_as_of.as_str(),
+        args.as_of.as_deref(),
+    );
+    let state = if args.online
+        && !matches!(&parsed, ParsedCitationTarget::Malformed { .. })
+        && lookup["matches"]
+            .as_array()
+            .is_none_or(|matches| matches.is_empty())
+    {
+        CitationState::SourceUnavailable
+    } else {
+        local_state
+    };
+    let mut response = json!({
+        "query": args.cite,
+        "input_class": parsed.input_class(),
+        "normalized": parsed.normalized_value(),
+        "as_of": effective_as_of,
+        "requested_as_of": args.as_of.as_deref(),
+        "state": citation_state_name(state),
+        "local_state": citation_state_name(local_state),
+        "strict": args.strict,
+        "online": {
+            "requested": args.online,
+            "checked": false,
+            "state": if args.online { Some(citation_state_name(CitationState::SourceUnavailable)) } else { None },
+            "note": if args.online {
+                Some("Online Légifrance confirmation is not wired yet; this response reports local index resolution.")
+            } else {
+                None
+            }
+        },
+        "match_count": lookup["matches"].as_array().map_or(0, Vec::len),
+        "matches": lookup["matches"].clone(),
+    });
+    annotate_valid_matches(&mut response, &effective_as_of);
+
+    if args.strict && !matches!(state, CitationState::Exact | CitationState::Normalized) {
+        return Err(strict_citation_error(&args.cite, state));
+    }
+    Ok(response)
 }
 
 fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
@@ -719,6 +803,24 @@ fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
             ids: args.ids,
             as_of: args.as_of,
             part: args.part,
+        },
+        index_dir.as_deref(),
+    )
+}
+
+fn session_cite_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionCiteArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid cite args: {error}")))?;
+    if args.cite.trim().is_empty() {
+        return Err(ErrorObject::bad_input("cite requires a non-empty citation"));
+    }
+    let index_dir = args.index_dir;
+    cite_payload(
+        CiteArgs {
+            cite: args.cite,
+            strict: args.strict,
+            online: args.online,
+            as_of: args.as_of,
         },
         index_dir.as_deref(),
     )
@@ -1761,9 +1863,10 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "status" => session_status_payload(args),
         "search" => session_search_payload(args),
         "fetch" => session_fetch_payload(args),
+        "cite" => session_cite_payload(args),
         "context" => session_context_payload(args),
         "expand" => session_expand_payload(args),
-        "cite" | "related" | "model fetch" | "setup" | "ingest" | "sync" => {
+        "related" | "model fetch" | "setup" | "ingest" | "sync" => {
             Err(ErrorObject::not_implemented(command))
         }
         _ => Err(ErrorObject::bad_input(format!(
@@ -2047,6 +2150,334 @@ fn validate_as_of(as_of: Option<&str>) -> Result<(), ErrorObject> {
         )));
     }
     Ok(())
+}
+
+#[derive(Debug)]
+enum ParsedCitationTarget {
+    DocumentId {
+        document_id: String,
+        source_uid: Option<String>,
+    },
+    ArticleSourceUid(String),
+    TextSourceUid(String),
+    SectionSourceUid(String),
+    Nor(String),
+    FreeTextArticle {
+        article_number: String,
+        code_hint: Option<String>,
+    },
+    Malformed {
+        normalized: String,
+    },
+}
+
+impl ParsedCitationTarget {
+    fn lookup(&self) -> Option<CitationLookup<'_>> {
+        match self {
+            Self::DocumentId {
+                document_id,
+                source_uid,
+            } => Some(CitationLookup::DocumentId {
+                document_id,
+                source_uid: source_uid.as_deref(),
+            }),
+            Self::ArticleSourceUid(source_uid) => {
+                Some(CitationLookup::ArticleSourceUid(source_uid))
+            }
+            Self::TextSourceUid(source_uid) => Some(CitationLookup::TextSourceUid(source_uid)),
+            Self::SectionSourceUid(source_uid) => {
+                Some(CitationLookup::SectionSourceUid(source_uid))
+            }
+            Self::Nor(nor) => Some(CitationLookup::Nor(nor)),
+            Self::FreeTextArticle {
+                article_number,
+                code_hint,
+            } => Some(CitationLookup::FreeTextArticle {
+                article_number,
+                code_hint: code_hint.as_deref(),
+            }),
+            Self::Malformed { .. } => None,
+        }
+    }
+
+    fn input_class(&self) -> &'static str {
+        match self {
+            Self::DocumentId { .. } => "document_id",
+            Self::ArticleSourceUid(_) => "legiarti",
+            Self::TextSourceUid(_) => "legitext",
+            Self::SectionSourceUid(_) => "legiscta",
+            Self::Nor(_) => "nor",
+            Self::FreeTextArticle { .. } => "free_text_article",
+            Self::Malformed { .. } => "malformed",
+        }
+    }
+
+    fn normalized_value(&self) -> Option<&str> {
+        match self {
+            Self::DocumentId { document_id, .. } => Some(document_id),
+            Self::ArticleSourceUid(source_uid)
+            | Self::TextSourceUid(source_uid)
+            | Self::SectionSourceUid(source_uid)
+            | Self::Nor(source_uid) => Some(source_uid),
+            Self::FreeTextArticle { article_number, .. } => Some(article_number),
+            Self::Malformed { normalized } if !normalized.is_empty() => Some(normalized),
+            Self::Malformed { .. } => None,
+        }
+        .map(String::as_str)
+    }
+}
+
+fn parse_citation_target(input: &str) -> ParsedCitationTarget {
+    let trimmed = input.trim();
+    if trimmed.starts_with("legi:") {
+        return ParsedCitationTarget::DocumentId {
+            document_id: trimmed.to_owned(),
+            source_uid: extract_known_source_uid(trimmed, "LEGIARTI"),
+        };
+    }
+    if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGIARTI") {
+        return ParsedCitationTarget::ArticleSourceUid(source_uid);
+    }
+    if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGITEXT") {
+        return ParsedCitationTarget::TextSourceUid(source_uid);
+    }
+    if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGISCTA") {
+        return ParsedCitationTarget::SectionSourceUid(source_uid);
+    }
+    let normalized = normalize_citation_text(trimmed);
+    if let Some(article_number) = parse_article_number(&normalized) {
+        return ParsedCitationTarget::FreeTextArticle {
+            article_number,
+            code_hint: detect_code_hint(&normalized),
+        };
+    }
+    let compact_upper = trimmed
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_uppercase())
+        .collect::<String>();
+    if looks_like_nor(&compact_upper) {
+        return ParsedCitationTarget::Nor(compact_upper);
+    }
+    ParsedCitationTarget::Malformed { normalized }
+}
+
+fn extract_known_source_uid(value: &str, prefix: &str) -> Option<String> {
+    let upper = value.to_ascii_uppercase();
+    let start = upper.find(prefix)?;
+    let suffix = upper[start + prefix.len()..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .take(12)
+        .collect::<String>();
+    (suffix.len() == 12).then(|| format!("{prefix}{suffix}"))
+}
+
+fn parse_article_number(normalized: &str) -> Option<String> {
+    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
+    let mut index = 0usize;
+    const ARTICLE_PREFIXES: &[&str] = &["l", "lo", "r", "d"];
+    while let Some(token) = tokens.get(index) {
+        if *token == "article"
+            && let Some(candidate) = tokens.get(index + 1)
+        {
+            if let Some(number) = article_number_token(candidate) {
+                return Some(number);
+            }
+            if ARTICLE_PREFIXES.contains(candidate)
+                && let Some(number) = tokens
+                    .get(index + 2)
+                    .and_then(|candidate| article_number_token(candidate))
+            {
+                return Some(format!("{candidate}{number}"));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn article_number_token(candidate: &str) -> Option<String> {
+    (candidate
+        .chars()
+        .any(|character| character.is_ascii_digit())
+        && candidate
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-'))
+    .then(|| candidate.to_owned())
+}
+
+fn detect_code_hint(normalized: &str) -> Option<String> {
+    const CODE_HINTS: &[&str] = &[
+        "code civil",
+        "code penal",
+        "code de procedure civile",
+        "code de procedure penale",
+        "code du travail",
+        "code de la consommation",
+        "code des assurances",
+        "code de commerce",
+        "code de l environnement",
+        "code de la sante publique",
+        "code general des impots",
+    ];
+    CODE_HINTS
+        .iter()
+        .find(|hint| contains_normalized_phrase(normalized, hint))
+        .map(|hint| (*hint).to_owned())
+}
+
+fn contains_normalized_phrase(normalized: &str, phrase: &str) -> bool {
+    let normalized = format!(" {normalized} ");
+    let phrase = format!(" {phrase} ");
+    normalized.contains(&phrase)
+}
+
+fn looks_like_nor(value: &str) -> bool {
+    let chars = value.chars().collect::<Vec<_>>();
+    chars.len() == 12
+        && chars[0..4]
+            .iter()
+            .all(|character| character.is_ascii_alphabetic())
+        && chars[4..11]
+            .iter()
+            .all(|character| character.is_ascii_digit())
+        && chars[11].is_ascii_alphabetic()
+}
+
+fn normalize_citation_text(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_space = true;
+    for character in value.chars().flat_map(|character| character.to_lowercase()) {
+        let replacement = match character {
+            'à' | 'â' | 'ä' => "a",
+            'ç' => "c",
+            'é' | 'è' | 'ê' | 'ë' => "e",
+            'î' | 'ï' => "i",
+            'ô' | 'ö' => "o",
+            'ù' | 'û' | 'ü' => "u",
+            'œ' => "oe",
+            'æ' => "ae",
+            '-' => {
+                normalized.push('-');
+                previous_was_space = false;
+                continue;
+            }
+            ascii if ascii.is_ascii_alphanumeric() => {
+                normalized.push(ascii);
+                previous_was_space = false;
+                continue;
+            }
+            _ => "",
+        };
+        if !replacement.is_empty() {
+            normalized.push_str(replacement);
+            previous_was_space = false;
+        } else if !previous_was_space {
+            normalized.push(' ');
+            previous_was_space = true;
+        }
+    }
+    normalized.trim().to_owned()
+}
+
+fn classify_citation_state(
+    parsed: &ParsedCitationTarget,
+    lookup: &Value,
+    effective_as_of: &str,
+    requested_as_of: Option<&str>,
+) -> CitationState {
+    if matches!(parsed, ParsedCitationTarget::Malformed { .. }) {
+        return CitationState::NotFound;
+    }
+    let Some(matches) = lookup["matches"].as_array() else {
+        return CitationState::NotFound;
+    };
+    if matches.is_empty() {
+        return CitationState::NotFound;
+    }
+    let valid_match_count = matches
+        .iter()
+        .filter(|candidate| candidate_valid_on(candidate, effective_as_of))
+        .count();
+    match parsed {
+        ParsedCitationTarget::DocumentId { .. } => {
+            let exact_valid = matches.iter().any(|candidate| {
+                candidate["exact_identifier_match"].as_bool() == Some(true)
+                    && (requested_as_of.is_none()
+                        || candidate_valid_on(candidate, requested_as_of.unwrap_or_default()))
+            });
+            if exact_valid {
+                CitationState::Exact
+            } else {
+                CitationState::StaleVersion
+            }
+        }
+        ParsedCitationTarget::FreeTextArticle { .. } => match valid_match_count {
+            0 => CitationState::StaleVersion,
+            1 => CitationState::Normalized,
+            _ => CitationState::Ambiguous,
+        },
+        ParsedCitationTarget::ArticleSourceUid(_)
+        | ParsedCitationTarget::TextSourceUid(_)
+        | ParsedCitationTarget::SectionSourceUid(_)
+        | ParsedCitationTarget::Nor(_) => match valid_match_count {
+            0 => CitationState::StaleVersion,
+            1 => CitationState::Exact,
+            _ => CitationState::Ambiguous,
+        },
+        ParsedCitationTarget::Malformed { .. } => CitationState::NotFound,
+    }
+}
+
+fn annotate_valid_matches(response: &mut Value, effective_as_of: &str) {
+    let mut valid_count = 0usize;
+    if let Some(matches) = response["matches"].as_array_mut() {
+        for candidate in matches {
+            let valid = candidate_valid_on(candidate, effective_as_of);
+            candidate["valid_on_as_of"] = json!(valid);
+            if valid {
+                valid_count += 1;
+            }
+        }
+    }
+    response["valid_match_count"] = json!(valid_count);
+}
+
+fn candidate_valid_on(candidate: &Value, as_of: &str) -> bool {
+    let validity = &candidate["validity"];
+    let valid_from_ok = validity["from"]
+        .as_str()
+        .is_none_or(|valid_from| valid_from <= as_of);
+    let valid_to_ok = validity["to"]
+        .as_str()
+        .is_none_or(|valid_to| as_of < valid_to);
+    valid_from_ok && valid_to_ok
+}
+
+fn citation_state_name(state: CitationState) -> &'static str {
+    match state {
+        CitationState::Exact => "exact",
+        CitationState::Normalized => "normalized",
+        CitationState::Ambiguous => "ambiguous",
+        CitationState::StaleVersion => "stale_version",
+        CitationState::NotFound => "not_found",
+        CitationState::SourceUnavailable => "source_unavailable",
+    }
+}
+
+fn strict_citation_error(input: &str, state: CitationState) -> ErrorObject {
+    ErrorObject {
+        code: ErrorCode::NoResults,
+        message: format!(
+            "strict citation verification failed for `{input}` with state `{}`",
+            citation_state_name(state)
+        ),
+        suggestions: vec![
+            "Retry without --strict to inspect candidate matches and citation state.".into(),
+            "Pass --as-of for historical statutory versions.".into(),
+        ],
+    }
 }
 
 #[derive(Debug)]
