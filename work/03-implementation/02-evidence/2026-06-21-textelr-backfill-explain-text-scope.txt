@@ -1,0 +1,83 @@
+                                                                                                               QUERY PLAN
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=857.17..857.18 rows=2 width=353) (actual time=89.997..90.003 rows=33.00 loops=1)
+   Sort Key: d.document_id, (0), ((section.valid_from)::text) DESC NULLS LAST, section.metadata_key, edge.edge_id
+   Sort Method: quicksort  Memory: 849kB
+   Buffers: shared hit=2635
+   ->  Append  (cost=0.42..857.16 rows=2 width=353) (actual time=64.520..89.319 rows=33.00 loops=1)
+         Buffers: shared hit=2629
+         ->  Nested Loop  (cost=0.42..805.84 rows=1 width=377) (actual time=2.541..2.543 rows=0.00 loops=1)
+               Buffers: shared hit=720
+               ->  Nested Loop  (cost=0.14..801.87 rows=1 width=1251) (actual time=2.540..2.542 rows=0.00 loops=1)
+                     Join Filter: (section.source_uid = (edge.payload ->> 'to_source_uid'::text))
+                     Buffers: shared hit=720
+                     ->  Index Scan using legi_metadata_roots_kind_source_idx on legi_metadata_roots section  (cost=0.14..8.16 rows=1 width=104) (actual time=0.022..0.023 rows=1.00 loops=1)
+                           Index Cond: (root_kind = 'SECTION_TA'::text)
+                           Index Searches: 1
+                           Buffers: shared hit=2
+                     ->  Seq Scan on graph_edges edge  (cost=0.00..793.37 rows=22 width=1179) (actual time=2.516..2.517 rows=0.00 loops=1)
+                           Filter: ((edge_source = 'publisher'::text) AND ((payload ->> 'source_tag'::text) = 'LIEN_SECTION_TA'::text))
+                           Rows Removed by Filter: 4307
+                           Buffers: shared hit=718
+               ->  Index Scan using documents_pkey on documents d  (cost=0.27..3.93 rows=1 width=59) (never executed)
+                     Index Cond: (document_id = edge.from_document_id)
+                     Filter: ((source = 'legi'::text) AND (kind = 'article'::text) AND ((document_id = ANY ('{}'::text[])) OR ((edge.payload ->> 'to_source_uid'::text) = ANY ('{}'::text[]))))
+                     Index Searches: 0
+         ->  Nested Loop Anti Join  (cost=4.62..51.32 rows=1 width=329) (actual time=61.978..86.770 rows=33.00 loops=1)
+               Buffers: shared hit=1909
+               ->  Nested Loop  (cost=4.34..29.98 rows=1 width=235) (actual time=61.705..81.923 rows=33.00 loops=1)
+                     Join Filter: (section_1.source_uid = (section_link.link ->> 'target_source_uid'::text))
+                     Buffers: shared hit=1574
+                     ->  Nested Loop  (cost=4.20..21.81 rows=1 width=195) (actual time=61.680..81.847 rows=33.00 loops=1)
+                           Buffers: shared hit=1508
+                           ->  Nested Loop  (cost=2.44..20.03 rows=1 width=195) (actual time=61.301..71.638 rows=33.00 loops=1)
+                                 Join Filter: ((d_1.document_id = ANY ('{}'::text[])) OR ((section_link.link ->> 'target_source_uid'::text) = ANY ('{}'::text[])) OR (text_struct.source_uid = ANY ('{LEGITEXT000006075080}'::text[])))
+                                 Buffers: shared hit=1409
+                                 ->  Nested Loop  (cost=0.42..17.98 rows=1 width=195) (actual time=0.569..1.121 rows=220.00 loops=1)
+                                       Buffers: shared hit=746
+                                       ->  Index Scan using legi_metadata_roots_kind_source_idx on legi_metadata_roots text_struct  (cost=0.14..8.16 rows=1 width=96) (actual time=0.026..0.026 rows=1.00 loops=1)
+                                             Index Cond: (root_kind = 'TEXTELR'::text)
+                                             Index Searches: 1
+                                             Buffers: shared hit=2
+                                       ->  Nested Loop  (cost=0.28..9.81 rows=1 width=99) (actual time=0.542..1.076 rows=220.00 loops=1)
+                                             Buffers: shared hit=744
+                                             ->  Function Scan on jsonb_array_elements article_link  (cost=0.01..1.50 rows=1 width=40) (actual time=0.514..0.574 rows=220.00 loops=1)
+                                                   Filter: ((link ->> 'source_tag'::text) = 'LIEN_ART'::text)
+                                                   Rows Removed by Filter: 3
+                                                   Buffers: shared hit=26
+                                             ->  Index Scan using documents_source_uid_idx on documents d_1  (cost=0.27..8.30 rows=1 width=80) (actual time=0.001..0.002 rows=1.00 loops=220)
+                                                   Index Cond: (source_uid = (article_link.link ->> 'target_source_uid'::text))
+                                                   Filter: ((source = 'legi'::text) AND (kind = 'article'::text))
+                                                   Index Searches: 220
+                                                   Buffers: shared hit=718
+                                 ->  Limit  (cost=2.01..2.02 rows=1 width=40) (actual time=0.320..0.320 rows=0.15 loops=220)
+                                       Buffers: shared hit=663
+                                       ->  Sort  (cost=2.01..2.02 rows=1 width=40) (actual time=0.320..0.320 rows=0.15 loops=220)
+                                             Sort Key: section_link.ordinality DESC
+                                             Sort Method: quicksort  Memory: 26kB
+                                             Buffers: shared hit=663
+                                             ->  Function Scan on jsonb_array_elements section_link  (cost=0.01..2.00 rows=1 width=40) (actual time=0.305..0.305 rows=0.15 loops=220)
+                                                   Filter: ((ordinality < article_link.ordinality) AND ((link ->> 'target_source_uid'::text) IS NOT NULL) AND ((link ->> 'source_tag'::text) = 'LIEN_SECTION_TA'::text))
+                                                   Rows Removed by Filter: 223
+                                                   Buffers: shared hit=660
+                           ->  Aggregate  (cost=1.76..1.77 rows=1 width=32) (actual time=0.309..0.309 rows=1.00 loops=33)
+                                 Buffers: shared hit=99
+                                 ->  Function Scan on jsonb_array_elements section_link_1  (cost=0.01..1.76 rows=1 width=40) (actual time=0.293..0.295 rows=1.00 loops=33)
+                                       Filter: ((ordinality < article_link.ordinality) AND ((link ->> 'source_tag'::text) = 'LIEN_SECTION_TA'::text))
+                                       Rows Removed by Filter: 222
+                                       Buffers: shared hit=99
+                     ->  Index Scan using legi_metadata_roots_kind_source_idx on legi_metadata_roots section_1  (cost=0.14..8.16 rows=1 width=104) (actual time=0.002..0.002 rows=1.00 loops=33)
+                           Index Cond: (root_kind = 'SECTION_TA'::text)
+                           Index Searches: 33
+                           Buffers: shared hit=66
+               ->  Index Scan using graph_edges_from_idx on graph_edges direct_edge  (cost=0.28..10.78 rows=1 width=37) (actual time=0.013..0.013 rows=0.00 loops=33)
+                     Index Cond: (from_document_id = d_1.document_id)
+                     Filter: ((edge_source = 'publisher'::text) AND ((payload ->> 'source_tag'::text) = 'LIEN_SECTION_TA'::text))
+                     Rows Removed by Filter: 15
+                     Index Searches: 33
+                     Buffers: shared hit=195
+ Planning:
+   Buffers: shared hit=547
+ Planning Time: 6.234 ms
+ Execution Time: 90.257 ms
+(80 rows)
