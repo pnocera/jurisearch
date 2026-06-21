@@ -251,6 +251,10 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
         .map_err(StorageError::PostgresClient)?;
     let rows = client
         .query(
+            // Phase 1.1 deliberately chooses one section row per article: if several
+            // publisher section links or section versions match, the latest section
+            // metadata wins. Temporal disambiguation is deferred to the broader
+            // hierarchy-assembly slice.
             "SELECT DISTINCT ON (d.document_id) \
                 d.document_id, d.canonical_json::text, section.canonical_json::text \
              FROM documents d \

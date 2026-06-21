@@ -187,6 +187,9 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
     let backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
     assert_eq!(backfill.documents_updated, 1);
     assert_eq!(backfill.embeddings_invalidated, 1);
+    let repeated_backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
+    assert_eq!(repeated_backfill.documents_updated, 0);
+    assert_eq!(repeated_backfill.embeddings_invalidated, 0);
     assert_eq!(
         postgres.execute_sql(
             "SELECT canonical_json->'hierarchy_path'->>1 \
