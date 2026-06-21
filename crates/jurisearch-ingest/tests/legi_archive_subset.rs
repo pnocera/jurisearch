@@ -36,6 +36,7 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     let mut parsed_articles = 0usize;
     let mut publisher_edges = 0usize;
     let mut articles_with_block_boundaries = 0usize;
+    let mut saw_section_ta = false;
     let mut unsupported_roots = BTreeSet::new();
     let mut parse_errors = Vec::new();
 
@@ -79,6 +80,9 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
                     }
                 }
                 Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
+                    if root == "SECTION_TA" {
+                        saw_section_ta = true;
+                    }
                     unsupported_roots.insert(root);
                 }
                 Err(error) => {
@@ -90,7 +94,7 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
             }
 
             Ok(
-                if article_attempts >= ARTICLE_SAMPLE_TARGET
+                if (article_attempts >= ARTICLE_SAMPLE_TARGET && saw_section_ta)
                     || visited_members >= MAX_VISITED_MEMBERS
                 {
                     ArchiveVisit::Stop
@@ -107,7 +111,10 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
         "unexpected parse errors in official LEGI sample:\n{}",
         parse_errors.join("\n")
     );
-    assert_eq!(parsed_articles, ARTICLE_SAMPLE_TARGET);
+    assert!(
+        parsed_articles >= ARTICLE_SAMPLE_TARGET,
+        "expected at least {ARTICLE_SAMPLE_TARGET} ARTICLE members before stopping, got {parsed_articles}"
+    );
     // The current 25-article default window is intentionally near the start of the baseline and
     // includes publisher links. If the default archive changes, adjust the window rather than
     // treating a link-free sample as proof that edge extraction is broken.
@@ -118,6 +125,10 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     assert!(
         articles_with_block_boundaries > 0,
         "expected at least one sampled real article to preserve a structural body boundary"
+    );
+    assert!(
+        saw_section_ta,
+        "expected real LEGI sample to classify at least one SECTION_TA root as unsupported"
     );
     // The default baseline currently starts with text-version XML before articles. This keeps
     // unsupported-root classification visible in the smoke, but the test remains ignored because

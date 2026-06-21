@@ -30,7 +30,7 @@ This matches the current parser contract: non-`ARTICLE` roots return `ParsedLegi
 
 ## Article DTD Required-Field Check
 
-The local DTD set does not contain a top-level `DTD/legi` profile. LEGI archive members are organized by fond/source profile; the first real sample is JORF-flavoured.
+The local DTD set does not contain a top-level `DTD/legi` profile. LEGI archive members are organized by fond/source profile; the first real sample is under the JORF archive path but is best treated as LEGI-fond XML informed by the JORF profile, not strict JORF DTD-conformant XML.
 
 Observed article DTD profiles:
 
@@ -38,7 +38,7 @@ Observed article DTD profiles:
   - `@root ARTICLE`
   - `ARTICLE (META, CONTEXTE, VERSIONS, SM, BLOC_TEXTUEL, LIENS?)`
   - `META_ARTICLE (NUM, MCS_ART, DATE_DEBUT, DATE_FIN, TYPE)`
-  - `ETAT` is not present in the JORF article DTD.
+  - `ETAT` is not present as a `META_ARTICLE` element in the JORF article DTD; JORF text/version state is instead carried in other structures such as `VERSION/@etat`.
 - `DTD/kali/kali_article.dtd`
   - `@root ARTICLE`
   - `ARTICLE (META, CONTEXTE, VERSIONS, BLOC_TEXTUEL, NOTA?, CONDITION_DIFFERE?, LIENS)`
@@ -55,6 +55,6 @@ Phase 0.5 parser validation currently requires the cross-profile fields needed t
 - `META_ARTICLE/DATE_FIN`
 - `BLOC_TEXTUEL/CONTENU`
 
-Phase 0.5 treats `META_ARTICLE/ETAT` as optional because it is absent from the JORF article DTD and can be empty in JORF-flavoured real data. When present, it is preserved as `source_status`; when absent or empty, canonical versions record `etat=absent`.
+Phase 0.5 treats `META_ARTICLE/ETAT` as optional because it is absent from the JORF article DTD element model and can be empty in the LEGI-fond real data observed under JORF archive paths. When present, it is preserved as `source_status`; when absent or empty, canonical versions record `etat=absent`.
 
 Fields such as KALI `CALIPSOS`, `HISTORIQUE`, `DATE_DEB_EXT`, and `DATE_FIN_EXT` are not yet canonical output fields in the Phase 0.5 article spike. Full profile-specific field retention belongs in Phase 1 full LEGI canonicalization, alongside `SECTION_TA`/text-structure assembly.
