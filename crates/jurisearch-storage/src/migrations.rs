@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 1;
+pub const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 struct Migration {
     version: i32,
@@ -16,10 +16,11 @@ pub struct MigrationReport {
     pub current_version: i32,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "canonical_documents_chunks_vectors",
-    sql: r#"
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "canonical_documents_chunks_vectors",
+        sql: r#"
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_search;
 
@@ -94,7 +95,23 @@ ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "chunk_bm25_index",
+        sql: r#"
+CREATE INDEX IF NOT EXISTS chunks_bm25_idx
+ON chunks USING bm25 (chunk_id, body)
+WITH (key_field = 'chunk_id');
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 2), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+];
 
 impl ManagedPostgres {
     pub fn run_migrations(&self) -> Result<MigrationReport, StorageError> {

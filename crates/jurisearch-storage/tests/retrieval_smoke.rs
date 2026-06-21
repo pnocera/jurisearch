@@ -1,0 +1,100 @@
+use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
+
+fn discover_pg_config() -> Result<Option<PgConfig>, StorageError> {
+    let pg_config = match PgConfig::discover() {
+        Ok(pg_config) => pg_config,
+        Err(error @ StorageError::MissingPgConfig { .. }) => {
+            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
+                return Err(error);
+            }
+            eprintln!("skipping retrieval smoke: {error}");
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+
+    for extension in ["pg_search", "vector"] {
+        if let Err(error) = pg_config.require_extension_assets(extension) {
+            if std::env::var_os("JURISEARCH_REQUIRE_PG_EXTENSIONS").is_some() {
+                return Err(error);
+            }
+            eprintln!("skipping retrieval smoke: {error}");
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(pg_config))
+}
+
+fn vector_literal(active_index: usize) -> String {
+    let values = (0..1024)
+        .map(|index| if index == active_index { "1" } else { "0" })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
+#[test]
+fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config()? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-retrieval-pg.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let legal_vector = vector_literal(0);
+    let unrelated_vector = vector_literal(1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    postgres.execute_sql(&format!(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, citation, title, body, \
+            valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+           ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+            'LEGIARTI000006419320', 'Code civil article 1240', \
+            'Article 1240', 'Tout fait quelconque de l''homme oblige celui par la faute duquel il est arrive a le reparer.', \
+            '1804-02-21', 'sha256:article-1240', '{{\"official\":true}}'), \
+           ('legi:LEGIARTI000000000001@2024-01-01', 'legi', 'article', \
+            'LEGIARTI000000000001', 'Code de cuisine article 1', \
+            'Article cuisine', 'Recette de tarte aux pommes avec cannelle.', \
+            '2024-01-01', 'sha256:recipe', '{{\"official\":true}}'); \
+         INSERT INTO chunks \
+           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+            chunk_builder_version, embedding_fingerprint) \
+         VALUES \
+           ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+            'responsabilite civile faute reparation dommage article 1240', \
+            'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'), \
+           ('chunk:recipe:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
+            'recette tarte pommes cannelle dessert', \
+            'sha256:recipe', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
+         INSERT INTO chunk_embeddings \
+           (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES \
+           ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024), \
+           ('chunk:recipe:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+        legal_vector, unrelated_vector
+    ))?;
+
+    let lexical = postgres.execute_sql(
+        "SELECT chunk_id \
+         FROM chunks \
+         WHERE body @@@ 'responsabilite faute dommage' \
+         ORDER BY paradedb.score(chunk_id) DESC \
+         LIMIT 1;",
+    )?;
+    assert_eq!(lexical, "chunk:1240:0");
+
+    let vector = postgres.execute_sql(&format!(
+        "SELECT chunk_id \
+         FROM chunk_embeddings \
+         ORDER BY embedding <-> '{}' \
+         LIMIT 1;",
+        legal_vector
+    ))?;
+    assert_eq!(vector, "chunk:1240:0");
+
+    Ok(())
+}

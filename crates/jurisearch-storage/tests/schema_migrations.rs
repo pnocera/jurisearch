@@ -53,7 +53,10 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         let postgres = ManagedPostgres::start_durable(pg_config.clone(), root.path())?;
         let report = postgres.run_migrations()?;
         assert_eq!(report.current_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(report.applied, vec![CURRENT_SCHEMA_VERSION]);
+        assert_eq!(
+            report.applied,
+            (1..=CURRENT_SCHEMA_VERSION).collect::<Vec<_>>()
+        );
 
         let migrations = postgres.execute_sql(
             "SELECT version::text || ':' || name \
@@ -61,8 +64,10 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
              ORDER BY version;",
         )?;
         assert!(migrations.contains(&format!(
-            "{CURRENT_SCHEMA_VERSION}:canonical_documents_chunks_vectors"
+            "{}:canonical_documents_chunks_vectors",
+            CURRENT_SCHEMA_VERSION - 1
         )));
+        assert!(migrations.contains(&format!("{CURRENT_SCHEMA_VERSION}:chunk_bm25_index")));
 
         postgres.execute_sql(&format!(
             "INSERT INTO documents \
@@ -100,7 +105,7 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
         let migration_count =
             postgres.execute_sql("SELECT count(*)::text FROM schema_migrations;")?;
-        assert_eq!(migration_count, "1");
+        assert_eq!(migration_count, CURRENT_SCHEMA_VERSION.to_string());
 
         let nearest = postgres.execute_sql(&format!(
             "SELECT c.body \
