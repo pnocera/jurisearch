@@ -629,11 +629,17 @@ struct LegiArchiveIngestCounters {
     unsupported_roots: BTreeMap<String, usize>,
 }
 
-fn legi_archive_manifest(plan: &ArchivePlan, counters: &LegiArchiveIngestCounters) -> Value {
+fn legi_archive_manifest(
+    plan: &ArchivePlan,
+    counters: &LegiArchiveIngestCounters,
+    run_status: &str,
+) -> Value {
     let latest_archive = plan.deltas.last().unwrap_or(&plan.baseline);
     json!({
         "source": "legi",
         "dataset": "LEGI",
+        "run_status": run_status,
+        "complete": run_status == IngestRunStatus::Completed.as_str(),
         "parser_version": LEGI_PARSER_VERSION,
         "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
         "code_version": CLI_CODE_VERSION,
@@ -696,9 +702,12 @@ fn ingest_legi_archives_payload(
     let run_id = run_id.unwrap_or_else(default_legi_run_id);
     let archive_plan_json =
         serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
-    let initial_manifest = legi_archive_manifest(&plan, &LegiArchiveIngestCounters::default());
-    let initial_manifest_json = serde_json::to_string(&initial_manifest)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let initial_manifest = legi_archive_manifest(
+        &plan,
+        &LegiArchiveIngestCounters::default(),
+        IngestRunStatus::Running.as_str(),
+    );
+    let initial_manifest_json = initial_manifest.to_string();
 
     start_ingest_run(
         &postgres,
@@ -774,12 +783,16 @@ fn ingest_legi_archives_payload(
         }
     }
 
-    let final_manifest = legi_archive_manifest(&plan, &counters);
-    let final_manifest_json = serde_json::to_string(&final_manifest)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let manifest_run_status = if counters.failed_members == 0 && fatal_error.is_none() {
+        IngestRunStatus::Completed
+    } else {
+        IngestRunStatus::Failed
+    };
+    let final_manifest = legi_archive_manifest(&plan, &counters, manifest_run_status.as_str());
+    let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest(&postgres, run_id.as_str(), &final_manifest_json)
     {
-        fatal_error = Some(storage_error_object(error));
+        fatal_error.get_or_insert_with(|| storage_error_object(error));
     }
 
     let run_status = if counters.failed_members == 0 && fatal_error.is_none() {

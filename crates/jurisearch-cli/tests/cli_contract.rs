@@ -744,6 +744,8 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["parsed_metadata_roots"]["TEXTE_VERSION"], 1);
     assert_eq!(json["manifest"]["source"], "legi");
     assert_eq!(json["manifest"]["dataset"], "LEGI");
+    assert_eq!(json["manifest"]["run_status"], "failed");
+    assert_eq!(json["manifest"]["complete"], false);
     assert_eq!(json["manifest"]["source_version"], "20250101-000000");
     assert_eq!(
         json["manifest"]["freshness"]["latest_archive"],
@@ -847,6 +849,11 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ingest_health"]["latest_manifest"]["source"], "legi");
+    assert_eq!(
+        json["ingest_health"]["latest_manifest"]["run_status"],
+        "failed"
+    );
+    assert_eq!(json["ingest_health"]["latest_manifest"]["complete"], false);
     assert_eq!(
         json["ingest_health"]["latest_manifest"]["freshness"]["latest_archive_timestamp"],
         "20250101-000000"
