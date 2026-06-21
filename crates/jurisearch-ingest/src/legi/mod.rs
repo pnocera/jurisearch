@@ -68,6 +68,7 @@ pub struct CanonicalDocument {
     pub source_member_path: Option<String>,
     pub hierarchy_path: Vec<String>,
     pub publisher_edges: Vec<CanonicalGraphEdge>,
+    pub chunks: Vec<CanonicalChunk>,
     pub canonical_version: String,
 }
 
@@ -149,6 +150,22 @@ pub struct CanonicalGraphEdge {
 pub struct GraphEdgeAttribute {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalChunk {
+    pub chunk_id: String,
+    pub document_id: String,
+    pub chunk_index: usize,
+    pub body: String,
+    pub contextualized_body: String,
+    pub chunk_kind: String,
+    pub chunking: String,
+    pub boundary: String,
+    pub source_fields: Vec<String>,
+    pub source_payload_hash: String,
+    pub chunk_builder_version: String,
+    pub hierarchy_path: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -289,9 +306,11 @@ fn parse_article(
                     push_publisher_link(&mut raw, &start, name.as_str())?;
                 }
                 stack.push(name);
+                append_body_block_boundary_for_current_tag(&mut raw, &stack);
                 stack.pop();
             }
             Ok(Event::End(_)) => {
+                append_body_block_boundary_for_current_tag(&mut raw, &stack);
                 if stack
                     .last()
                     .is_some_and(|name| is_publisher_link_tag(name.as_str()))
@@ -364,6 +383,16 @@ fn assign_article_text(raw: &mut RawArticle, stack: &[String], value: &str) {
     }
 }
 
+fn append_body_block_boundary_for_current_tag(raw: &mut RawArticle, stack: &[String]) {
+    if stack
+        .last()
+        .is_some_and(|name| is_body_block_boundary(name.as_str()))
+        && path_contains(stack, &["BLOC_TEXTUEL", "CONTENU"])
+    {
+        append_block_boundary(&mut raw.body);
+    }
+}
+
 impl RawArticle {
     fn into_document(
         self,
@@ -415,6 +444,7 @@ impl RawArticle {
             source_member_path: provenance.member_path,
             hierarchy_path: self.hierarchy_path,
             publisher_edges: Vec::new(),
+            chunks: Vec::new(),
             canonical_version: format!(
                 "legi_article:v1:nature={nature}:etat={}:type={article_type}",
                 etat.as_deref().unwrap_or("absent")
@@ -425,10 +455,44 @@ impl RawArticle {
             .enumerate()
             .map(|(index, link)| link.into_edge(index, &document))
             .collect();
+        document.chunks = build_article_chunks(&document);
         document.validate().map_err(|error| LegiParseError::Xml {
             message: format!("canonical validation failed: {error}"),
         })?;
         Ok(document)
+    }
+}
+
+fn build_article_chunks(document: &CanonicalDocument) -> Vec<CanonicalChunk> {
+    let contextualized_body = article_chunk_context(document)
+        .map(|context| format!("{context}\n\n{}", document.body))
+        .unwrap_or_else(|| document.body.clone());
+
+    vec![CanonicalChunk {
+        chunk_id: format!("chunk:{}:0", document.document_id),
+        document_id: document.document_id.clone(),
+        chunk_index: 0,
+        body: document.body.clone(),
+        contextualized_body,
+        chunk_kind: "article_body".to_owned(),
+        chunking: "structural".to_owned(),
+        boundary: "article".to_owned(),
+        source_fields: vec!["BLOC_TEXTUEL/CONTENU".to_owned()],
+        source_payload_hash: document.source_payload_hash.clone(),
+        chunk_builder_version: "legi_article_structural:v1".to_owned(),
+        hierarchy_path: document.hierarchy_path.clone(),
+    }]
+}
+
+fn article_chunk_context(document: &CanonicalDocument) -> Option<String> {
+    let mut parts = document.hierarchy_path.clone();
+    if let Some(title) = &document.title {
+        parts.push(title.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" > "))
     }
 }
 
@@ -695,6 +759,33 @@ fn append_xml_content(buffer: &mut String, value: &str) {
     }
 }
 
+fn append_block_boundary(buffer: &mut String) {
+    let trimmed_len = buffer.trim_end_matches(' ').len();
+    buffer.truncate(trimmed_len);
+    if !buffer.is_empty() && !buffer.ends_with('\n') {
+        buffer.push('\n');
+    }
+}
+
+fn is_body_block_boundary(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "P"
+            | "br"
+            | "BR"
+            | "li"
+            | "LI"
+            | "div"
+            | "DIV"
+            | "blockquote"
+            | "BLOCKQUOTE"
+            | "tr"
+            | "TR"
+            | "table"
+            | "TABLE"
+    )
+}
+
 fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, LegiParseError> {
     match reference
         .decode()
@@ -799,6 +890,24 @@ mod tests {
                 "Titre IV : Des engagements qui se forment sans convention".to_owned(),
             ]
         );
+        assert_eq!(document.chunks.len(), 1);
+        let chunk = &document.chunks[0];
+        assert_eq!(
+            chunk.chunk_id,
+            "chunk:legi:LEGIARTI000006419320@1804-02-21:0"
+        );
+        assert_eq!(chunk.document_id, document.document_id);
+        assert_eq!(chunk.chunk_index, 0);
+        assert_eq!(chunk.body, document.body);
+        assert!(chunk.contextualized_body.starts_with("Code civil >"));
+        assert!(chunk.contextualized_body.contains("Article 1240\n\n"));
+        assert_eq!(chunk.chunk_kind, "article_body");
+        assert_eq!(chunk.chunking, "structural");
+        assert_eq!(chunk.boundary, "article");
+        assert_eq!(chunk.source_fields, vec!["BLOC_TEXTUEL/CONTENU"]);
+        assert_eq!(chunk.source_payload_hash, document.source_payload_hash);
+        assert_eq!(chunk.chunk_builder_version, "legi_article_structural:v1");
+        assert_eq!(chunk.hierarchy_path, document.hierarchy_path);
         assert_eq!(document.publisher_edges.len(), 1);
         let edge = &document.publisher_edges[0];
         assert_eq!(edge.from_document_id, document.document_id);
@@ -844,6 +953,24 @@ mod tests {
         assert_eq!(document.body, "Droit & obligations <ref> café inline suite");
         assert!(!document.body.contains("Droit  obligations"));
         assert!(!document.body.contains("inline\nsuite"));
+    }
+
+    #[test]
+    fn preserves_body_block_boundaries_for_structural_chunks() {
+        let xml = article_fixture().replace(
+            "<p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>",
+            "<p>Premier alinea.</p><p>Second alinea avec <i>inline</i>.</p><br/><p>Troisieme alinea.</p>",
+        );
+        let document = parse_article_fixture(&xml).unwrap();
+
+        assert_eq!(
+            document.body,
+            "Premier alinea.\nSecond alinea avec inline.\nTroisieme alinea."
+        );
+        assert_eq!(document.chunks.len(), 1);
+        assert_eq!(document.chunks[0].body, document.body);
+        assert_eq!(document.chunks[0].chunking, "structural");
+        assert_eq!(document.chunks[0].boundary, "article");
     }
 
     #[test]

@@ -63,6 +63,10 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
                     document.validate().unwrap_or_else(|error| {
                         panic!("{member_path} produced an invalid canonical document: {error}")
                     });
+                    assert_eq!(document.chunks.len(), 1);
+                    assert_eq!(document.chunks[0].body, document.body);
+                    assert_eq!(document.chunks[0].chunking, "structural");
+                    assert_eq!(document.chunks[0].boundary, "article");
                     publisher_edges += document.publisher_edges.len();
                     for edge in &document.publisher_edges {
                         assert_eq!(edge.from_document_id, document.document_id);
