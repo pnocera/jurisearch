@@ -10,9 +10,9 @@ set -euo pipefail
 # The cluster is disposable and is removed after the smoke completes.
 
 PG_MAJOR="${PG_MAJOR:-18}"
-PG_CONFIG="${PG_CONFIG:-$HOME/.pgrx/18.4/pgrx-install/bin/pg_config}"
+PG_CONFIG="${PG_CONFIG:-}"
 
-if [[ ! -x "$PG_CONFIG" ]]; then
+if [[ -z "$PG_CONFIG" || ! -x "$PG_CONFIG" ]]; then
   PG_CONFIG="$(find "$HOME/.pgrx" -path "*/bin/pg_config" -type f 2>/dev/null \
     | grep -E "/(${PG_MAJOR}|${PG_MAJOR}[.][0-9]+)/" \
     | sort -V \

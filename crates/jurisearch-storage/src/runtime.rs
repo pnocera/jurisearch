@@ -5,11 +5,10 @@ use std::{
     process::Command,
 };
 
-use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgConfig {
     pub path: PathBuf,
     pub version: String,
@@ -26,9 +25,7 @@ impl PgConfig {
         if let Ok(path) = std::env::var("PG_CONFIG") {
             return Self::from_path(path);
         }
-        let home = std::env::var("HOME").map_err(|_| StorageError::MissingHome)?;
-        let default = PathBuf::from(home).join(".pgrx/18.4/pgrx-install/bin/pg_config");
-        Self::from_path(default)
+        Self::from_path(discover_pgrx_pg_config()?)
     }
 
     pub fn from_path(path: impl Into<PathBuf>) -> Result<Self, StorageError> {
@@ -219,6 +216,46 @@ fn command_stdout<const N: usize>(
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+fn discover_pgrx_pg_config() -> Result<PathBuf, StorageError> {
+    let home = std::env::var("HOME").map_err(|_| StorageError::MissingHome)?;
+    let pgrx_dir = PathBuf::from(home).join(".pgrx");
+    let missing_path = pgrx_dir.join("*/pgrx-install/bin/pg_config");
+    let entries = match fs::read_dir(&pgrx_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(StorageError::MissingPgConfig { path: missing_path });
+        }
+        Err(error) => return Err(StorageError::Io(error)),
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(StorageError::Io)?;
+        let version = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path().join("pgrx-install/bin/pg_config");
+        if path.is_file() {
+            candidates.push((version_key(&version), path));
+        }
+    }
+
+    candidates.sort_by(|(left_version, left_path), (right_version, right_path)| {
+        left_version
+            .cmp(right_version)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    candidates
+        .pop()
+        .map(|(_, path)| path)
+        .ok_or(StorageError::MissingPgConfig { path: missing_path })
+}
+
+fn version_key(version: &str) -> Vec<u32> {
+    version
+        .split(['.', '-'])
+        .map(|part| part.parse::<u32>().unwrap_or_default())
+        .collect()
+}
+
 fn run_checked(command: PathBuf, args: Vec<String>) -> Result<(), StorageError> {
     let output = Command::new(&command)
         .args(args)
@@ -278,4 +315,15 @@ pub enum StorageError {
     Psql { status: Option<i32>, stderr: String },
     #[error(transparent)]
     Io(io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_key;
+
+    #[test]
+    fn pgrx_version_key_keeps_numeric_minor_order() {
+        assert!(version_key("18.10") > version_key("18.4"));
+        assert!(version_key("19") > version_key("18.10"));
+    }
 }

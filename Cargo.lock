@@ -293,7 +293,6 @@ dependencies = [
 name = "jurisearch-storage"
 version = "0.1.0"
 dependencies = [
- "serde",
  "tempfile",
  "thiserror",
 ]
