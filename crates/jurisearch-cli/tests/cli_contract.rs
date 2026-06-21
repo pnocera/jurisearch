@@ -514,6 +514,98 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["skipped_members"], 1);
     assert_eq!(json["skipped_compatible_members"], 1);
 
+    write_tar_gz(
+        archive_path.as_path(),
+        &[("legi/articles/BROKEN.xml", b"<ARTICLE><META/></ARTICLE>")],
+    )?;
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-cli-retry", "--limit-members", "1"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "failed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["failed_members"], 1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config.clone(), index.path())?;
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT status FROM ingest_member \
+             WHERE run_id = 'run-cli-retry' AND member_path = 'legi/articles/BROKEN.xml';",
+        )?,
+        "failed"
+    );
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT error_code FROM ingest_error WHERE run_id = 'run-cli-retry';")?,
+        "validation_missing_required_field"
+    );
+    drop(postgres);
+
+    let mutated_article =
+        article_fixture().replace("Tout fait quelconque", "Tout autre fait quelconque");
+    write_tar_gz(
+        archive_path.as_path(),
+        &[(
+            "legi/articles/LEGIARTI000006419320.xml",
+            mutated_article.as_bytes(),
+        )],
+    )?;
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args([
+            "--run-id",
+            "run-cli-incompatible",
+            "--limit-members",
+            "1",
+            "--quarantine-dir",
+        ])
+        .arg(quarantine.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "failed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["failed_members"], 1);
+    assert_eq!(json["quarantined_payloads"], 1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config, index.path())?;
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT status FROM ingest_member \
+             WHERE run_id = 'run-cli-incompatible' \
+               AND member_path = 'legi/articles/LEGIARTI000006419320.xml';",
+        )?,
+        "failed"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT error_class || ':' || error_code \
+             FROM ingest_error \
+             WHERE run_id = 'run-cli-incompatible';",
+        )?,
+        "validation_error:compatibility_mismatch"
+    );
+
     Ok(())
 }
 

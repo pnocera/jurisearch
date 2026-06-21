@@ -627,7 +627,7 @@ fn ingest_legi_archives_payload(
     safe_mode: bool,
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_configured_index_dir(index_dir)?;
-    let postgres = open_or_create_index(index_dir.as_path())?;
+    let postgres = open_index(index_dir.as_path())?;
     let plan = plan_from_dir(ArchiveSource::Legi, archives_dir).map_err(|error| {
         ErrorObject::bad_input(format!("failed to plan LEGI archives: {error}"))
     })?;
@@ -1146,11 +1146,6 @@ fn configured_index_dir(index_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
-    let pg_config = PgConfig::discover().map_err(storage_error_object)?;
-    ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
-}
-
-fn open_or_create_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
     let pg_config = PgConfig::discover().map_err(storage_error_object)?;
     ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
 }
