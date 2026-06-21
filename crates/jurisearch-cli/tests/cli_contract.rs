@@ -990,6 +990,92 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
 }
 
 #[test]
+fn ingest_legi_archives_skips_no_text_articles_without_failing_run()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI LEGI no-text article skip")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-no-text.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-no-text-archives.")
+        .tempdir()?;
+    let quarantine = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-no-text-quarantine.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_legi_global_20250101-000000.tar.gz");
+    let no_text_article = article_fixture_without_body();
+    write_tar_gz(
+        archive_path.as_path(),
+        &[(
+            "legi/articles/LEGIARTI000006419320.xml",
+            no_text_article.as_bytes(),
+        )],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-no-text", "--quarantine-dir"])
+        .arg(quarantine.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "ingest legi-archives");
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["inserted_documents"], 0);
+    assert_eq!(json["skipped_members"], 1);
+    assert_eq!(json["skipped_no_text_articles"], 1);
+    assert_eq!(json["failed_members"], 0);
+    assert_eq!(json["quarantined_payloads"], 0);
+    assert_eq!(json["manifest"]["coverage"]["skipped_no_text_articles"], 1);
+    assert!(
+        json["parsed_metadata_roots"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(json["unsupported_roots"].as_object().unwrap().is_empty());
+    assert!(!quarantine.path().join("run-no-text").exists());
+
+    let postgres = ManagedPostgres::start_durable(pg_config, index.path())?;
+    assert_eq!(
+        postgres.execute_sql("SELECT count(*)::text FROM documents;")?,
+        "0"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT status || ':' || coalesce(source_entity, 'none') \
+             FROM ingest_member \
+             WHERE run_id = 'run-no-text';",
+        )?,
+        "skipped:LEGIARTI000006419320"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM ingest_error \
+             WHERE run_id = 'run-no-text';",
+        )?,
+        "0"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI LEGI hierarchy backfill")? else {
         return Ok(());
@@ -1566,6 +1652,18 @@ fn article_fixture() -> String {
 </ARTICLE>
 "#
     .to_owned()
+}
+
+fn article_fixture_without_body() -> String {
+    article_fixture().replace(
+        r#"  <BLOC_TEXTUEL>
+    <CONTENU>
+      <p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>
+    </CONTENU>
+  </BLOC_TEXTUEL>
+"#,
+        "",
+    )
 }
 
 fn pgvector_literal(values: &[f32]) -> String {

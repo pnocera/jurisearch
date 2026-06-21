@@ -633,6 +633,7 @@ struct LegiArchiveIngestCounters {
     hierarchy_backfill_invalidated_embeddings: usize,
     skipped_members: usize,
     skipped_compatible_members: usize,
+    skipped_no_text_articles: usize,
     failed_members: usize,
     quarantined_payloads: usize,
     parsed_metadata_roots: BTreeMap<String, usize>,
@@ -681,6 +682,7 @@ fn legi_archive_manifest(
             "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
             "skipped_members": counters.skipped_members,
             "skipped_compatible_members": counters.skipped_compatible_members,
+            "skipped_no_text_articles": counters.skipped_no_text_articles,
             "failed_members": counters.failed_members,
             "quarantined_payloads": counters.quarantined_payloads,
             "parsed_metadata_roots": &counters.parsed_metadata_roots,
@@ -864,6 +866,7 @@ fn ingest_legi_archives_payload(
         "hierarchy_backfill_invalidated_embeddings": counters.hierarchy_backfill_invalidated_embeddings,
         "skipped_members": counters.skipped_members,
         "skipped_compatible_members": counters.skipped_compatible_members,
+        "skipped_no_text_articles": counters.skipped_no_text_articles,
         "failed_members": counters.failed_members,
         "quarantined_payloads": counters.quarantined_payloads,
         "parsed_metadata_roots": counters.parsed_metadata_roots,
@@ -1040,6 +1043,25 @@ fn process_legi_archive_member(
             counters.skipped_members += 1;
         }
         Err(error) => {
+            if is_no_text_article_error(&error) {
+                record_legi_member(
+                    postgres,
+                    run_id,
+                    LegiMemberRecordInput {
+                        archive_name,
+                        member_path: member.member_path.as_str(),
+                        source_entity: legi_article_id_from_member_path(
+                            member.member_path.as_str(),
+                        ),
+                        date_anchor: None,
+                        status: IngestMemberStatus::Skipped,
+                        compatibility,
+                    },
+                )?;
+                counters.skipped_members += 1;
+                counters.skipped_no_text_articles += 1;
+                return Ok(());
+            }
             let (error_class, error_code) = legi_parse_error_class(&error);
             let message = error.to_string();
             let record = record_legi_member(
@@ -1225,6 +1247,26 @@ fn legi_parse_error_class(error: &LegiParseError) -> (&'static str, &'static str
         }
         LegiParseError::InvalidDate { .. } => ("validation_error", "validation_invalid_date"),
         LegiParseError::InvalidId { .. } => ("validation_error", "validation_invalid_id"),
+    }
+}
+
+fn is_no_text_article_error(error: &LegiParseError) -> bool {
+    matches!(
+        error,
+        LegiParseError::MissingRequiredField { entity, field }
+            if *entity == "article" && *field == "BLOC_TEXTUEL/CONTENU"
+    )
+}
+
+fn legi_article_id_from_member_path(member_path: &str) -> Option<&str> {
+    let start = member_path.find("LEGIARTI")?;
+    let end = start + "LEGIARTI".len() + 12;
+    let candidate = member_path.get(start..end)?;
+    let suffix = candidate.strip_prefix("LEGIARTI")?;
+    if suffix.len() == 12 && suffix.chars().all(|character| character.is_ascii_digit()) {
+        Some(candidate)
+    } else {
+        None
     }
 }
 
