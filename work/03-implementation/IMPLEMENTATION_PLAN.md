@@ -649,7 +649,7 @@ Tasks:
 
 - Implement request/response envelope with echoed `id`.
 - Preserve input order.
-- Keep stdout JSONL-only and diagnostics on stderr.
+- Keep the active JSONL stream stdout-only with structured per-request errors in-stream; reserve stderr for non-stream diagnostics.
 - Support `help` and `help schema` inside session.
 - Implement non-fatal malformed-line errors.
 - Implement explicit `exit` acknowledgement.
@@ -660,6 +660,12 @@ Acceptance:
 - Sequential multi-call agent loop runs without process restart.
 - Malformed input does not kill the session unless fatal mode is explicit.
 - Session and one-shot payloads share schemas.
+
+Current status (2026-06-21):
+
+- Done: `session --jsonl` and `batch --jsonl` share the request/response envelope with echoed `id`, preserve input order, keep the active stdout stream JSONL-only, emit per-request errors as structured JSONL objects, support `help`/`help schema`, and acknowledge `exit`. Stderr remains empty in contract tests for normal and error JSONL responses.
+- Done: malformed JSONL lines are non-fatal by default and produce per-line `bad_input` responses; `--fatal` stops only after malformed JSON, not after well-formed command-level error responses. `batch --jsonl` is finite over stdin EOF, and both `session` and `batch` reject missing `--jsonl` with exit code `2`.
+- Done: CLI contract tests cover warm session ordering/help/exit, curated expansion in session mode, finite batch EOF behavior, non-fatal malformed lines, fatal malformed-line stopping, and required `--jsonl`.
 
 ### 1.6 Model Cache and Configuration
 

@@ -2651,6 +2651,105 @@ fn session_jsonl_preserves_order_handles_bad_json_and_exit() {
 }
 
 #[test]
+fn batch_jsonl_is_finite_ordered_and_honors_fatal_malformed_input() {
+    let input = concat!(
+        "{\"id\":\"one\",\"command\":\"expand\",\"args\":{\"query\":\"faute dommage\"}}\n",
+        "not-json\n",
+        "{\"id\":\"two\",\"command\":\"help schema\"}\n",
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["batch", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0]["id"], "one");
+    assert_eq!(values[0]["ok"], true);
+    assert_eq!(values[1]["ok"], false);
+    assert_eq!(values[1]["error"]["code"], "bad_input");
+    assert_eq!(values[2]["id"], "two");
+    assert_eq!(values[2]["ok"], true);
+    assert_eq!(values[2]["result"]["schema_version"], "1");
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["batch", "--jsonl", "--fatal"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["id"], "one");
+    assert_eq!(values[0]["ok"], true);
+    assert_eq!(values[1]["ok"], false);
+    assert_eq!(values[1]["error"]["code"], "bad_input");
+
+    let input = concat!(
+        "{\"id\":\"one\",\"command\":\"expand\",\"args\":{\"query\":\"faute dommage\"}}\n",
+        "{\"id\":\"bad-command\",\"command\":\"unknown\"}\n",
+        "{\"id\":\"two\",\"command\":\"help schema\"}\n",
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["batch", "--jsonl", "--fatal"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0]["ok"], true);
+    assert_eq!(values[1]["id"], "bad-command");
+    assert_eq!(values[1]["ok"], false);
+    assert_eq!(values[1]["error"]["code"], "bad_input");
+    assert_eq!(values[2]["id"], "two");
+    assert_eq!(values[2]["ok"], true);
+
+    for command in ["batch", "session"] {
+        let output = Command::cargo_bin("jurisearch")
+            .unwrap()
+            .args([command])
+            .write_stdin(input)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::is_empty())
+            .get_output()
+            .stdout
+            .clone();
+        assert_json_error_contains(&output, "bad_input", "explicit `--jsonl` flag");
+    }
+}
+
+#[test]
 fn session_jsonl_expand_returns_curated_terms() {
     let input = concat!(
         "{\"id\":\"expand-one\",\"command\":\"expand\",\"args\":{\"query\":\"prescription action\"}}\n",

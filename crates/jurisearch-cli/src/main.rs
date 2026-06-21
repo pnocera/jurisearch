@@ -399,8 +399,7 @@ fn run() -> anyhow::Result<()> {
     match command {
         Command::Help(help) => emit_help(help),
         Command::Status => write_json(&status_payload(index_dir.as_deref())),
-        Command::Session(args) => run_jsonl(args, true),
-        Command::Batch(args) => run_jsonl(args, false),
+        Command::Session(args) | Command::Batch(args) => run_jsonl(args),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
         Command::Search(args) => {
             if args.query.trim().is_empty() {
@@ -1825,7 +1824,7 @@ fn embedding_config_from_env() -> EmbeddingConfig {
     embedding_config
 }
 
-fn run_jsonl(args: JsonlArgs, _warm: bool) -> anyhow::Result<()> {
+fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
     if !args.jsonl {
         return emit_error(ErrorObject::bad_input(
             "session and batch require the explicit `--jsonl` flag",
