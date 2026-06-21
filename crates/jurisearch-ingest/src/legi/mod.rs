@@ -1545,9 +1545,11 @@ mod tests {
     fn preserves_article_status_and_temporal_variants() {
         let cases = [
             ("VIGUEUR", "2999-01-01", None),
+            ("VIGUEUR", "2999-12-31", None),
             ("MODIFIE", "2016-10-01", Some("2016-10-01")),
             ("ABROGE", "2010-05-15", Some("2010-05-15")),
-            ("ABROGE_DIFF", "2999-12-31", None),
+            ("ABROGE_DIFF", "2027-01-01", Some("2027-01-01")),
+            ("TRANSFERE", "2012-01-01", Some("2012-01-01")),
         ];
 
         for (status, date_fin, expected_valid_to) in cases {
@@ -1560,6 +1562,8 @@ mod tests {
             let document = parse_article_fixture(&xml).unwrap();
 
             assert_eq!(document.source_status.as_deref(), Some(status));
+            assert_eq!(document.document_id, "legi:LEGIARTI000006419320@1804-02-21");
+            assert_eq!(document.valid_from, "1804-02-21");
             assert_eq!(document.valid_to.as_deref(), expected_valid_to);
             assert_eq!(document.valid_to_raw.as_deref(), Some(date_fin));
             assert_eq!(
