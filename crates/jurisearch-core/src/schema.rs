@@ -81,6 +81,7 @@ pub fn compiled_schema() -> Value {
                     "query": { "type": "string" },
                     "kind": { "enum": ["code", "decision", "all"], "default": "all" },
                     "mode": { "enum": ["hybrid", "bm25", "dense"], "default": "hybrid" },
+                    "format": { "enum": ["concise", "detailed"], "default": "concise" },
                     "top_k": { "type": "integer", "minimum": 1, "default": 10 },
                     "as_of": { "type": "string", "format": "date" }
                 }
@@ -89,6 +90,7 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "query": { "type": "string" },
                     "retrieval_mode": { "enum": ["hybrid", "bm25", "dense"] },
+                    "format": { "enum": ["concise", "detailed"] },
                     "expansion_seed_version": { "type": "string" },
                     "expanded_terms": {
                         "type": "array",
@@ -121,6 +123,25 @@ pub fn compiled_schema() -> Value {
                             "next_cursor": { "type": ["string", "null"] },
                             "cursor_note": { "type": "string" },
                             "guidance": { "type": ["string", "null"] }
+                        }
+                    },
+                    "diagnostics": {
+                        "type": "object",
+                        "properties": {
+                            "query_input": { "type": "string" },
+                            "lexical_query_text": { "type": ["string", "null"] },
+                            "retrieval": {
+                                "type": "object",
+                                "properties": {
+                                    "mode": { "enum": ["hybrid", "bm25", "dense"] },
+                                    "uses_lexical": { "type": "boolean" },
+                                    "uses_dense": { "type": "boolean" },
+                                    "lexical_limit": { "type": "integer" },
+                                    "dense_limit": { "type": "integer" },
+                                    "embedding_fingerprint": { "type": ["string", "null"] },
+                                    "kind_filter": { "type": ["string", "null"] }
+                                }
+                            }
                         }
                     },
                     "candidates": {

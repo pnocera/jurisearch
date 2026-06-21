@@ -613,8 +613,9 @@ Current status (2026-06-21):
 - Done: `jurisearch expand` is implemented for one-shot CLI and JSONL session mode over a deterministic `legal-vocabulary-seed:v1` lexicon. Each emitted `expanded_terms` entry carries `source_seed_id`, source citation, review status, reviewer placeholder, and rationale; `help schema --json` now exposes `ExpandRequest`/`ExpandResponse`, and CLI contract tests cover one-shot and session expansion without requiring an index.
 - Done: `search` responses now log the same curated expansions as `expanded_terms` plus `expansion_seed_version`, without feeding those terms into ranking yet. This gives W2/W5 an auditable expansion trail for ranking experiments while preserving current BM25/dense behavior.
 - Done: `search` responses include explicit pagination/truncation guidance metadata: requested `top_k`, returned candidate count, `possibly_truncated`, `cursor_supported: false`, `next_cursor: null`, a reserved-cursor note, and guidance to increase `top_k` while cursor pagination remains unimplemented.
+- Done: `jurisearch search --format concise|detailed` and session JSON `format` now default to `concise`. Concise preserves the current candidate payload plus standard metadata; detailed adds query/retrieval diagnostics (`query_input`, lexical query text, mode, dense/lexical use, pool limits, embedding fingerprint, and kind filter) without changing ranking.
 - Follow-up for W5/W2 ranking evidence: include the French analyzer change in the planned before/after BM25 ranking check, and run a legal-vocabulary pass over the French stopword behavior before treating the analyzer as quality-neutral at scale.
-- Remaining: feed `expanded_terms` into explicit ranking experiments, hybrid+authority ablation reporting once the authority prior exists, legal term/field boosters, authority prior, cursor pagination, and `--format concise|detailed`.
+- Remaining: feed `expanded_terms` into explicit ranking experiments, hybrid+authority ablation reporting once the authority prior exists, legal term/field boosters, authority prior, and cursor pagination.
 
 ### 1.4 Citation Verification for Statutes
 

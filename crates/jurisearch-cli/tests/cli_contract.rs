@@ -60,6 +60,19 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "hybrid"
     );
     assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["format"]["default"],
+        "concise"
+    );
+    assert_eq!(
+        json["schemas"]["SearchResponse"]["properties"]["format"]["enum"][1],
+        "detailed"
+    );
+    assert_eq!(
+        json["schemas"]["SearchResponse"]["properties"]["diagnostics"]["properties"]["retrieval"]["properties"]
+            ["lexical_limit"]["type"],
+        "integer"
+    );
+    assert_eq!(
         json["schemas"]["SearchResponse"]["properties"]["expanded_terms"]["type"],
         "array"
     );
@@ -549,6 +562,8 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["format"], "concise");
+    assert!(json["diagnostics"].is_null());
     assert_eq!(json["retrieval_mode"], "bm25");
     assert_eq!(
         json["candidates"][0]["document_id"],
@@ -591,6 +606,8 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
             "bm25",
             "--top-k",
             "10",
+            "--format",
+            "detailed",
         ])
         .assert()
         .success()
@@ -599,10 +616,60 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["format"], "detailed");
     assert_eq!(json["pagination"]["requested_top_k"], 10);
     assert_eq!(json["pagination"]["returned"], 1);
     assert_eq!(json["pagination"]["possibly_truncated"], false);
     assert!(json["pagination"]["guidance"].is_null());
+    assert_eq!(json["diagnostics"]["query_input"], "responsabilite civile");
+    assert_eq!(
+        json["diagnostics"]["lexical_query_text"],
+        "responsabilite civile"
+    );
+    assert_eq!(json["diagnostics"]["retrieval"]["mode"], "bm25");
+    assert_eq!(json["diagnostics"]["retrieval"]["uses_dense"], false);
+    assert_eq!(json["diagnostics"]["retrieval"]["lexical_limit"], 40);
+    assert!(json["diagnostics"]["retrieval"]["embedding_fingerprint"].is_null());
+
+    let input = format!(
+        "{}\n{}\n",
+        serde_json::json!({
+            "id": "search-format",
+            "command": "search",
+            "args": {
+                "query": "responsabilite civile",
+                "mode": "bm25",
+                "format": "detailed",
+                "top_k": 1,
+                "index_dir": root.path().to_string_lossy()
+            }
+        }),
+        serde_json::json!({"id": "done", "command": "exit"})
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["id"], "search-format");
+    assert_eq!(values[0]["ok"], true);
+    assert_eq!(values[0]["result"]["format"], "detailed");
+    assert_eq!(
+        values[0]["result"]["diagnostics"]["retrieval"]["mode"],
+        "bm25"
+    );
+    assert_eq!(values[1]["result"]["bye"], true);
     Ok(())
 }
 

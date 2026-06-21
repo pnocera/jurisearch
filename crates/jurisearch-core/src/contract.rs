@@ -9,6 +9,15 @@ pub enum OutputFormat {
     Detailed,
 }
 
+impl OutputFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Concise => "concise",
+            Self::Detailed => "detailed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LegalKind {

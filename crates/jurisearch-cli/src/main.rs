@@ -11,7 +11,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use jurisearch_core::{
     SCHEMA_VERSION,
-    contract::{LegalKind, agent_help},
+    contract::{LegalKind, OutputFormat, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
     expand::expand_query,
     schema::compiled_schema,
@@ -107,6 +107,8 @@ struct SearchArgs {
     kind: CliKind,
     #[arg(long, default_value = "hybrid")]
     mode: CliSearchMode,
+    #[arg(long, default_value = "concise")]
+    format: CliOutputFormat,
     #[arg(long, default_value_t = 10)]
     top_k: u32,
     #[arg(long)]
@@ -129,6 +131,8 @@ struct SessionSearchArgs {
     kind: CliKind,
     #[serde(default = "default_search_mode")]
     mode: CliSearchMode,
+    #[serde(default = "default_output_format")]
+    format: CliOutputFormat,
     #[serde(default = "default_top_k")]
     top_k: u32,
     #[serde(default)]
@@ -320,6 +324,22 @@ impl From<CliSearchMode> for RetrievalMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum CliOutputFormat {
+    Concise,
+    Detailed,
+}
+
+impl From<CliOutputFormat> for OutputFormat {
+    fn from(format: CliOutputFormat) -> Self {
+        match format {
+            CliOutputFormat::Concise => Self::Concise,
+            CliOutputFormat::Detailed => Self::Detailed,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliArchiveSource {
     Legi,
@@ -435,6 +455,7 @@ fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()>
 
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let retrieval_mode: RetrievalMode = args.mode.into();
+    let output_format: OutputFormat = args.format.into();
     let normalized_query_text = parade_query_text(&args.query);
     let query_text = if retrieval_mode.uses_lexical() {
         normalized_query_text.ok_or_else(|| {
@@ -479,6 +500,13 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
         (None, None)
     };
     let as_of = args.as_of.unwrap_or_else(today_utc);
+    let kind_filter = if matches!(kind, LegalKind::Code) {
+        Some("article")
+    } else {
+        None
+    };
+    let lexical_limit = args.top_k.saturating_mul(4);
+    let dense_limit = args.top_k.saturating_mul(4);
     let response = hybrid_candidates_json(
         &postgres,
         &HybridCandidateQuery {
@@ -487,13 +515,9 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
             embedding_fingerprint: embedding_fingerprint.as_deref(),
             retrieval_mode,
             as_of: as_of.as_str(),
-            kind_filter: if matches!(kind, LegalKind::Code) {
-                Some("article")
-            } else {
-                None
-            },
-            lexical_limit: args.top_k.saturating_mul(4),
-            dense_limit: args.top_k.saturating_mul(4),
+            kind_filter,
+            lexical_limit,
+            dense_limit,
             limit: args.top_k,
         },
     )
@@ -501,6 +525,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     let mut response: Value = serde_json::from_str(&response)
         .map_err(|error| dependency_unavailable(error.to_string()))?;
     let expansion = expand_query(&args.query);
+    response["format"] = json!(output_format.as_str());
     response["expansion_seed_version"] = json!(expansion.seed_version);
     response["expanded_terms"] = json!(expansion.expanded_terms);
     let returned = response["candidates"].as_array().map_or(0, Vec::len);
@@ -518,6 +543,25 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
             None
         }
     });
+    if matches!(output_format, OutputFormat::Detailed) {
+        response["diagnostics"] = json!({
+            "query_input": args.query,
+            "lexical_query_text": if retrieval_mode.uses_lexical() {
+                Some(query_text.as_str())
+            } else {
+                None
+            },
+            "retrieval": {
+                "mode": retrieval_mode.as_str(),
+                "uses_lexical": retrieval_mode.uses_lexical(),
+                "uses_dense": retrieval_mode.uses_dense(),
+                "lexical_limit": lexical_limit,
+                "dense_limit": dense_limit,
+                "embedding_fingerprint": embedding_fingerprint.as_deref(),
+                "kind_filter": kind_filter,
+            }
+        });
+    }
     if response["candidates"]
         .as_array()
         .is_some_and(|candidates| candidates.is_empty())
@@ -623,6 +667,7 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
             query: args.query,
             kind: args.kind,
             mode: args.mode,
+            format: args.format,
             top_k: args.top_k,
             as_of: args.as_of,
         },
@@ -2109,6 +2154,10 @@ fn default_cli_kind() -> CliKind {
 
 fn default_search_mode() -> CliSearchMode {
     CliSearchMode::Hybrid
+}
+
+fn default_output_format() -> CliOutputFormat {
+    CliOutputFormat::Concise
 }
 
 fn default_top_k() -> u32 {
