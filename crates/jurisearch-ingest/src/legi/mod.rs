@@ -942,13 +942,17 @@ impl RawTextVersion {
         let source_payload_hash = provenance
             .payload_hash
             .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
+        let canonical_version = format!(
+            "legi_text_version:v1:nature={}",
+            nature.as_deref().unwrap_or("absent")
+        );
 
         Ok(ParsedTextVersion {
             text_id: id,
             title,
             title_full: optional_non_empty(self.title_full),
             status,
-            nature: nature.clone(),
+            nature,
             valid_from,
             valid_to,
             valid_to_raw: Some(valid_to_raw),
@@ -956,10 +960,7 @@ impl RawTextVersion {
             source_payload_hash,
             source_archive: provenance.archive_name,
             source_member_path: provenance.member_path,
-            canonical_version: format!(
-                "legi_text_version:v1:nature={}",
-                nature.as_deref().unwrap_or("absent")
-            ),
+            canonical_version,
         })
     }
 }

@@ -646,6 +646,26 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
   </CONTEXTE>
 </SECTION_TA>"#,
             ),
+            (
+                "legi/textes/LEGITEXT000049371154.xml",
+                br#"<TEXTE_VERSION>
+  <META>
+    <META_COMMUN>
+      <ID>LEGITEXT000049371154</ID>
+      <URL>/id/LEGITEXT000049371154</URL>
+      <NATURE/>
+    </META_COMMUN>
+    <META_SPEC>
+      <META_TEXTE_VERSION>
+        <TITRE>Arrete du 12 avril 1956</TITRE>
+        <ETAT>VIGUEUR</ETAT>
+        <DATE_DEBUT>1956-04-12</DATE_DEBUT>
+        <DATE_FIN>2999-01-01</DATE_FIN>
+      </META_TEXTE_VERSION>
+    </META_SPEC>
+  </META>
+</TEXTE_VERSION>"#,
+            ),
             ("legi/articles/BROKEN.xml", b"<ARTICLE><META/></ARTICLE>"),
         ],
     )?;
@@ -660,7 +680,7 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
             "--run-id",
             "run-cli",
             "--limit-members",
-            "3",
+            "4",
             "--quarantine-dir",
         ])
         .arg(quarantine.path())
@@ -677,13 +697,14 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["run_id"], "run-cli");
     assert_eq!(json["run_status"], "failed");
     assert_eq!(json["safe_mode"], true);
-    assert_eq!(json["visited_members"], 3);
+    assert_eq!(json["visited_members"], 4);
     assert_eq!(json["inserted_documents"], 1);
-    assert_eq!(json["parsed_metadata_members"], 1);
-    assert_eq!(json["skipped_members"], 1);
+    assert_eq!(json["parsed_metadata_members"], 2);
+    assert_eq!(json["skipped_members"], 2);
     assert_eq!(json["failed_members"], 1);
     assert_eq!(json["quarantined_payloads"], 1);
     assert_eq!(json["parsed_metadata_roots"]["SECTION_TA"], 1);
+    assert_eq!(json["parsed_metadata_roots"]["TEXTE_VERSION"], 1);
     assert!(json["unsupported_roots"].as_object().unwrap().is_empty());
 
     let quarantine_entries =
@@ -700,7 +721,7 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
             "SELECT string_agg(status || ':' || member_count::text, ',' ORDER BY status) \
              FROM (SELECT status, count(*) AS member_count FROM ingest_member GROUP BY status) s;",
         )?,
-        "failed:1,inserted:1,skipped:1"
+        "failed:1,inserted:1,skipped:2"
     );
     assert_eq!(
         postgres.execute_sql(
@@ -708,6 +729,13 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
              WHERE member_path = 'legi/sections/SECTION.xml';",
         )?,
         "LEGISCTA000006089696"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT source_entity FROM ingest_member \
+             WHERE member_path = 'legi/textes/LEGITEXT000049371154.xml';",
+        )?,
+        "LEGITEXT000049371154"
     );
     assert_eq!(
         postgres.execute_sql(
