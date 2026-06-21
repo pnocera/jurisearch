@@ -31,9 +31,10 @@ use jurisearch_storage::{
     },
     ingest_accounting::{
         IngestCompatibility, IngestErrorInput, IngestHealthReport, IngestMemberInput,
-        IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus, finish_ingest_run,
-        ingest_resume_decision, load_ingest_health, record_ingest_error, record_ingest_member,
-        start_ingest_run, update_ingest_member_status,
+        IngestMemberStatus, IngestReadinessReport, IngestResumeAction, IngestRunInput,
+        IngestRunStatus, finish_ingest_run, ingest_resume_decision, load_ingest_health,
+        load_ingest_readiness, record_ingest_error, record_ingest_member, start_ingest_run,
+        update_ingest_member_status,
     },
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_legi_documents},
     retrieval::{
@@ -1408,7 +1409,7 @@ fn ensure_query_readiness(
     postgres: &ManagedPostgres,
     gate: QueryReadinessGate,
 ) -> Result<(), ErrorObject> {
-    let report = load_ingest_health(postgres).map_err(storage_error_object)?;
+    let report = load_ingest_readiness(postgres).map_err(storage_error_object)?;
     let projection_ready = coverage_complete(
         report.projection_coverage.covered,
         report.projection_coverage.total,
@@ -1439,7 +1440,7 @@ fn ensure_query_readiness(
 fn index_not_query_ready(
     gate: QueryReadinessGate,
     reason: &str,
-    report: &IngestHealthReport,
+    report: &IngestReadinessReport,
 ) -> ErrorObject {
     ErrorObject {
         code: ErrorCode::IndexUnavailable,

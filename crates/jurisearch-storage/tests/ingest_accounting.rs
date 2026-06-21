@@ -5,8 +5,8 @@ use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestErrorInput, IngestMemberInput, IngestMemberStatus,
         IngestResumeAction, IngestRunInput, IngestRunStatus, finish_ingest_run,
-        ingest_resume_decision, load_ingest_health, record_ingest_error, record_ingest_member,
-        start_ingest_run, update_ingest_member_status,
+        ingest_resume_decision, load_ingest_health, load_ingest_readiness, record_ingest_error,
+        record_ingest_member, start_ingest_run, update_ingest_member_status,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -224,6 +224,15 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(health.projection_coverage.total, 2);
     assert_eq!(health.embedding_coverage.covered, 2);
     assert_eq!(health.embedding_coverage.total, 2);
+    let readiness = load_ingest_readiness(&postgres)?;
+    assert_eq!(
+        readiness.projection_coverage.covered,
+        health.projection_coverage.covered
+    );
+    assert_eq!(
+        readiness.embedding_coverage.covered,
+        health.embedding_coverage.covered
+    );
     assert_eq!(health.replay_snapshot_status, "available");
     assert_eq!(health.replay_snapshot.documents.count, 2);
     assert_eq!(health.replay_snapshot.chunks.count, 2);

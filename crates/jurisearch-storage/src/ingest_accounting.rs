@@ -146,6 +146,12 @@ pub struct IngestHealthReport {
     pub recovery_warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IngestReadinessReport {
+    pub projection_coverage: CoverageMetric,
+    pub embedding_coverage: CoverageMetric,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReplaySnapshotReport {
     pub documents: ReplaySnapshotComponent,
@@ -501,29 +507,7 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         })
         .collect();
 
-    let projection = client
-        .query_one(
-            "SELECT count(DISTINCT d.document_id)::bigint, \
-                    count(DISTINCT d.document_id) FILTER (WHERE c.chunk_id IS NOT NULL)::bigint \
-             FROM documents d \
-             LEFT JOIN chunks c ON c.document_id = d.document_id;",
-            &[],
-        )
-        .map_err(StorageError::PostgresClient)?;
-    let total_documents: i64 = projection.get(0);
-    let projected_documents: i64 = projection.get(1);
-
-    let embedding = client
-        .query_one(
-            "SELECT count(*)::bigint, \
-                    count(*) FILTER (WHERE ce.chunk_id IS NOT NULL)::bigint \
-             FROM chunks c \
-             LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id;",
-            &[],
-        )
-        .map_err(StorageError::PostgresClient)?;
-    let total_chunks: i64 = embedding.get(0);
-    let embedded_chunks: i64 = embedding.get(1);
+    let readiness = load_readiness_metrics(&mut client)?;
     let replay_snapshot = load_replay_snapshot(&mut client)?;
     let replay_snapshot_status = if replay_snapshot.documents.count == 0
         && replay_snapshot.chunks.count == 0
@@ -557,6 +541,50 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         failed_members,
         failed_member_percentage: percentage(failed_members, total_members),
         error_classes,
+        projection_coverage: readiness.projection_coverage,
+        embedding_coverage: readiness.embedding_coverage,
+        replay_snapshot_status: replay_snapshot_status.to_owned(),
+        replay_snapshot,
+        recovery_warnings,
+    })
+}
+
+pub fn load_ingest_readiness(
+    postgres: &ManagedPostgres,
+) -> Result<IngestReadinessReport, StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    load_readiness_metrics(&mut client)
+}
+
+fn load_readiness_metrics(
+    client: &mut postgres::Client,
+) -> Result<IngestReadinessReport, StorageError> {
+    let projection = client
+        .query_one(
+            "SELECT count(DISTINCT d.document_id)::bigint, \
+                    count(DISTINCT d.document_id) FILTER (WHERE c.chunk_id IS NOT NULL)::bigint \
+             FROM documents d \
+             LEFT JOIN chunks c ON c.document_id = d.document_id;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let total_documents: i64 = projection.get(0);
+    let projected_documents: i64 = projection.get(1);
+
+    let embedding = client
+        .query_one(
+            "SELECT count(*)::bigint, \
+                    count(*) FILTER (WHERE ce.chunk_id IS NOT NULL)::bigint \
+             FROM chunks c \
+             LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let total_chunks: i64 = embedding.get(0);
+    let embedded_chunks: i64 = embedding.get(1);
+
+    Ok(IngestReadinessReport {
         projection_coverage: CoverageMetric {
             covered: projected_documents,
             total: total_documents,
@@ -567,9 +595,6 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
             total: total_chunks,
             percentage: percentage(embedded_chunks, total_chunks),
         },
-        replay_snapshot_status: replay_snapshot_status.to_owned(),
-        replay_snapshot,
-        recovery_warnings,
     })
 }
 
