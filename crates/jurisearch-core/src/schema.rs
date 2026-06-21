@@ -166,6 +166,37 @@ pub fn compiled_schema() -> Value {
                     "sibling_truncated": { "type": "boolean" }
                 }
             },
+            "ExpandRequest": {
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string" }
+                }
+            },
+            "ExpandResponse": {
+                "properties": {
+                    "query": { "type": "string" },
+                    "seed_version": { "type": "string" },
+                    "expanded_terms": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "term": { "type": "string" },
+                                "matched_terms": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "source_seed_id": { "type": "string" },
+                                "source_label": { "type": "string" },
+                                "source_citation": { "type": "string" },
+                                "review_status": { "type": "string" },
+                                "reviewer": { "type": "string" },
+                                "rationale": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            },
             "StatusResponse": {
                 "properties": {
                     "schema_version": { "type": "string" },

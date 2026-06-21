@@ -9,6 +9,7 @@ secrets/
 *.key
 
 # Local index artifacts / embedded Postgres data dir
+.codegraph/
 index/
 *.sqlite
 *.parquet

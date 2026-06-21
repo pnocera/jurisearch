@@ -93,7 +93,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "expand",
         summary: "Return curated legal-vocabulary expansions for a query.",
-        status: CommandStatus::Stub,
+        status: CommandStatus::Implemented,
         request_schema: "ExpandRequest",
         response_schema: "ExpandResponse",
     },

@@ -13,6 +13,7 @@ use jurisearch_core::{
     SCHEMA_VERSION,
     contract::{LegalKind, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
+    expand::expand_query,
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
 };
@@ -189,7 +190,7 @@ struct ContextArgs {
     as_of: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Deserialize)]
 struct QueryArgs {
     query: String,
 }
@@ -409,7 +410,7 @@ fn run() -> anyhow::Result<()> {
             if args.query.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("expand query must not be empty"))
             } else {
-                emit_error(ErrorObject::not_implemented("expand"))
+                emit_expand(args)
             }
         }
         Command::Model(args) => emit_error(ErrorObject::not_implemented(match args.command {
@@ -523,6 +524,13 @@ fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<(
     }
 }
 
+fn emit_expand(args: QueryArgs) -> anyhow::Result<()> {
+    match expand_payload(args) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
 fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     if args.as_of.is_some() || args.part.is_some() {
         return Err(ErrorObject::bad_input(
@@ -572,6 +580,14 @@ fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value,
     } else {
         Ok(response)
     }
+}
+
+fn expand_payload(args: QueryArgs) -> Result<Value, ErrorObject> {
+    if args.query.trim().is_empty() {
+        return Err(ErrorObject::bad_input("expand query must not be empty"));
+    }
+    serde_json::to_value(expand_query(&args.query))
+        .map_err(|error| dependency_unavailable(error.to_string()))
 }
 
 fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
@@ -632,6 +648,12 @@ fn session_context_payload(args: Value) -> Result<Value, ErrorObject> {
         },
         index_dir.as_deref(),
     )
+}
+
+fn session_expand_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<QueryArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid expand args: {error}")))?;
+    expand_payload(args)
 }
 
 fn session_status_payload(args: Value) -> Result<Value, ErrorObject> {
@@ -1647,7 +1669,8 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "search" => session_search_payload(args),
         "fetch" => session_fetch_payload(args),
         "context" => session_context_payload(args),
-        "cite" | "related" | "expand" | "model fetch" | "setup" | "ingest" | "sync" => {
+        "expand" => session_expand_payload(args),
+        "cite" | "related" | "model fetch" | "setup" | "ingest" | "sync" => {
             Err(ErrorObject::not_implemented(command))
         }
         _ => Err(ErrorObject::bad_input(format!(

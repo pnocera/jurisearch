@@ -610,8 +610,9 @@ Current status (2026-06-21):
 - Already present from earlier retrieval slices: temporal validity predicates are applied independently to lexical and dense candidate pools before RRF fusion.
 - Done: retrieval-mode ablation controls are now first-class. `jurisearch search --mode hybrid|bm25|dense` and session JSON `mode` default to `hybrid`; `help schema --json` advertises the same enum; search responses include `retrieval_mode`. BM25-only search requires only projection coverage and skips query embedding/embedding coverage, while dense and hybrid keep the embedding gate and endpoint call.
 - Done: `hybrid_candidates_json` supports `RetrievalMode::Hybrid`, `RetrievalMode::Bm25`, and `RetrievalMode::Dense` without passing fake vectors through BM25-only queries. Storage smoke asserts hybrid rank fusion plus BM25-only `dense_rank: null` and dense-only `lexical_rank: null`.
+- Done: `jurisearch expand` is implemented for one-shot CLI and JSONL session mode over a deterministic `legal-vocabulary-seed:v1` lexicon. Each emitted `expanded_terms` entry carries `source_seed_id`, source citation, review status, reviewer placeholder, and rationale; `help schema --json` now exposes `ExpandRequest`/`ExpandResponse`, and CLI contract tests cover one-shot and session expansion without requiring an index.
 - Follow-up for W5/W2 ranking evidence: include the French analyzer change in the planned before/after BM25 ranking check, and run a legal-vocabulary pass over the French stopword behavior before treating the analyzer as quality-neutral at scale.
-- Remaining: hybrid+authority ablation reporting once the authority prior exists, vocabulary expansion seed lexicon plus `expand`, legal term/field boosters, authority prior, pagination/truncation guidance, and `--format concise|detailed`.
+- Remaining: connect `expand` into search-time `expanded_terms` logging/ranking experiments, hybrid+authority ablation reporting once the authority prior exists, legal term/field boosters, authority prior, pagination/truncation guidance, and `--format concise|detailed`.
 
 ### 1.4 Citation Verification for Statutes
 

@@ -48,12 +48,106 @@ fn help_schema_json_is_valid_and_lists_commands() {
             && command["status"] == "implemented"
             && command["request_schema"] == "SearchRequest"
     }));
+    assert!(json["commands"].as_array().unwrap().iter().any(|command| {
+        command["name"] == "expand"
+            && command["status"] == "implemented"
+            && command["response_schema"] == "ExpandResponse"
+    }));
     assert_eq!(json["common_enums"]["kind"]["values"][0], "code");
     assert_eq!(json["common_enums"]["search_mode"]["values"][0], "hybrid");
     assert_eq!(
         json["schemas"]["SearchRequest"]["properties"]["mode"]["default"],
         "hybrid"
     );
+    assert_eq!(
+        json["schemas"]["ExpandResponse"]["properties"]["expanded_terms"]["type"],
+        "array"
+    );
+}
+
+#[test]
+fn expand_returns_curated_terms_with_review_metadata_without_index() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["expand", "faute dommage"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["query"], "faute dommage");
+    assert_eq!(json["seed_version"], "legal-vocabulary-seed:v1");
+    let article_1240 = json["expanded_terms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|term| {
+            term["term"] == "article 1240"
+                && term["source_seed_id"] == "civil-liability-fault-damage"
+                && term["source_citation"] == "Code civil, articles 1240 et 1241"
+        });
+    let article_1240 = article_1240.expect("article 1240 expansion is present");
+    assert_eq!(
+        article_1240["review_status"],
+        "dev_seed_pending_legal_review"
+    );
+    assert_eq!(article_1240["reviewer"], "pending_legal_domain_review");
+    assert_eq!(
+        article_1240["matched_terms"],
+        serde_json::json!(["faute", "dommage"])
+    );
+}
+
+#[test]
+fn expand_rejects_empty_query_in_cli_and_session() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["expand", "   "])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    assert_eq!(json["error"]["message"], "expand query must not be empty");
+
+    let input = concat!(
+        "{\"id\":\"bad-expand\",\"command\":\"expand\",\"args\":{\"query\":\"\"}}\n",
+        "{\"id\":\"done\",\"command\":\"exit\"}\n",
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["id"], "bad-expand");
+    assert_eq!(values[0]["ok"], false);
+    assert_eq!(values[0]["error"]["code"], "bad_input");
+    assert_eq!(
+        values[0]["error"]["message"],
+        "expand query must not be empty"
+    );
+    assert_eq!(values[1]["result"]["bye"], true);
 }
 
 #[test]
@@ -1904,6 +1998,44 @@ fn session_jsonl_preserves_order_handles_bad_json_and_exit() {
     assert_eq!(values[2]["ok"], true);
     assert_eq!(values[3]["id"], "three");
     assert_eq!(values[3]["result"]["bye"], true);
+}
+
+#[test]
+fn session_jsonl_expand_returns_curated_terms() {
+    let input = concat!(
+        "{\"id\":\"expand-one\",\"command\":\"expand\",\"args\":{\"query\":\"prescription action\"}}\n",
+        "{\"id\":\"done\",\"command\":\"exit\"}\n",
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let lines = String::from_utf8(output).unwrap();
+    let values = lines
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(values.len(), 2);
+    assert_eq!(values[0]["id"], "expand-one");
+    assert_eq!(values[0]["ok"], true);
+    assert!(
+        values[0]["result"]["expanded_terms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|term| term["term"] == "article 2224"
+                && term["source_seed_id"] == "civil-prescription")
+    );
+    assert_eq!(values[1]["result"]["bye"], true);
 }
 
 fn discover_pg_config(test_name: &str) -> Result<Option<PgConfig>, StorageError> {
