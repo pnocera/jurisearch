@@ -39,6 +39,7 @@ use jurisearch_storage::{
     },
     projection::{
         ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot,
+        backfill_legi_article_hierarchy_from_metadata,
         backfill_legi_article_hierarchy_from_metadata_scoped, insert_chunk_embeddings,
         insert_legi_documents, insert_legi_metadata_roots,
     },
@@ -247,6 +248,8 @@ enum IngestSubcommand {
         #[arg(long, default_value_t = 32)]
         index_lists: u32,
     },
+    /// Rebuild LEGI article hierarchy from persisted metadata across the full index.
+    BackfillLegiHierarchy,
 }
 
 #[derive(Debug, Args)]
@@ -604,6 +607,12 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 ));
             }
             match embed_chunks_payload(index_dir, limit, index_lists) {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
+        Some(IngestSubcommand::BackfillLegiHierarchy) => {
+            match backfill_legi_hierarchy_payload(index_dir) {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
             }
@@ -1217,6 +1226,22 @@ fn legi_parse_error_class(error: &LegiParseError) -> (&'static str, &'static str
         LegiParseError::InvalidDate { .. } => ("validation_error", "validation_invalid_date"),
         LegiParseError::InvalidId { .. } => ("validation_error", "validation_invalid_id"),
     }
+}
+
+fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    let report =
+        backfill_legi_article_hierarchy_from_metadata(&postgres).map_err(storage_error_object)?;
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest backfill-legi-hierarchy",
+        "index_dir": index_dir,
+        "scope": "full",
+        "hierarchy_backfilled_documents": report.documents_updated,
+        "hierarchy_backfill_invalidated_embeddings": report.embeddings_invalidated,
+    }))
 }
 
 fn default_legi_run_id() -> String {

@@ -990,6 +990,132 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
 }
 
 #[test]
+fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI LEGI hierarchy backfill")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-backfill.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config.clone(), root.path())?;
+        postgres.execute_sql(
+            r#"INSERT INTO legi_metadata_roots
+                (metadata_key, root_kind, source_uid, parent_source_uid, title,
+                 valid_from, valid_to, valid_to_raw, source_payload_hash,
+                 canonical_version, canonical_json)
+             VALUES
+                ('legi:SECTION_TA:LEGISCTA000006089696@1804-03-21', 'SECTION_TA',
+                 'LEGISCTA000006089696', 'LEGITEXT000006070721', 'Titre preliminaire',
+                 '1804-03-21', NULL, '2999-01-01', 'sha256:section',
+                 'legi_section_ta:v1',
+                 '{"title":"Titre preliminaire","hierarchy_path":["Code civil","Livre III"]}');
+             INSERT INTO documents
+                (document_id, source, kind, source_uid, citation, title, body,
+                 valid_from, source_payload_hash, canonical_json)
+             VALUES
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article',
+                 'LEGIARTI000006419320', 'Code civil article 1240',
+                 'Article 1240', 'Texte initial pour le test.',
+                 '1804-02-21', 'sha256:article-1240',
+                 '{"title":"Article 1240","hierarchy_path":["Code civil"],"chunks":[{"body":"Texte initial pour le test.","hierarchy_path":["Code civil"],"contextualized_body":"Code civil\nArticle 1240\nTexte initial pour le test."}]}');
+             INSERT INTO chunks
+                (chunk_id, document_id, chunk_index, body, source_payload_hash,
+                 chunk_builder_version, embedding_fingerprint)
+             VALUES
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0,
+                 'Texte initial pour le test.', 'sha256:article-1240',
+                 'chunker:v0', 'bge-m3:1024:normalize:true');
+             INSERT INTO graph_edges
+                (edge_id, from_document_id, edge_kind, edge_source, payload)
+             VALUES
+                ('edge:1240:section', 'legi:LEGIARTI000006419320@1804-02-21',
+                 'structure', 'publisher',
+                 '{"source_tag":"LIEN_SECTION_TA","to_source_uid":"LEGISCTA000006089696","debut":"1804-03-21","fin":"2999-01-01"}');"#,
+        )?;
+        postgres.execute_sql(&format!(
+            "INSERT INTO chunk_embeddings \
+                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             VALUES \
+                ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+            unit_vector_literal(0)
+        ))?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(root.path())
+        .args(["ingest", "backfill-legi-hierarchy"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "ingest backfill-legi-hierarchy");
+    assert_eq!(json["scope"], "full");
+    assert_eq!(json["hierarchy_backfilled_documents"], 1);
+    assert_eq!(json["hierarchy_backfill_invalidated_embeddings"], 1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>2 \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "Titre preliminaire"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT (canonical_json->'chunks'->0->>'contextualized_body') \
+                    LIKE '%Titre preliminaire%Article 1240%Texte initial%' \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "t"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT coalesce(embedding_fingerprint, 'cleared') \
+             FROM chunks \
+             WHERE chunk_id = 'chunk:1240:0';",
+        )?,
+        "cleared"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM chunk_embeddings \
+             WHERE chunk_id = 'chunk:1240:0';",
+        )?,
+        "0"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM ingest_run \
+             WHERE run_id = 'backfill-legi-hierarchy';",
+        )?,
+        "0"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM ingest_member;",
+        )?,
+        "0"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI fetch existing index")? else {
         return Ok(());
