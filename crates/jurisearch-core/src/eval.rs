@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +53,15 @@ pub struct LegalRetrievalFixture {
     pub rationale: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvalFixtureSummary {
+    pub total: usize,
+    pub source_verified: usize,
+    pub release_gating: usize,
+    pub hierarchy_sensitive: usize,
+    pub categories: BTreeMap<String, usize>,
+}
+
 impl LegalRetrievalFixture {
     /// True once an expected result was checked against an official source, even
     /// if it is still a non-gating development fixture.
@@ -89,6 +100,31 @@ pub fn phase1_hierarchy_dev_fixtures() -> Vec<LegalRetrievalFixture> {
         same_section_hierarchy_fixture(),
         temporal_sibling_hierarchy_fixture(),
     ]
+}
+
+pub fn phase1_eval_fixture_summary() -> EvalFixtureSummary {
+    let fixtures = phase1_hierarchy_dev_fixtures();
+    let mut categories = BTreeMap::new();
+    for fixture in &fixtures {
+        *categories.entry(fixture.category.clone()).or_insert(0) += 1;
+    }
+
+    EvalFixtureSummary {
+        total: fixtures.len(),
+        source_verified: fixtures
+            .iter()
+            .filter(|fixture| fixture.is_source_verified())
+            .count(),
+        release_gating: fixtures
+            .iter()
+            .filter(|fixture| fixture.is_release_gating())
+            .count(),
+        hierarchy_sensitive: fixtures
+            .iter()
+            .filter(|fixture| fixture.requires_hierarchy_context())
+            .count(),
+        categories,
+    }
 }
 
 fn same_section_hierarchy_fixture() -> LegalRetrievalFixture {
@@ -169,7 +205,8 @@ mod tests {
 
     use super::{
         FixtureTier, HIERARCHY_SENSITIVE_STATUTORY_CATEGORY, HierarchyExpectation,
-        LegalRetrievalFixture, ReviewStatus, phase1_hierarchy_dev_fixtures,
+        LegalRetrievalFixture, ReviewStatus, phase1_eval_fixture_summary,
+        phase1_hierarchy_dev_fixtures,
     };
 
     #[test]
@@ -292,5 +329,19 @@ mod tests {
             assert!(!required.contains(&hierarchy.context_document_id));
             assert!(!forbidden.contains(&hierarchy.context_document_id));
         }
+    }
+
+    #[test]
+    fn phase1_eval_fixture_summary_counts_current_fixture_readiness() {
+        let summary = phase1_eval_fixture_summary();
+
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.source_verified, 2);
+        assert_eq!(summary.release_gating, 0);
+        assert_eq!(summary.hierarchy_sensitive, 2);
+        assert_eq!(
+            summary.categories[HIERARCHY_SENSITIVE_STATUTORY_CATEGORY],
+            2
+        );
     }
 }

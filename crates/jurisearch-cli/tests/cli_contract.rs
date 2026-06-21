@@ -151,6 +151,14 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "#/schemas/ModelCacheStatus"
     );
     assert_eq!(
+        json["schemas"]["StatusResponse"]["properties"]["phase1_gate"]["$ref"],
+        "#/schemas/Phase1GateResponse"
+    );
+    assert_eq!(
+        json["schemas"]["Phase1GateResponse"]["properties"]["checks"]["items"]["$ref"],
+        "#/schemas/Phase1GateCheck"
+    );
+    assert_eq!(
         json["schemas"]["ModelFetchRequest"]["properties"]["allow_download"]["default"],
         false
     );
@@ -278,6 +286,20 @@ fn status_returns_json_without_index() {
     assert!(json["embedding"]["config_path"].is_null());
     assert_eq!(json["embedding"]["config_loaded"], false);
     assert!(json["embedding"]["config_error"].is_null());
+    assert_eq!(json["phase1_gate"]["state"], "not_ready");
+    assert_eq!(json["phase1_gate"]["claim_allowed"], false);
+    assert_eq!(json["phase1_gate"]["scope"], "phase1_legi_statutory_search");
+    assert_eq!(json["phase1_gate"]["eval_fixtures"]["total"], 2);
+    assert_eq!(json["phase1_gate"]["eval_fixtures"]["source_verified"], 2);
+    assert_eq!(json["phase1_gate"]["eval_fixtures"]["release_gating"], 0);
+    assert!(
+        json["phase1_gate"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "release_gating_eval_fixtures"
+                && check["status"] == "pending")
+    );
 }
 
 #[test]

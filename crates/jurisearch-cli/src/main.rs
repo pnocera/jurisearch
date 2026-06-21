@@ -14,6 +14,7 @@ use jurisearch_core::{
     SCHEMA_VERSION,
     contract::{CitationState, LegalKind, OutputFormat, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
+    eval::phase1_eval_fixture_summary,
     expand::expand_query,
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
@@ -2480,8 +2481,9 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
     let endpoint = embedding_endpoint_status_json(&embedding_config);
     let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
-    let embedding_fingerprint = embedding_manifest.fingerprint;
+    let embedding_fingerprint = embedding_manifest.fingerprint.clone();
     let (index, ingest_health) = status_index_and_ingest_health(index_dir);
+    let phase1_gate = phase1_gate_payload(&index, &ingest_health, &embedding_manifest);
 
     json!({
         "schema_version": SCHEMA_VERSION,
@@ -2507,8 +2509,148 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
             "model_cache": model_cache_status_json(&model_cache),
             "endpoint": endpoint
         },
-        "ingest_health": ingest_health
+        "ingest_health": ingest_health,
+        "phase1_gate": phase1_gate
     })
+}
+
+fn phase1_gate_payload(
+    index: &Value,
+    ingest_health: &Value,
+    embedding_manifest: &jurisearch_embed::EmbeddingManifest,
+) -> Value {
+    let eval_summary = phase1_eval_fixture_summary();
+    let ingest_available = ingest_health["state"] == "available";
+    let query_ready = index["query_ready"].as_bool().unwrap_or(false);
+
+    let checks = vec![
+        phase1_gate_check(
+            "index_query_ready",
+            if query_ready { "pass" } else { "pending" },
+            if query_ready {
+                "index reports query_ready=true"
+            } else {
+                "index is not query-ready; inspect ingest health and coverage gates"
+            },
+        ),
+        phase1_gate_check(
+            "latest_completed_ingest_run",
+            if ingest_available && ingest_health["latest_completed_run"].is_string() {
+                "pass"
+            } else {
+                "pending"
+            },
+            "a completed official-source ingest run is required before a Phase 1 claim",
+        ),
+        phase1_gate_check(
+            "failed_members",
+            if ingest_available && ingest_health["failed_members"].as_i64() == Some(0) {
+                "pass"
+            } else if ingest_available {
+                "fail"
+            } else {
+                "pending"
+            },
+            "failed ingest members must be zero for the Phase 1 release gate",
+        ),
+        phase1_gate_check(
+            "projection_coverage",
+            coverage_value_complete(&ingest_health["projection_coverage"]),
+            "projection coverage must be complete and non-empty",
+        ),
+        phase1_gate_check(
+            "embedding_coverage",
+            coverage_value_complete(&ingest_health["embedding_coverage"]),
+            "embedding coverage must be complete and non-empty for the selected fingerprint",
+        ),
+        phase1_gate_check(
+            "replay_snapshot",
+            if ingest_available && ingest_health["replay_snapshot_status"] == "available" {
+                "pass"
+            } else {
+                "pending"
+            },
+            "replay snapshot signatures over canonical projections must be available",
+        ),
+        phase1_gate_check(
+            "release_gating_eval_fixtures",
+            if eval_summary.release_gating > 0 {
+                "pass"
+            } else {
+                "pending"
+            },
+            "release-gating fixtures require official-source verification and named human review",
+        ),
+        phase1_gate_check(
+            "final_embedding_model",
+            if embedding_manifest.provisional {
+                "pending"
+            } else {
+                "pass"
+            },
+            "final embedding model must be selected by Phase 1 legal retrieval metrics",
+        ),
+        phase1_gate_check(
+            "reranker_decision",
+            "pending",
+            // TODO(phase1): wire this to stored benchmark evidence before the
+            // Phase 1 statutory-search claim can open.
+            "reranker adoption or deferral must be recorded from the benchmark gate",
+        ),
+    ];
+    let claim_allowed = checks
+        .iter()
+        .all(|check| check["status"].as_str() == Some("pass"));
+
+    json!({
+        "state": if claim_allowed { "ready" } else { "not_ready" },
+        "claim_allowed": claim_allowed,
+        "scope": "phase1_legi_statutory_search",
+        "checks": checks,
+        "eval_fixtures": eval_summary,
+    })
+}
+
+fn phase1_gate_check(name: &str, status: impl Into<Phase1GateStatus>, message: &str) -> Value {
+    let status = status.into().as_str();
+    json!({
+        "name": name,
+        "status": status,
+        "message": message
+    })
+}
+
+enum Phase1GateStatus {
+    Static(&'static str),
+    Boolean(bool),
+}
+
+impl Phase1GateStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Static(status) => status,
+            Self::Boolean(true) => "pass",
+            Self::Boolean(false) => "pending",
+        }
+    }
+}
+
+impl From<&'static str> for Phase1GateStatus {
+    fn from(value: &'static str) -> Self {
+        Self::Static(value)
+    }
+}
+
+impl From<bool> for Phase1GateStatus {
+    fn from(value: bool) -> Self {
+        Self::Boolean(value)
+    }
+}
+
+fn coverage_value_complete(coverage: &Value) -> bool {
+    let covered = coverage["covered"].as_i64();
+    let total = coverage["total"].as_i64();
+    matches!((covered, total), (Some(covered), Some(total)) if total > 0 && covered == total)
 }
 
 fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
@@ -3319,4 +3461,74 @@ fn write_session_response(
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_embedding_manifest(provisional: bool) -> jurisearch_embed::EmbeddingManifest {
+        jurisearch_embed::EmbeddingManifest {
+            fingerprint: jurisearch_embed::EmbeddingFingerprint {
+                provider: jurisearch_embed::EmbeddingProvider::OpenAiCompatible,
+                base_url_class: jurisearch_embed::BaseUrlClass::LocalLoopback,
+                model: "bge-m3".to_string(),
+                dimension: 1024,
+                normalize: true,
+                pooling: "cls".to_string(),
+            },
+            provisional,
+            reembeddable: true,
+        }
+    }
+
+    fn check_status<'a>(payload: &'a Value, name: &str) -> &'a str {
+        payload["checks"]
+            .as_array()
+            .and_then(|checks| checks.iter().find(|check| check["name"] == name))
+            .and_then(|check| check["status"].as_str())
+            .expect("phase1 gate check status exists")
+    }
+
+    #[test]
+    fn phase1_gate_payload_maps_ready_inputs_and_failed_members() {
+        let index = json!({ "query_ready": true });
+        let ingest_health = json!({
+            "state": "available",
+            "latest_completed_run": "2026-06-21T20:00:00Z",
+            "failed_members": 0,
+            "projection_coverage": { "covered": 2, "total": 2 },
+            "embedding_coverage": { "covered": 2, "total": 2 },
+            "replay_snapshot_status": "available"
+        });
+        let manifest = test_embedding_manifest(false);
+
+        let payload = phase1_gate_payload(&index, &ingest_health, &manifest);
+
+        assert_eq!(check_status(&payload, "index_query_ready"), "pass");
+        assert_eq!(
+            check_status(&payload, "latest_completed_ingest_run"),
+            "pass"
+        );
+        assert_eq!(check_status(&payload, "failed_members"), "pass");
+        assert_eq!(check_status(&payload, "projection_coverage"), "pass");
+        assert_eq!(check_status(&payload, "embedding_coverage"), "pass");
+        assert_eq!(check_status(&payload, "replay_snapshot"), "pass");
+        assert_eq!(check_status(&payload, "final_embedding_model"), "pass");
+        assert_eq!(
+            check_status(&payload, "release_gating_eval_fixtures"),
+            "pending"
+        );
+        assert_eq!(check_status(&payload, "reranker_decision"), "pending");
+        assert_eq!(payload["state"], "not_ready");
+        assert_eq!(payload["claim_allowed"], false);
+
+        let mut failed_ingest_health = ingest_health.clone();
+        failed_ingest_health["failed_members"] = json!(2);
+        let failed_payload = phase1_gate_payload(&index, &failed_ingest_health, &manifest);
+
+        assert_eq!(check_status(&failed_payload, "failed_members"), "fail");
+        assert_eq!(failed_payload["state"], "not_ready");
+        assert_eq!(failed_payload["claim_allowed"], false);
+    }
 }

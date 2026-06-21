@@ -332,7 +332,36 @@ pub fn compiled_schema() -> Value {
                             "endpoint": { "$ref": "#/schemas/EmbeddingEndpointStatus" }
                         }
                     },
-                    "ingest_health": { "type": "object" }
+                    "ingest_health": { "type": "object" },
+                    "phase1_gate": { "$ref": "#/schemas/Phase1GateResponse" }
+                }
+            },
+            "Phase1GateResponse": {
+                "properties": {
+                    "state": { "enum": ["ready", "not_ready"] },
+                    "claim_allowed": { "type": "boolean" },
+                    "scope": { "type": "string" },
+                    "checks": {
+                        "type": "array",
+                        "items": { "$ref": "#/schemas/Phase1GateCheck" }
+                    },
+                    "eval_fixtures": { "$ref": "#/schemas/EvalFixtureSummary" }
+                }
+            },
+            "Phase1GateCheck": {
+                "properties": {
+                    "name": { "type": "string" },
+                    "status": { "enum": ["pass", "pending", "fail"] },
+                    "message": { "type": "string" }
+                }
+            },
+            "EvalFixtureSummary": {
+                "properties": {
+                    "total": { "type": "integer" },
+                    "source_verified": { "type": "integer" },
+                    "release_gating": { "type": "integer" },
+                    "hierarchy_sensitive": { "type": "integer" },
+                    "categories": { "type": "object" }
                 }
             },
             "ModelFetchRequest": {

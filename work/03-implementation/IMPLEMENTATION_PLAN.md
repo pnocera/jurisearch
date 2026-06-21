@@ -716,6 +716,12 @@ Acceptance:
 - If reranker is not adopted, the eval result is recorded.
 - Docs and `status` do not claim full French juridic coverage before Phase 2.
 
+Current status (2026-06-21):
+
+- Done: `jurisearch status` now includes a fail-closed `phase1_gate` object for the LEGI/statutory Phase 1 claim. It reports `claim_allowed=false` until index query readiness, latest completed ingest run, zero failed members, projection/embedding coverage, replay snapshot availability, release-gating eval fixtures, final embedding-model selection, and reranker adoption/deferral are all satisfied.
+- Done: the built-in Phase 1 eval fixture summary is machine-readable in `phase1_gate.eval_fixtures`; the current built-in hierarchy fixtures are source-verified development fixtures, not release-gating fixtures, so the gate correctly remains pending.
+- Remaining: build the release-gating LEGI eval set, run and store real retrieval/embedding/reranker benchmark evidence, decide the final embedding model, and record any required re-embed/index migration.
+
 ---
 
 ## 5. Phase 2 — Jurisprudence and Full French Juridic Search
