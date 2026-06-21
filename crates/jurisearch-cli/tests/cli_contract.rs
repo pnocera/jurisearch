@@ -226,6 +226,26 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
     assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 1);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 1);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
+    assert_eq!(json["ingest_health"]["replay_snapshot_status"], "available");
+    assert_eq!(
+        json["ingest_health"]["replay_snapshot"]["documents"]["count"],
+        1
+    );
+    assert_eq!(
+        json["ingest_health"]["replay_snapshot"]["chunks"]["count"],
+        1
+    );
+    assert_eq!(
+        json["ingest_health"]["replay_snapshot"]["embeddings"]["count"],
+        1
+    );
+    assert_eq!(
+        json["ingest_health"]["replay_snapshot"]["signature"]
+            .as_str()
+            .unwrap()
+            .len(),
+        32
+    );
     assert!(
         json["ingest_health"]["recovery_warnings"]
             .as_array()

@@ -224,6 +224,27 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(health.projection_coverage.total, 2);
     assert_eq!(health.embedding_coverage.covered, 2);
     assert_eq!(health.embedding_coverage.total, 2);
+    assert_eq!(health.replay_snapshot_status, "available");
+    assert_eq!(health.replay_snapshot.documents.count, 2);
+    assert_eq!(health.replay_snapshot.chunks.count, 2);
+    assert_eq!(health.replay_snapshot.publisher_edges.count, 0);
+    assert_eq!(health.replay_snapshot.embeddings.count, 2);
+    assert_eq!(health.replay_snapshot.manifests.count, 1);
+    assert_eq!(health.replay_snapshot.signature.len(), 32);
+    let replay_signature = health.replay_snapshot.signature.clone();
+    assert_eq!(
+        load_ingest_health(&postgres)?.replay_snapshot.signature,
+        replay_signature
+    );
+    postgres.execute_sql(
+        "UPDATE documents \
+         SET title = 'Article 1240 changed' \
+         WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+    )?;
+    assert_ne!(
+        load_ingest_health(&postgres)?.replay_snapshot.signature,
+        replay_signature
+    );
     assert!(
         health
             .recovery_warnings

@@ -142,7 +142,24 @@ pub struct IngestHealthReport {
     pub projection_coverage: CoverageMetric,
     pub embedding_coverage: CoverageMetric,
     pub replay_snapshot_status: String,
+    pub replay_snapshot: ReplaySnapshotReport,
     pub recovery_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReplaySnapshotReport {
+    pub documents: ReplaySnapshotComponent,
+    pub chunks: ReplaySnapshotComponent,
+    pub publisher_edges: ReplaySnapshotComponent,
+    pub embeddings: ReplaySnapshotComponent,
+    pub manifests: ReplaySnapshotComponent,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReplaySnapshotComponent {
+    pub count: i64,
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -507,6 +524,16 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         .map_err(StorageError::PostgresClient)?;
     let total_chunks: i64 = embedding.get(0);
     let embedded_chunks: i64 = embedding.get(1);
+    let replay_snapshot = load_replay_snapshot(&mut client)?;
+    let replay_snapshot_status = if replay_snapshot.documents.count == 0
+        && replay_snapshot.chunks.count == 0
+        && replay_snapshot.publisher_edges.count == 0
+        && replay_snapshot.embeddings.count == 0
+    {
+        "empty"
+    } else {
+        "available"
+    };
 
     let mut recovery_warnings = Vec::new();
     if let Some(status) = &latest_run_status
@@ -540,8 +567,103 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
             total: total_chunks,
             percentage: percentage(embedded_chunks, total_chunks),
         },
-        replay_snapshot_status: "pending".to_owned(),
+        replay_snapshot_status: replay_snapshot_status.to_owned(),
+        replay_snapshot,
         recovery_warnings,
+    })
+}
+
+fn load_replay_snapshot(
+    client: &mut postgres::Client,
+) -> Result<ReplaySnapshotReport, StorageError> {
+    let documents = snapshot_component(
+        client,
+        "documents",
+        "SELECT document_id AS row_key, \
+                md5(concat_ws(chr(31), document_id, source, kind, source_uid, \
+                    coalesce(version_group, ''), coalesce(citation, ''), \
+                    coalesce(title, ''), body, coalesce(valid_from::text, ''), \
+                    coalesce(valid_to::text, ''), coalesce(valid_to_raw, ''), \
+                    coalesce(source_url, ''), source_payload_hash, canonical_json::text)) AS row_hash \
+         FROM documents",
+    )?;
+    let chunks = snapshot_component(
+        client,
+        "chunks",
+        "SELECT chunk_id AS row_key, \
+                md5(concat_ws(chr(31), chunk_id, document_id, chunk_index::text, body, \
+                    chunk_kind, source_fields::text, source_payload_hash, \
+                    chunk_builder_version, coalesce(embedding_fingerprint, ''))) AS row_hash \
+         FROM chunks",
+    )?;
+    let publisher_edges = snapshot_component(
+        client,
+        "publisher_edges",
+        "SELECT edge_id AS row_key, \
+                md5(concat_ws(chr(31), edge_id, coalesce(from_document_id, ''), \
+                    coalesce(to_document_id, ''), edge_kind, edge_source, payload::text)) AS row_hash \
+         FROM graph_edges \
+         WHERE edge_source = 'publisher'",
+    )?;
+    let embeddings = snapshot_component(
+        client,
+        "chunk_embeddings",
+        "SELECT chunk_id AS row_key, \
+                md5(concat_ws(chr(31), chunk_id, embedding_fingerprint, embedding::text, \
+                    model, dimension::text)) AS row_hash \
+         FROM chunk_embeddings",
+    )?;
+    let manifests = snapshot_component(
+        client,
+        "index_manifest",
+        "SELECT key AS row_key, \
+                md5(concat_ws(chr(31), key, value::text)) AS row_hash \
+         FROM index_manifest",
+    )?;
+    let signature_input = format!(
+        "documents:{}:{}|chunks:{}:{}|publisher_edges:{}:{}|embeddings:{}:{}|manifests:{}:{}",
+        documents.count,
+        documents.signature,
+        chunks.count,
+        chunks.signature,
+        publisher_edges.count,
+        publisher_edges.signature,
+        embeddings.count,
+        embeddings.signature,
+        manifests.count,
+        manifests.signature
+    );
+    let signature = client
+        .query_one("SELECT md5($1);", &[&signature_input])
+        .map_err(StorageError::PostgresClient)?
+        .get(0);
+
+    Ok(ReplaySnapshotReport {
+        documents,
+        chunks,
+        publisher_edges,
+        embeddings,
+        manifests,
+        signature,
+    })
+}
+
+fn snapshot_component(
+    client: &mut postgres::Client,
+    component_name: &str,
+    rows_sql: &str,
+) -> Result<ReplaySnapshotComponent, StorageError> {
+    let sql = format!(
+        "SELECT count(*)::bigint, \
+                md5(coalesce(string_agg(row_hash, E'\\n' ORDER BY row_key), '')) \
+         FROM ({rows_sql}) {component_name}_snapshot_rows;"
+    );
+    let row = client
+        .query_one(sql.as_str(), &[])
+        .map_err(StorageError::PostgresClient)?;
+    Ok(ReplaySnapshotComponent {
+        count: row.get(0),
+        signature: row.get(1),
     })
 }
 
