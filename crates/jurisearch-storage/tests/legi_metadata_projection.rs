@@ -108,7 +108,8 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
   <STRUCT>
     <LIEN_TXT cid="LEGITEXT999999999999" debut="1804-03-21" id="LEGITEXT000006070721"/>
     <LIEN_ART debut="1804-03-21" id="LEGIARTI000052000004"/>
-    <LIEN_SECTION_TA cid="LEGISCTA000006089696" debut="1804-03-21" id="LEGISCTA000006089696" niv="1">Titre preliminaire</LIEN_SECTION_TA>
+    <LIEN_SECTION_TA cid="LEGISCTA000006000001" debut="1804-03-21" id="LEGISCTA000006000001" niv="1">Livre III</LIEN_SECTION_TA>
+    <LIEN_SECTION_TA cid="LEGISCTA000006089696" debut="1804-03-21" id="LEGISCTA000006089696" niv="2">Titre preliminaire</LIEN_SECTION_TA>
     <LIEN_ART debut="2020-01-01" id="LEGIARTI000006419320"/>
     <LIEN_ART debut="1804-03-21" id="LEGIARTI000052000003"/>
   </STRUCT>
@@ -328,6 +329,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
     )?;
     assert_eq!(repeated_backfill.documents_updated, 0);
     assert_eq!(repeated_backfill.embeddings_invalidated, 0);
+    // Direct publisher section edges win over TEXTELR candidates for the same article.
     assert_eq!(
         postgres.execute_sql(
             "SELECT canonical_json->'hierarchy_path'->>1 \
@@ -384,7 +386,24 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
              FROM documents \
              WHERE document_id = 'legi:LEGIARTI000052000003@1804-03-21';",
         )?,
+        "Livre III"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>2 \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000052000003@1804-03-21';",
+        )?,
         "Titre preliminaire"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'hierarchy_path'->>1 || ':' || \
+                    coalesce(canonical_json->'hierarchy_path'->>2, 'absent') \
+             FROM documents \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?,
+        "Titre preliminaire:absent"
     );
     assert_eq!(
         postgres.execute_sql(

@@ -295,6 +295,7 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
                        section.canonical_json::text AS section_json, \
                        section.valid_from::text AS section_valid_from, \
                        section.valid_to::text AS section_valid_to, \
+                       NULL::text AS text_section_links_json, \
                        0 AS source_rank, section.metadata_key AS section_metadata_key, \
                        edge.edge_id AS tie_breaker \
                 FROM documents d \
@@ -319,6 +320,7 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
                        section.canonical_json::text AS section_json, \
                        section.valid_from::text AS section_valid_from, \
                        section.valid_to::text AS section_valid_to, \
+                       text_sections.links::text AS text_section_links_json, \
                        1 AS source_rank, section.metadata_key AS section_metadata_key, \
                        /* Branch-local deterministic tiebreaker; source_rank keeps it separate \
                           from graph edge ids in the direct branch. */ \
@@ -342,11 +344,26 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
                     ORDER BY section_link.ordinality DESC \
                     LIMIT 1 \
                 ) text_section ON true \
+                JOIN LATERAL ( \
+                    SELECT jsonb_agg(section_link.link ORDER BY section_link.ordinality) AS links \
+                    FROM jsonb_array_elements( \
+                           coalesce(text_struct.canonical_json->'structure_links', '[]'::jsonb) \
+                         ) WITH ORDINALITY AS section_link(link, ordinality) \
+                    WHERE section_link.ordinality < article_link.ordinality \
+                      AND section_link.link->>'source_tag' = 'LIEN_SECTION_TA' \
+                ) text_sections ON true \
                 JOIN legi_metadata_roots section \
                   ON section.root_kind = 'SECTION_TA' \
                  AND section.source_uid = text_section.link->>'target_source_uid' \
                 WHERE d.source = 'legi' \
                   AND d.kind = 'article' \
+                  AND NOT EXISTS ( \
+                      SELECT 1 \
+                      FROM graph_edges direct_edge \
+                      WHERE direct_edge.from_document_id = d.document_id \
+                        AND direct_edge.edge_source = 'publisher' \
+                        AND direct_edge.payload->>'source_tag' = 'LIEN_SECTION_TA' \
+                  ) \
                   AND ( \
                        $1::boolean \
                        OR d.document_id = ANY($2::text[]) \
@@ -355,7 +372,7 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
                   ) \
             ) \
              SELECT document_id, document_json, document_valid_from, edge_payload, \
-                    section_json, section_valid_from, section_valid_to \
+                    section_json, section_valid_from, section_valid_to, text_section_links_json \
              FROM hierarchy_candidates \
              ORDER BY document_id, source_rank, section_valid_from DESC NULLS LAST, \
                       section_metadata_key, tie_breaker;",
@@ -379,13 +396,16 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
             section_json: row.get(4),
             section_valid_from: row.get(5),
             section_valid_to: row.get(6),
+            text_section_links_json: row.get(7),
         });
     }
 
     for candidate in select_hierarchy_backfill_candidates(candidates)? {
-        if let Some(enriched) =
-            enriched_article_hierarchy_json(&candidate.document_json, &candidate.section_json)?
-        {
+        if let Some(enriched) = enriched_article_hierarchy_json(
+            &candidate.document_json,
+            &candidate.section_json,
+            candidate.text_section_links_json.as_deref(),
+        )? {
             updates.push((candidate.document_id, enriched));
         }
     }
@@ -457,6 +477,7 @@ struct HierarchyBackfillCandidate {
     section_json: String,
     section_valid_from: Option<String>,
     section_valid_to: Option<String>,
+    text_section_links_json: Option<String>,
 }
 
 fn select_hierarchy_backfill_candidates(
@@ -627,15 +648,20 @@ pub fn insert_chunk_embeddings(
 fn enriched_article_hierarchy_json(
     document_json: &str,
     section_json: &str,
+    text_section_links_json: Option<&str>,
 ) -> Result<Option<String>, StorageError> {
     let mut document: serde_json::Value = serde_json::from_str(document_json)?;
     let section: serde_json::Value = serde_json::from_str(section_json)?;
-    let mut hierarchy = string_array_field(&section, "hierarchy_path");
-    if let Some(section_title) = section.get("title").and_then(serde_json::Value::as_str)
-        && hierarchy.last().is_none_or(|last| last != section_title)
-    {
-        hierarchy.push(section_title.to_owned());
-    }
+    let section_hierarchy = section_hierarchy_from_json(&section);
+    let hierarchy = match text_section_links_json {
+        Some(links_json) => match text_struct_hierarchy_from_links(&section, links_json)? {
+            Some(text_hierarchy) if text_hierarchy.len() > section_hierarchy.len() => {
+                text_hierarchy
+            }
+            _ => section_hierarchy,
+        },
+        None => section_hierarchy,
+    };
     let current_hierarchy = string_array_field(&document, "hierarchy_path");
     if hierarchy.is_empty()
         || hierarchy == current_hierarchy
@@ -670,6 +696,61 @@ fn enriched_article_hierarchy_json(
     Ok(Some(serde_json::to_string(&document)?))
 }
 
+fn section_hierarchy_from_json(section: &serde_json::Value) -> Vec<String> {
+    let mut hierarchy = string_array_field(section, "hierarchy_path");
+    if let Some(section_title) = section.get("title").and_then(serde_json::Value::as_str)
+        && hierarchy.last().is_none_or(|last| last != section_title)
+    {
+        hierarchy.push(section_title.to_owned());
+    }
+    hierarchy
+}
+
+fn text_struct_hierarchy_from_links(
+    section: &serde_json::Value,
+    links_json: &str,
+) -> Result<Option<Vec<String>>, StorageError> {
+    let links: Vec<serde_json::Value> = serde_json::from_str(links_json)?;
+    let mut stack = Vec::<String>::new();
+    for link in links {
+        let Some(title) = non_empty_json_str(&link, "text") else {
+            continue;
+        };
+        if let Some(level) = link
+            .get("level")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|level| usize::try_from(level).ok())
+            .filter(|level| *level > 0)
+        {
+            stack.truncate(level.saturating_sub(1).min(stack.len()));
+        }
+        if stack.last().is_none_or(|last| last != &title) {
+            stack.push(title);
+        }
+    }
+    if stack.is_empty() {
+        return Ok(None);
+    }
+
+    let mut base = section_hierarchy_from_json(section);
+    if let Some(section_title) = section.get("title").and_then(serde_json::Value::as_str)
+        && base.last().is_some_and(|last| last == section_title)
+    {
+        base.pop();
+    }
+    Ok(Some(merge_hierarchy_with_overlap(base, stack)))
+}
+
+fn merge_hierarchy_with_overlap(mut base: Vec<String>, suffix: Vec<String>) -> Vec<String> {
+    let max_overlap = base.len().min(suffix.len());
+    let overlap = (0..=max_overlap)
+        .rev()
+        .find(|overlap| base[base.len() - overlap..] == suffix[..*overlap])
+        .unwrap_or(0);
+    base.extend(suffix.into_iter().skip(overlap));
+    base
+}
+
 fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<String> {
     value
         .get(field)
@@ -679,6 +760,11 @@ fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<String> {
         .filter_map(serde_json::Value::as_str)
         .map(str::to_owned)
         .collect()
+}
+
+fn non_empty_json_str(value: &serde_json::Value, field: &str) -> Option<String> {
+    let value = value.get(field)?.as_str()?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn contextualized_article_body(hierarchy: &[String], title: Option<&str>, body: &str) -> String {
