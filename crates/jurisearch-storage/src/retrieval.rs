@@ -1,5 +1,9 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
+// Dense ANN candidates are post-filtered by document validity, so fetch a
+// wider pool before assigning gap-free dense ranks.
+const DENSE_TEMPORAL_OVERFETCH_FACTOR: u32 = 4;
+
 #[derive(Debug, Clone, Copy)]
 pub struct HybridCandidateQuery<'a> {
     pub query_text: &'a str,
@@ -19,7 +23,10 @@ pub fn hybrid_candidates_json(
     let query_embedding = sql_string_literal(query.query_embedding);
     let embedding_fingerprint = sql_string_literal(query.embedding_fingerprint);
     let as_of = sql_string_literal(query.as_of);
-    let dense_pool_limit = query.dense_limit.saturating_mul(4).max(query.dense_limit);
+    let dense_pool_limit = query
+        .dense_limit
+        .saturating_mul(DENSE_TEMPORAL_OVERFETCH_FACTOR)
+        .max(query.dense_limit);
 
     postgres.execute_sql(&format!(
         r#"

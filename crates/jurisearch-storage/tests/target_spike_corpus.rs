@@ -49,10 +49,13 @@ fn target_spike_corpus_retrieval_stays_under_latency_budget() -> Result<(), Stor
 
     let lexical_started = Instant::now();
     let lexical_top = postgres.execute_sql(
-        "SELECT chunk_id \
-         FROM chunks \
-         WHERE body @@@ 'responsabilite faute dommage' \
-         ORDER BY paradedb.score(chunk_id) DESC, chunk_id \
+        "SELECT c.chunk_id \
+         FROM chunks c \
+         JOIN documents d ON d.document_id = c.document_id \
+         WHERE c.body @@@ 'responsabilite faute dommage' \
+           AND (d.valid_from IS NULL OR d.valid_from <= '2024-06-01'::date) \
+           AND (d.valid_to IS NULL OR d.valid_to > '2024-06-01'::date) \
+         ORDER BY paradedb.score(c.chunk_id) DESC, c.chunk_id \
          LIMIT 50;",
     )?;
     let lexical_elapsed = lexical_started.elapsed();
@@ -113,7 +116,7 @@ fn seed_target_spike_corpus(
         r#"
 INSERT INTO documents
     (document_id, source, kind, source_uid, version_group, citation, title, body,
-     valid_from, source_payload_hash)
+     valid_from, valid_to, source_payload_hash)
 SELECT
     'legi:LEGIARTI' || lpad(n::text, 12, '0') || '@2024-01-01',
     'legi',
@@ -124,10 +127,12 @@ SELECT
     'Article ' || n,
     CASE
         WHEN n = 1240 THEN 'responsabilite civile faute dommage reparation article 1240 responsabilite faute dommage'
+        WHEN n BETWEEN 1 AND 10 THEN 'responsabilite civile faute dommage reparation version inactive ' || n
         WHEN n % 1000 = 0 THEN 'responsabilite administrative service public article ' || n
         ELSE 'article legislatif procedure obligations contrats fiscalite famille numero ' || n
     END,
-    '2024-01-01',
+    CASE WHEN n BETWEEN 6 AND 10 THEN '2025-01-01'::date ELSE '2024-01-01'::date END,
+    CASE WHEN n BETWEEN 1 AND 5 THEN '2024-01-01'::date ELSE NULL::date END,
     'sha256:legi:' || n
 FROM generate_series(1, {article_fixtures}) AS n;
 
@@ -158,6 +163,7 @@ SELECT
     0,
     CASE
         WHEN n = 1240 THEN 'responsabilite civile faute dommage reparation article 1240 responsabilite faute dommage'
+        WHEN n BETWEEN 1 AND 10 THEN 'responsabilite civile faute dommage reparation version inactive ' || n
         WHEN n % 1000 = 0 THEN 'responsabilite administrative service public article ' || n
         ELSE 'article legislatif procedure obligations contrats fiscalite famille numero ' || n
     END,
@@ -187,7 +193,23 @@ INSERT INTO chunk_embeddings
 SELECT
     c.chunk_id,
     '{embedding_fingerprint}',
-    CASE WHEN c.chunk_id = '{target_chunk_id}' THEN '{target_vector}'::vector ELSE '{decoy_vector}'::vector END,
+    CASE
+        WHEN c.chunk_id = '{target_chunk_id}'
+          OR c.chunk_id IN (
+              'chunk:legi:1:0',
+              'chunk:legi:2:0',
+              'chunk:legi:3:0',
+              'chunk:legi:4:0',
+              'chunk:legi:5:0',
+              'chunk:legi:6:0',
+              'chunk:legi:7:0',
+              'chunk:legi:8:0',
+              'chunk:legi:9:0',
+              'chunk:legi:10:0'
+          )
+        THEN '{target_vector}'::vector
+        ELSE '{decoy_vector}'::vector
+    END,
     'bge-m3',
     1024
 FROM chunks c;
@@ -217,4 +239,17 @@ fn assert_top_candidate(response: &str) {
     assert_eq!(response["candidates"][0]["chunk_id"], TARGET_CHUNK_ID);
     assert_eq!(response["candidates"][0]["lexical_rank"].as_u64(), Some(1));
     assert_eq!(response["candidates"][0]["dense_rank"].as_u64(), Some(1));
+
+    let candidates = response["candidates"]
+        .as_array()
+        .expect("candidates is an array");
+    for inactive in 1..=10 {
+        let inactive_chunk_id = format!("chunk:legi:{inactive}:0");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate["chunk_id"] != inactive_chunk_id),
+            "inactive temporal candidate {inactive_chunk_id} leaked into response"
+        );
+    }
 }
