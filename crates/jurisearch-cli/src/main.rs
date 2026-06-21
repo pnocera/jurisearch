@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -15,14 +17,25 @@ use jurisearch_core::{
     session::{SessionRequest, SessionResponse},
 };
 use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
-use jurisearch_ingest::archive::{ArchiveSource, plan_from_dir};
+use jurisearch_ingest::{
+    archive::{
+        ArchiveMember, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
+        for_each_xml_member_until, plan_from_dir,
+    },
+    legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
+};
 use jurisearch_storage::{
     dense::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
     },
-    ingest_accounting::{IngestHealthReport, load_ingest_health},
-    projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
+    ingest_accounting::{
+        IngestCompatibility, IngestErrorInput, IngestHealthReport, IngestMemberInput,
+        IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus, finish_ingest_run,
+        ingest_resume_decision, load_ingest_health, record_ingest_error, record_ingest_member,
+        start_ingest_run, update_ingest_member_status,
+    },
+    projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_legi_documents},
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
     },
@@ -30,6 +43,10 @@ use jurisearch_storage::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+const LEGI_PARSER_VERSION: &str = "legi_article_parser:v1";
+const CANONICAL_SCHEMA_VERSION: &str = "canonical_document:v1";
+const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -199,6 +216,21 @@ enum IngestSubcommand {
         source: CliArchiveSource,
         #[arg(long)]
         archives_dir: PathBuf,
+    },
+    /// Stream official LEGI archives into canonical storage with ingest accounting.
+    LegiArchives {
+        #[arg(long)]
+        archives_dir: PathBuf,
+        #[arg(long)]
+        run_id: Option<String>,
+        #[arg(long)]
+        limit_members: Option<u32>,
+        #[arg(long, default_value_t = DEFAULT_MEMBER_BYTE_LIMIT)]
+        max_member_bytes: u64,
+        #[arg(long)]
+        quarantine_dir: Option<PathBuf>,
+        #[arg(long)]
+        safe_mode: bool,
     },
     /// Embed stored canonical chunks and finalize the dense ANN index.
     EmbedChunks {
@@ -521,6 +553,37 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 "plan": plan,
             }))
         }
+        Some(IngestSubcommand::LegiArchives {
+            archives_dir,
+            run_id,
+            limit_members,
+            max_member_bytes,
+            quarantine_dir,
+            safe_mode,
+        }) => {
+            if limit_members == Some(0) {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest legi-archives --limit-members must be at least 1 when provided",
+                ));
+            }
+            if max_member_bytes == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest legi-archives --max-member-bytes must be at least 1",
+                ));
+            }
+            match ingest_legi_archives_payload(
+                index_dir,
+                archives_dir.as_path(),
+                run_id,
+                limit_members,
+                max_member_bytes,
+                quarantine_dir.as_deref(),
+                safe_mode,
+            ) {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
         Some(IngestSubcommand::EmbedChunks { limit, index_lists }) => {
             if limit == Some(0) {
                 return emit_error(ErrorObject::bad_input(
@@ -539,6 +602,413 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
         }
         None => emit_error(ErrorObject::not_implemented("ingest")),
     }
+}
+
+#[derive(Debug, Default)]
+struct LegiArchiveIngestCounters {
+    visited_members: usize,
+    inserted_documents: usize,
+    inserted_chunks: usize,
+    inserted_publisher_edges: usize,
+    skipped_members: usize,
+    skipped_compatible_members: usize,
+    failed_members: usize,
+    quarantined_payloads: usize,
+    unsupported_roots: BTreeMap<String, usize>,
+}
+
+fn ingest_legi_archives_payload(
+    index_dir: Option<&Path>,
+    archives_dir: &Path,
+    run_id: Option<String>,
+    limit_members: Option<u32>,
+    max_member_bytes: u64,
+    quarantine_dir: Option<&Path>,
+    safe_mode: bool,
+) -> Result<Value, ErrorObject> {
+    let index_dir = require_configured_index_dir(index_dir)?;
+    let postgres = open_or_create_index(index_dir.as_path())?;
+    let plan = plan_from_dir(ArchiveSource::Legi, archives_dir).map_err(|error| {
+        ErrorObject::bad_input(format!("failed to plan LEGI archives: {error}"))
+    })?;
+    let run_id = run_id.unwrap_or_else(default_legi_run_id);
+    let archive_plan_json =
+        serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
+
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: run_id.as_str(),
+            source: "legi",
+            parser_version: LEGI_PARSER_VERSION,
+            schema_version: CANONICAL_SCHEMA_VERSION,
+            code_version: CLI_CODE_VERSION,
+            safe_mode,
+            archive_plan_json: Some(archive_plan_json.as_str()),
+            manifest_json: None,
+        },
+    )
+    .map_err(storage_error_object)?;
+
+    let mut counters = LegiArchiveIngestCounters::default();
+    let mut fatal_error = None::<ErrorObject>;
+    let limit_members = limit_members.map(|limit| limit as usize);
+    let mut archives = vec![&plan.baseline];
+    archives.extend(plan.deltas.iter());
+
+    'archives: for archive in archives {
+        let archive_name = archive.file_name.as_str();
+        let read_result = for_each_xml_member_until(&archive.path, max_member_bytes, |member| {
+            if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
+                return Ok(ArchiveVisit::Stop);
+            }
+            counters.visited_members += 1;
+            if let Err(error) = process_legi_archive_member(
+                &postgres,
+                run_id.as_str(),
+                archive_name,
+                &member,
+                quarantine_dir,
+                &mut counters,
+            ) {
+                fatal_error = Some(storage_error_object(error));
+                return Ok(ArchiveVisit::Stop);
+            }
+            Ok(
+                if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
+                    ArchiveVisit::Stop
+                } else {
+                    ArchiveVisit::Continue
+                },
+            )
+        });
+
+        if let Err(error) = read_result {
+            let error = ErrorObject::bad_input(format!(
+                "failed to read LEGI archive `{}`: {error}",
+                archive.path.display()
+            ));
+            fatal_error = Some(error);
+        }
+        if fatal_error.is_some()
+            || limit_members.is_some_and(|limit| counters.visited_members >= limit)
+        {
+            break 'archives;
+        }
+    }
+
+    let run_status = if counters.failed_members == 0 && fatal_error.is_none() {
+        IngestRunStatus::Completed
+    } else {
+        IngestRunStatus::Failed
+    };
+    let error_message = fatal_error.as_ref().map(|error| error.message.as_str());
+    finish_ingest_run(&postgres, run_id.as_str(), run_status, error_message)
+        .map_err(storage_error_object)?;
+    if let Some(error) = fatal_error {
+        return Err(error);
+    }
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest legi-archives",
+        "run_id": run_id,
+        "run_status": run_status.as_str(),
+        "safe_mode": safe_mode,
+        "index_dir": index_dir,
+        "archives_dir": archives_dir,
+        "archives": {
+            "baseline": plan.baseline.file_name,
+            "deltas": plan.deltas.iter().map(|archive| archive.file_name.as_str()).collect::<Vec<_>>(),
+            "skipped": plan.skipped
+        },
+        "limit_members": limit_members,
+        "max_member_bytes": max_member_bytes,
+        "visited_members": counters.visited_members,
+        "inserted_documents": counters.inserted_documents,
+        "inserted_chunks": counters.inserted_chunks,
+        "inserted_publisher_edges": counters.inserted_publisher_edges,
+        "skipped_members": counters.skipped_members,
+        "skipped_compatible_members": counters.skipped_compatible_members,
+        "failed_members": counters.failed_members,
+        "quarantined_payloads": counters.quarantined_payloads,
+        "unsupported_roots": counters.unsupported_roots,
+        "quarantine_dir": quarantine_dir
+    }))
+}
+
+fn process_legi_archive_member(
+    postgres: &ManagedPostgres,
+    run_id: &str,
+    archive_name: &str,
+    member: &ArchiveMember,
+    quarantine_dir: Option<&Path>,
+    counters: &mut LegiArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    let source_payload_hash = source_payload_hash(&member.bytes);
+    let compatibility = IngestCompatibility {
+        parser_version: LEGI_PARSER_VERSION,
+        schema_version: CANONICAL_SCHEMA_VERSION,
+        code_version: CLI_CODE_VERSION,
+        source_payload_hash: source_payload_hash.as_str(),
+    };
+    let resume = ingest_resume_decision(
+        postgres,
+        archive_name,
+        member.member_path.as_str(),
+        compatibility,
+    )?;
+    match resume.action {
+        IngestResumeAction::Skip => {
+            record_legi_member(
+                postgres,
+                run_id,
+                LegiMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: None,
+                    date_anchor: None,
+                    status: IngestMemberStatus::Skipped,
+                    compatibility,
+                },
+            )?;
+            counters.skipped_members += 1;
+            counters.skipped_compatible_members += 1;
+            return Ok(());
+        }
+        IngestResumeAction::BlockedIncompatible => {
+            let message = format!(
+                "resume blocked by compatibility mismatch on fields [{}]",
+                resume.mismatched_fields.join(", ")
+            );
+            let record = record_legi_member(
+                postgres,
+                run_id,
+                LegiMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: None,
+                    date_anchor: None,
+                    status: IngestMemberStatus::Failed,
+                    compatibility,
+                },
+            )?;
+            record_legi_member_error(
+                postgres,
+                run_id,
+                Some(record.member_id),
+                "validation_error",
+                "compatibility_mismatch",
+                message.as_str(),
+                "none",
+                archive_name,
+                member,
+                quarantine_dir,
+                counters,
+            )?;
+            counters.failed_members += 1;
+            return Ok(());
+        }
+        IngestResumeAction::Process | IngestResumeAction::Retry => {}
+    }
+
+    match parse_legi_member(member) {
+        Ok(ParsedLegiXml::Article(document)) => {
+            let document = *document;
+            let record = record_legi_member(
+                postgres,
+                run_id,
+                LegiMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: Some(document.source_uid.as_str()),
+                    date_anchor: Some(document.valid_from.as_str()),
+                    status: IngestMemberStatus::Parsed,
+                    compatibility,
+                },
+            )?;
+            let report = insert_legi_documents(postgres, &[document], None)?;
+            update_ingest_member_status(
+                postgres,
+                record.member_id,
+                IngestMemberStatus::Inserted,
+                None,
+            )?;
+            counters.inserted_documents += report.documents;
+            counters.inserted_chunks += report.chunks;
+            counters.inserted_publisher_edges += report.publisher_edges;
+        }
+        Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
+            *counters.unsupported_roots.entry(root.clone()).or_default() += 1;
+            record_legi_member(
+                postgres,
+                run_id,
+                LegiMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: Some(root.as_str()),
+                    date_anchor: None,
+                    status: IngestMemberStatus::Skipped,
+                    compatibility,
+                },
+            )?;
+            counters.skipped_members += 1;
+        }
+        Err(error) => {
+            let (error_class, error_code) = legi_parse_error_class(&error);
+            let message = error.to_string();
+            let record = record_legi_member(
+                postgres,
+                run_id,
+                LegiMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: None,
+                    date_anchor: None,
+                    status: IngestMemberStatus::Failed,
+                    compatibility,
+                },
+            )?;
+            record_legi_member_error(
+                postgres,
+                run_id,
+                Some(record.member_id),
+                error_class,
+                error_code,
+                message.as_str(),
+                "none",
+                archive_name,
+                member,
+                quarantine_dir,
+                counters,
+            )?;
+            counters.failed_members += 1;
+        }
+    }
+    Ok(())
+}
+
+struct LegiMemberRecordInput<'a> {
+    archive_name: &'a str,
+    member_path: &'a str,
+    source_entity: Option<&'a str>,
+    date_anchor: Option<&'a str>,
+    status: IngestMemberStatus,
+    compatibility: IngestCompatibility<'a>,
+}
+
+fn record_legi_member(
+    postgres: &ManagedPostgres,
+    run_id: &str,
+    input: LegiMemberRecordInput<'_>,
+) -> Result<jurisearch_storage::ingest_accounting::IngestMemberRecord, StorageError> {
+    record_ingest_member(
+        postgres,
+        &IngestMemberInput {
+            run_id,
+            archive_name: input.archive_name,
+            member_path: input.member_path,
+            source: "legi",
+            source_entity: input.source_entity,
+            date_anchor: input.date_anchor,
+            status: input.status,
+            compatibility: input.compatibility,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_legi_member_error(
+    postgres: &ManagedPostgres,
+    run_id: &str,
+    member_id: Option<i64>,
+    error_class: &str,
+    error_code: &str,
+    message: &str,
+    retry_policy: &str,
+    archive_name: &str,
+    member: &ArchiveMember,
+    quarantine_dir: Option<&Path>,
+    counters: &mut LegiArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    let quarantined = maybe_quarantine_payload(
+        quarantine_dir,
+        run_id,
+        archive_name,
+        member.member_path.as_str(),
+        &member.bytes,
+    )?;
+    if quarantined {
+        counters.quarantined_payloads += 1;
+    }
+    let context = json!({
+        "archive_name": archive_name,
+        "member_path": member.member_path,
+        "quarantined": quarantined
+    })
+    .to_string();
+    record_ingest_error(
+        postgres,
+        &IngestErrorInput {
+            run_id,
+            member_id,
+            error_class,
+            error_code,
+            message,
+            retry_policy,
+            context_json: Some(context.as_str()),
+        },
+    )?;
+    Ok(())
+}
+
+fn maybe_quarantine_payload(
+    quarantine_dir: Option<&Path>,
+    run_id: &str,
+    archive_name: &str,
+    member_path: &str,
+    bytes: &[u8],
+) -> Result<bool, StorageError> {
+    let Some(quarantine_dir) = quarantine_dir else {
+        return Ok(false);
+    };
+    let run_dir = quarantine_dir.join(sanitize_quarantine_component(run_id));
+    fs::create_dir_all(&run_dir).map_err(StorageError::Io)?;
+    let file_name = format!(
+        "{}__{}",
+        sanitize_quarantine_component(archive_name),
+        sanitize_quarantine_component(member_path)
+    );
+    fs::write(run_dir.join(file_name), bytes).map_err(StorageError::Io)?;
+    Ok(true)
+}
+
+fn sanitize_quarantine_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn legi_parse_error_class(error: &LegiParseError) -> (&'static str, &'static str) {
+    match error {
+        LegiParseError::Xml { .. } => ("parse_error", "parse_malformed_xml"),
+        LegiParseError::MissingRequiredField { .. } => {
+            ("validation_error", "validation_missing_required_field")
+        }
+        LegiParseError::InvalidDate { .. } => ("validation_error", "validation_invalid_date"),
+        LegiParseError::InvalidId { .. } => ("validation_error", "validation_invalid_id"),
+    }
+}
+
+fn default_legi_run_id() -> String {
+    format!("legi-{}", unix_seconds())
 }
 
 fn embed_chunks_payload(
@@ -661,6 +1131,14 @@ fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, Error
     Ok(index_dir)
 }
 
+fn require_configured_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {
+    configured_index_dir(index_dir).ok_or_else(|| {
+        index_unavailable(
+            "index directory is required; pass `--index-dir` or set JURISEARCH_INDEX_DIR",
+        )
+    })
+}
+
 fn configured_index_dir(index_dir: Option<&Path>) -> Option<PathBuf> {
     index_dir
         .map(Path::to_path_buf)
@@ -668,6 +1146,11 @@ fn configured_index_dir(index_dir: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
+    let pg_config = PgConfig::discover().map_err(storage_error_object)?;
+    ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
+}
+
+fn open_or_create_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
     let pg_config = PgConfig::discover().map_err(storage_error_object)?;
     ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
 }
@@ -1006,12 +1489,15 @@ fn parse_optional_usize(value: &str) -> Option<Option<usize>> {
     value.parse::<usize>().ok().map(Some)
 }
 
-fn today_utc() -> String {
-    let days_since_epoch = SystemTime::now()
+fn unix_seconds() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        / 86_400;
+}
+
+fn today_utc() -> String {
+    let days_since_epoch = unix_seconds() / 86_400;
     let (year, month, day) = civil_from_days(days_since_epoch as i64);
     format!("{year:04}-{month:02}-{day:02}")
 }

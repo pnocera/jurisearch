@@ -1,14 +1,22 @@
+use std::{
+    fs::{self, File},
+    io::Cursor,
+    path::Path,
+};
+
 use assert_cmd::Command;
+use flate2::{Compression, write::GzEncoder};
 use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
 use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestMemberInput, IngestMemberStatus, IngestRunInput,
         finish_ingest_run, record_ingest_member, start_ingest_run,
     },
-    runtime::{PgConfig, StorageError},
+    runtime::{ManagedPostgres, PgConfig, StorageError},
 };
 use predicates::prelude::*;
 use serde_json::Value;
+use tar::{Builder, Header};
 
 #[test]
 fn help_agent_works_without_index() {
@@ -372,6 +380,141 @@ fn ingest_embed_chunks_rejects_zero_index_lists_before_opening_index() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "bad_input");
+}
+
+#[test]
+fn ingest_legi_archives_rejects_zero_limit_before_opening_index() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "ingest",
+            "legi-archives",
+            "--archives-dir",
+            "/tmp",
+            "--limit-members",
+            "0",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+}
+
+#[test]
+fn ingest_legi_archives_records_accounting_and_quarantines_failures()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI LEGI archive ingest")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-ingest.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-archives.")
+        .tempdir()?;
+    let quarantine = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-quarantine.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_legi_global_20250101-000000.tar.gz");
+    let article = article_fixture();
+    write_tar_gz(
+        archive_path.as_path(),
+        &[
+            ("legi/articles/LEGIARTI000006419320.xml", article.as_bytes()),
+            ("legi/sections/SECTION.xml", b"<SECTION_TA/>"),
+            ("legi/articles/BROKEN.xml", b"<ARTICLE><META/></ARTICLE>"),
+        ],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args([
+            "--run-id",
+            "run-cli",
+            "--limit-members",
+            "3",
+            "--quarantine-dir",
+        ])
+        .arg(quarantine.path())
+        .arg("--safe-mode")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "ingest legi-archives");
+    assert_eq!(json["run_id"], "run-cli");
+    assert_eq!(json["run_status"], "failed");
+    assert_eq!(json["safe_mode"], true);
+    assert_eq!(json["visited_members"], 3);
+    assert_eq!(json["inserted_documents"], 1);
+    assert_eq!(json["skipped_members"], 1);
+    assert_eq!(json["failed_members"], 1);
+    assert_eq!(json["quarantined_payloads"], 1);
+    assert_eq!(json["unsupported_roots"]["SECTION_TA"], 1);
+
+    let quarantine_entries =
+        fs::read_dir(quarantine.path().join("run-cli"))?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(quarantine_entries.len(), 1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config.clone(), index.path())?;
+    assert_eq!(
+        postgres.execute_sql("SELECT count(*)::text FROM documents;")?,
+        "1"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT string_agg(status || ':' || member_count::text, ',' ORDER BY status) \
+             FROM (SELECT status, count(*) AS member_count FROM ingest_member GROUP BY status) s;",
+        )?,
+        "failed:1,inserted:1,skipped:1"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT string_agg(error_code, ',' ORDER BY error_code) FROM ingest_error;"
+        )?,
+        "validation_missing_required_field"
+    );
+    drop(postgres);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-cli-resume", "--limit-members", "1"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["inserted_documents"], 0);
+    assert_eq!(json["skipped_members"], 1);
+    assert_eq!(json["skipped_compatible_members"], 1);
+
+    Ok(())
 }
 
 #[test]
@@ -739,6 +882,62 @@ fn discover_pg_config(test_name: &str) -> Result<Option<PgConfig>, StorageError>
     }
 
     Ok(Some(pg_config))
+}
+
+fn write_tar_gz(path: &Path, members: &[(&str, &[u8])]) -> Result<(), Box<dyn std::error::Error>> {
+    let file = File::create(path)?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut builder = Builder::new(encoder);
+    for (member_path, bytes) in members {
+        let mut header = Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, member_path, Cursor::new(bytes))?;
+    }
+    builder.finish()?;
+    Ok(())
+}
+
+fn article_fixture() -> String {
+    r#"
+<ARTICLE>
+  <META>
+    <META_COMMUN>
+      <ID>LEGIARTI000006419320</ID>
+      <URL>/codes/article_lc/LEGIARTI000006419320</URL>
+      <NATURE>Article</NATURE>
+    </META_COMMUN>
+    <META_ARTICLE>
+      <NUM>1240</NUM>
+      <ETAT>VIGUEUR</ETAT>
+      <TYPE>AUTONOME</TYPE>
+      <DATE_DEBUT>1804-02-21</DATE_DEBUT>
+      <DATE_FIN>2999-01-01</DATE_FIN>
+    </META_ARTICLE>
+  </META>
+  <CONTEXTE>
+    <TEXTE>
+      <TITRE_TXT>Code civil</TITRE_TXT>
+      <TM>
+        <TITRE_TM>Livre III : Des differentes manieres dont on acquiert la propriete</TITRE_TM>
+        <TM>
+          <TITRE_TM>Titre IV : Des engagements qui se forment sans convention</TITRE_TM>
+        </TM>
+      </TM>
+    </TEXTE>
+  </CONTEXTE>
+  <BLOC_TEXTUEL>
+    <CONTENU>
+      <p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>
+    </CONTENU>
+  </BLOC_TEXTUEL>
+  <LIENS>
+    <LIEN cidtexte="JORFTEXT000000696195" id="LEGIARTI000006554637" sens="cible" typelien="MODIFICATION">Decret no 73-138 - art. 11</LIEN>
+  </LIENS>
+</ARTICLE>
+"#
+    .to_owned()
 }
 
 fn pgvector_literal(values: &[f32]) -> String {

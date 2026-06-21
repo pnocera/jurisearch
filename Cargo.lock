@@ -602,6 +602,7 @@ dependencies = [
  "anyhow",
  "assert_cmd",
  "clap",
+ "flate2",
  "jurisearch-core",
  "jurisearch-embed",
  "jurisearch-ingest",
@@ -609,6 +610,7 @@ dependencies = [
  "predicates",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
 ]
 
