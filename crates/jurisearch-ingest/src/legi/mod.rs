@@ -124,10 +124,24 @@ pub struct ParsedTextStruct {
     pub date_publi: Option<String>,
     pub date_texte: Option<String>,
     pub source_date_debut_hint: Option<String>,
+    #[serde(default)]
+    pub structure_links: Vec<ParsedTextStructLink>,
     pub source_payload_hash: String,
     pub source_archive: Option<String>,
     pub source_member_path: Option<String>,
     pub canonical_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParsedTextStructLink {
+    pub source_tag: String,
+    pub order: usize,
+    pub target_source_uid: Option<String>,
+    pub level: Option<i32>,
+    pub debut: Option<String>,
+    pub fin: Option<String>,
+    pub text: Option<String>,
+    pub attributes: Vec<GraphEdgeAttribute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -392,6 +406,7 @@ struct RawTextStruct {
     date_publi: Option<String>,
     date_texte: Option<String>,
     source_date_debut_hint: Option<String>,
+    structure_links: Vec<ParsedTextStructLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,19 +668,31 @@ fn parse_text_struct(
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut stack = Vec::<String>::new();
+    let mut link_stack = Vec::<usize>::new();
     let mut raw = RawTextStruct::default();
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(start)) => {
                 let name = local_name(start.local_name().as_ref());
+                let link_index = if is_text_struct_link_tag(name.as_str()) {
+                    Some(push_text_struct_link(&mut raw, &start, name.as_str())?)
+                } else {
+                    None
+                };
                 if matches!(name.as_str(), "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART") {
                     assign_text_struct_date_hint(&mut raw, &start)?;
                 }
                 stack.push(name);
+                if let Some(link_index) = link_index {
+                    link_stack.push(link_index);
+                }
             }
             Ok(Event::Empty(start)) => {
                 let name = local_name(start.local_name().as_ref());
+                if is_text_struct_link_tag(name.as_str()) {
+                    push_text_struct_link(&mut raw, &start, name.as_str())?;
+                }
                 if matches!(name.as_str(), "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART") {
                     assign_text_struct_date_hint(&mut raw, &start)?;
                 }
@@ -673,6 +700,12 @@ fn parse_text_struct(
                 stack.pop();
             }
             Ok(Event::End(_)) => {
+                if stack
+                    .last()
+                    .is_some_and(|name| is_text_struct_link_tag(name.as_str()))
+                {
+                    link_stack.pop();
+                }
                 stack.pop();
             }
             Ok(Event::Text(text)) => {
@@ -680,14 +713,17 @@ fn parse_text_struct(
                     message: error.to_string(),
                 })?;
                 assign_text_struct_text(&mut raw, &stack, value.as_ref());
+                assign_text_struct_link_text(&mut raw, &link_stack, value.as_ref());
             }
             Ok(Event::CData(text)) => {
                 let value = String::from_utf8_lossy(text.as_ref());
                 assign_text_struct_text(&mut raw, &stack, value.as_ref());
+                assign_text_struct_link_text(&mut raw, &link_stack, value.as_ref());
             }
             Ok(Event::GeneralRef(reference)) => {
                 let value = resolve_reference(&reference)?;
                 assign_text_struct_text(&mut raw, &stack, value.as_str());
+                assign_text_struct_link_text(&mut raw, &link_stack, value.as_str());
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
@@ -1036,6 +1072,7 @@ impl RawTextStruct {
             date_publi: optional_non_empty(self.date_publi),
             date_texte: optional_non_empty(self.date_texte),
             source_date_debut_hint: self.source_date_debut_hint,
+            structure_links: self.structure_links,
             source_payload_hash,
             source_archive: provenance.archive_name,
             source_member_path: provenance.member_path,
@@ -1183,6 +1220,60 @@ fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>,
         });
     }
     Ok(attributes)
+}
+
+fn push_text_struct_link(
+    raw: &mut RawTextStruct,
+    start: &BytesStart<'_>,
+    source_tag: &str,
+) -> Result<usize, LegiParseError> {
+    let attributes = collect_attributes(start)?;
+    let target_source_uid = attributes
+        .iter()
+        .find_map(|attribute| extract_known_source_uid(attribute.value.as_str()));
+    let level =
+        text_struct_link_attribute(&attributes, "niv").and_then(|value| value.parse::<i32>().ok());
+    let debut = text_struct_link_attribute(&attributes, "debut");
+    let fin = text_struct_link_attribute(&attributes, "fin");
+    let order = raw.structure_links.len();
+    raw.structure_links.push(ParsedTextStructLink {
+        source_tag: source_tag.to_owned(),
+        order,
+        target_source_uid,
+        level,
+        debut,
+        fin,
+        text: None,
+        attributes,
+    });
+    Ok(order)
+}
+
+fn text_struct_link_attribute(attributes: &[GraphEdgeAttribute], key: &str) -> Option<String> {
+    attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| optional_non_empty(Some(attribute.value.clone())))
+}
+
+fn assign_text_struct_link_text(raw: &mut RawTextStruct, link_stack: &[usize], value: &str) {
+    let Some(link) = link_stack
+        .last()
+        .and_then(|index| raw.structure_links.get_mut(*index))
+    else {
+        return;
+    };
+    let mut text = link.text.clone().unwrap_or_default();
+    append_xml_content(&mut text, value);
+    link.text = if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    };
+}
+
+fn is_text_struct_link_tag(name: &str) -> bool {
+    matches!(name, "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART")
 }
 
 fn attribute_value(start: &BytesStart<'_>, wanted: &str) -> Result<Option<String>, LegiParseError> {
@@ -1981,8 +2072,8 @@ mod tests {
     </META_SPEC>
   </META>
   <STRUCT>
-    <LIEN_ART id="LEGIARTI000006419320" debut="1804-02-21" fin="2999-01-01"/>
-    <LIEN_SECTION_TA id="LEGISCTA000006089696" debut="1804-03-21" fin="2999-01-01"/>
+    <LIEN_ART id="LEGIARTI000006419320" num="1" origine="LEGI" debut="1804-02-21" fin="2999-01-01" etat="VIGUEUR"/>
+    <LIEN_SECTION_TA id="LEGISCTA000006089696" debut="1804-03-21" fin="2999-01-01" niv="1" cid="LEGITEXT000006070721" url="/codes/section_lc/LEGISCTA000006089696" etat="VIGUEUR">Titre preliminaire</LIEN_SECTION_TA>
   </STRUCT>
 </TEXTELR>
 "#,
@@ -2001,6 +2092,32 @@ mod tests {
         );
         assert_eq!(text_struct.date_publi.as_deref(), Some("1804-03-21"));
         assert_eq!(text_struct.date_texte.as_deref(), Some("1804-03-21"));
+        assert_eq!(text_struct.structure_links.len(), 2);
+        assert_eq!(text_struct.structure_links[0].source_tag, "LIEN_ART");
+        assert_eq!(text_struct.structure_links[0].order, 0);
+        assert_eq!(
+            text_struct.structure_links[0].target_source_uid.as_deref(),
+            Some("LEGIARTI000006419320")
+        );
+        assert_eq!(
+            text_struct.structure_links[0].debut.as_deref(),
+            Some("1804-02-21")
+        );
+        assert_eq!(
+            text_struct.structure_links[0].fin.as_deref(),
+            Some("2999-01-01")
+        );
+        assert_eq!(text_struct.structure_links[1].source_tag, "LIEN_SECTION_TA");
+        assert_eq!(text_struct.structure_links[1].order, 1);
+        assert_eq!(
+            text_struct.structure_links[1].target_source_uid.as_deref(),
+            Some("LEGISCTA000006089696")
+        );
+        assert_eq!(text_struct.structure_links[1].level, Some(1));
+        assert_eq!(
+            text_struct.structure_links[1].text.as_deref(),
+            Some("Titre preliminaire")
+        );
     }
 
     #[test]

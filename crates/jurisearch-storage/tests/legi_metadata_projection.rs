@@ -185,6 +185,16 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
         )?,
         "absent"
     );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT canonical_json->'structure_links'->0->>'source_tag' || ':' || \
+                    coalesce(canonical_json->'structure_links'->0->>'target_source_uid', 'absent') || ':' || \
+                    coalesce(canonical_json->'structure_links'->0->>'debut', 'absent') \
+             FROM legi_metadata_roots \
+             WHERE root_kind = 'TEXTELR';",
+        )?,
+        "LIEN_TXT:LEGITEXT000006070721:1804-03-21"
+    );
 
     postgres.execute_sql(&format!(
         "INSERT INTO documents \
