@@ -680,7 +680,8 @@ fn load_replay_snapshot(
                     coalesce(version_group, ''), coalesce(citation, ''), \
                     coalesce(title, ''), body, coalesce(valid_from::text, ''), \
                     coalesce(valid_to::text, ''), coalesce(valid_to_raw, ''), \
-                    coalesce(source_url, ''), source_payload_hash, canonical_json::text)) AS row_hash \
+                    coalesce(source_url, ''), source_payload_hash, hierarchy_path::text, \
+                    canonical_json::text)) AS row_hash \
          FROM documents",
     )?;
     let chunks = snapshot_component(

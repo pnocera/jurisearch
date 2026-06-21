@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 6;
+pub const CURRENT_SCHEMA_VERSION: i32 = 7;
 
 struct Migration {
     version: i32,
@@ -273,6 +273,42 @@ WHERE d.document_id = c.document_id
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 6), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 7,
+        name: "document_hierarchy_path_index",
+        sql: r#"
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS hierarchy_path jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+UPDATE documents d
+SET hierarchy_path = COALESCE(
+        CASE
+            WHEN jsonb_typeof(d.canonical_json->'hierarchy_path') = 'array'
+                THEN d.canonical_json->'hierarchy_path'
+            ELSE NULL
+        END,
+        (
+            SELECT c.hierarchy_path
+            FROM chunks c
+            WHERE c.document_id = d.document_id
+              AND jsonb_typeof(c.hierarchy_path) = 'array'
+              AND jsonb_array_length(c.hierarchy_path) > 0
+            ORDER BY c.chunk_index
+            LIMIT 1
+        ),
+        d.hierarchy_path
+    );
+
+CREATE INDEX IF NOT EXISTS documents_context_hierarchy_idx
+ON documents (source, kind, (md5(hierarchy_path::text)));
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 7), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

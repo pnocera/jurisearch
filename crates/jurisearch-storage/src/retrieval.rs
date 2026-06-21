@@ -306,7 +306,7 @@ WITH target_raw AS (
         d.valid_to,
         d.valid_to_raw,
         d.source_url,
-        d.canonical_json
+        d.hierarchy_path
     FROM documents d
     WHERE d.document_id = {document_id}
 ),
@@ -314,22 +314,12 @@ target AS (
     SELECT
         t.*,
         CASE
-            WHEN jsonb_typeof(chunk_path.hierarchy_path) = 'array'
-             AND jsonb_array_length(chunk_path.hierarchy_path) > 0
-                THEN chunk_path.hierarchy_path
-            WHEN jsonb_typeof(t.canonical_json->'hierarchy_path') = 'array'
-                THEN t.canonical_json->'hierarchy_path'
+            WHEN jsonb_typeof(t.hierarchy_path) = 'array'
+                THEN t.hierarchy_path
             ELSE '[]'::jsonb
-        END AS hierarchy_path,
+        END AS context_hierarchy_path,
         COALESCE({as_of_expression}, t.valid_from, CURRENT_DATE) AS effective_as_of
     FROM target_raw t
-    LEFT JOIN LATERAL (
-        SELECT c.hierarchy_path
-        FROM chunks c
-        WHERE c.document_id = t.document_id
-        ORDER BY c.chunk_index
-        LIMIT 1
-    ) chunk_path ON true
 ),
 visible_target AS (
     SELECT *
@@ -351,31 +341,17 @@ sibling_candidates AS (
         d.valid_to::text AS valid_to,
         d.valid_to_raw,
         d.source_url,
-        sibling_path.hierarchy_path
+        d.hierarchy_path
     FROM visible_target t
     JOIN documents d
       ON d.source = t.source
      AND d.kind = t.kind
+     AND md5(d.hierarchy_path::text) = md5(t.context_hierarchy_path::text)
+     AND d.hierarchy_path = t.context_hierarchy_path
      AND d.document_id <> t.document_id
-    LEFT JOIN LATERAL (
-        SELECT
-            CASE
-                WHEN jsonb_typeof(c.hierarchy_path) = 'array'
-                 AND jsonb_array_length(c.hierarchy_path) > 0
-                    THEN c.hierarchy_path
-                WHEN jsonb_typeof(d.canonical_json->'hierarchy_path') = 'array'
-                    THEN d.canonical_json->'hierarchy_path'
-                ELSE '[]'::jsonb
-            END AS hierarchy_path
-        FROM chunks c
-        WHERE c.document_id = d.document_id
-        ORDER BY c.chunk_index
-        LIMIT 1
-    ) sibling_path ON true
     WHERE {include_siblings}
-      AND jsonb_typeof(t.hierarchy_path) = 'array'
-      AND jsonb_array_length(t.hierarchy_path) > 0
-      AND sibling_path.hierarchy_path = t.hierarchy_path
+      AND jsonb_typeof(t.context_hierarchy_path) = 'array'
+      AND jsonb_array_length(t.context_hierarchy_path) > 0
       AND (d.valid_from IS NULL OR d.valid_from <= t.effective_as_of)
       AND (d.valid_to IS NULL OR d.valid_to > t.effective_as_of)
 ),
@@ -405,7 +381,7 @@ SELECT jsonb_build_object(
                 'to_exclusive', true
             ),
             'source_url', t.source_url,
-            'hierarchy_path', t.hierarchy_path
+            'hierarchy_path', t.context_hierarchy_path
         )
         FROM visible_target t
     ),
@@ -418,7 +394,7 @@ SELECT jsonb_build_object(
             ORDER BY path.ordinality
         )
         FROM visible_target t,
-             jsonb_array_elements_text(t.hierarchy_path) WITH ORDINALITY AS path(value, ordinality)
+             jsonb_array_elements_text(t.context_hierarchy_path) WITH ORDINALITY AS path(value, ordinality)
     ), '[]'::jsonb),
     'siblings', COALESCE((
         SELECT jsonb_agg(

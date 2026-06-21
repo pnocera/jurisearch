@@ -59,9 +59,10 @@ fn legi_full_hierarchy_survives_parse_chunk_storage_and_context() -> Result<(), 
     assert_eq!(insert_report.chunks, 3);
 
     let stored_chunk_path = postgres.execute_sql(
-        "SELECT hierarchy_path::text \
-         FROM chunks \
-         WHERE document_id = 'legi:LEGIARTI000000000001@2024-01-01';",
+        "SELECT d.hierarchy_path::text || '|' || c.hierarchy_path::text \
+         FROM documents d \
+         JOIN chunks c ON c.document_id = d.document_id \
+         WHERE d.document_id = 'legi:LEGIARTI000000000001@2024-01-01';",
     )?;
     assert!(stored_chunk_path.contains("Chapitre III : Des actes relatifs au mariage"));
     let stored_context = postgres.execute_sql(

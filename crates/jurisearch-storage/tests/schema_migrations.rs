@@ -38,6 +38,7 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         assert!(migrations.contains("4:legi_metadata_roots"));
         assert!(migrations.contains("5:documents_source_uid_index"));
         assert!(migrations.contains("6:chunk_provenance_columns"));
+        assert!(migrations.contains("7:document_hierarchy_path_index"));
         assert_eq!(
             postgres.execute_sql(
                 "SELECT count(*)::text \
@@ -46,6 +47,25 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
                    AND indexname = 'documents_source_uid_idx';",
             )?,
             "1"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT (indexdef LIKE '%md5((hierarchy_path)::text)%')::text \
+                 FROM pg_indexes \
+                 WHERE schemaname = current_schema() \
+                   AND indexname = 'documents_context_hierarchy_idx';",
+            )?,
+            "true"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT column_name \
+                 FROM information_schema.columns \
+                 WHERE table_schema = current_schema() \
+                   AND table_name = 'documents' \
+                   AND column_name = 'hierarchy_path';",
+            )?,
+            "hierarchy_path"
         );
         assert_eq!(
             postgres.execute_sql(
@@ -117,11 +137,12 @@ fn migrations_install_minimal_schema_and_are_idempotent() -> Result<(), StorageE
         assert_eq!(manifest_version, CURRENT_SCHEMA_VERSION.to_string());
         assert_eq!(
             postgres.execute_sql(
-                "SELECT chunking || ':' || boundary || ':' || hierarchy_path::text \
-                 FROM chunks \
-                 WHERE chunk_id = 'chunk:1240:0';",
+                "SELECT d.hierarchy_path::text || '|' || c.chunking || ':' || c.boundary || ':' || c.hierarchy_path::text \
+                 FROM documents d \
+                 JOIN chunks c ON c.document_id = d.document_id \
+                 WHERE c.chunk_id = 'chunk:1240:0';",
             )?,
-            "structural:unknown:[]"
+            "[]|structural:unknown:[]"
         );
     }
 
@@ -149,7 +170,7 @@ fn chunk_provenance_backfill_sql_materializes_existing_canonical_json() -> Resul
             'LEGIARTI000000000001', 'LEGIARTI000000000001', 'Code civil article 1', \
             'Article 1', 'Disposition generale.', '2024-01-01', \
             'sha256:article-1', \
-            '{\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1\\nDisposition generale.\",\"chunking\":\"structural\",\"boundary\":\"article\",\"hierarchy_path\":[\"Code civil\",\"Titre preliminaire\"]}]}'); \
+            '{\"hierarchy_path\":[\"Code civil\",\"Titre preliminaire\"],\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1\\nDisposition generale.\",\"chunking\":\"structural\",\"boundary\":\"article\",\"hierarchy_path\":[\"Code civil\",\"Titre preliminaire\"]}]}'); \
          INSERT INTO chunks \
            (chunk_id, document_id, chunk_index, body, source_payload_hash, \
             chunk_builder_version, contextualized_body, chunking, boundary, hierarchy_path) \
@@ -181,14 +202,36 @@ fn chunk_provenance_backfill_sql_materializes_existing_canonical_json() -> Resul
          WHERE d.document_id = c.document_id \
            AND jsonb_typeof(d.canonical_json->'chunks') = 'array';",
     )?;
+    postgres.execute_sql(
+        "UPDATE documents d \
+         SET hierarchy_path = COALESCE( \
+                 CASE \
+                     WHEN jsonb_typeof(d.canonical_json->'hierarchy_path') = 'array' \
+                         THEN d.canonical_json->'hierarchy_path' \
+                     ELSE NULL \
+                 END, \
+                 ( \
+                     SELECT c.hierarchy_path \
+                     FROM chunks c \
+                     WHERE c.document_id = d.document_id \
+                       AND jsonb_typeof(c.hierarchy_path) = 'array' \
+                       AND jsonb_array_length(c.hierarchy_path) > 0 \
+                     ORDER BY c.chunk_index \
+                     LIMIT 1 \
+                 ), \
+                 d.hierarchy_path \
+             );",
+    )?;
 
     assert_eq!(
         postgres.execute_sql(
-            "SELECT contextualized_body, chunking, boundary, hierarchy_path->>1 \
-             FROM chunks \
-             WHERE chunk_id = 'chunk:article-1:0';",
+            "SELECT c.contextualized_body, c.chunking, c.boundary, \
+                    d.hierarchy_path->>1, c.hierarchy_path->>1 \
+             FROM chunks c \
+             JOIN documents d ON d.document_id = c.document_id \
+             WHERE c.chunk_id = 'chunk:article-1:0';",
         )?,
-        "Code civil > Article 1\nDisposition generale.|structural|article|Titre preliminaire"
+        "Code civil > Article 1\nDisposition generale.|structural|article|Titre preliminaire|Titre preliminaire"
     );
 
     Ok(())

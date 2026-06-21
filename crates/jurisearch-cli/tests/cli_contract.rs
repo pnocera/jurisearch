@@ -1456,22 +1456,25 @@ fn context_returns_hierarchy_and_siblings_from_existing_index() -> Result<(), St
         postgres.execute_sql(
             "INSERT INTO documents \
                 (document_id, source, kind, source_uid, citation, title, body, \
-                 valid_from, valid_to, source_payload_hash, canonical_json) \
+                 valid_from, valid_to, source_payload_hash, hierarchy_path, canonical_json) \
              VALUES \
                 ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
                  'LEGIARTI000006419320', 'Code civil article 1240', \
                  'Article 1240', 'Responsabilite civile.', '1804-02-21', NULL, \
                  'sha256:article-1240', \
+                 '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
                  '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
                 ('legi:LEGIARTI000006419321@1804-02-21', 'legi', 'article', \
                  'LEGIARTI000006419321', 'Code civil article 1241', \
                  'Article 1241', 'Responsabilite voisine.', '1804-02-21', NULL, \
                  'sha256:article-1241', \
+                 '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
                  '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
                 ('legi:LEGIARTI000006419322@2025-01-01', 'legi', 'article', \
                  'LEGIARTI000006419322', 'Code civil article futur', \
                  'Article futur', 'Future section article.', '2025-01-01', NULL, \
                  'sha256:article-future', \
+                 '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
                  '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'); \
              INSERT INTO chunks \
                 (chunk_id, document_id, chunk_index, body, contextualized_body, chunking, \

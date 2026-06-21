@@ -67,10 +67,12 @@ pub fn insert_legi_documents(
         .prepare(
             "INSERT INTO documents \
                 (document_id, source, kind, source_uid, version_group, citation, title, body, \
-                 valid_from, valid_to, valid_to_raw, source_url, source_payload_hash, canonical_json) \
+                 valid_from, valid_to, valid_to_raw, source_url, source_payload_hash, \
+                 hierarchy_path, canonical_json) \
              VALUES \
                 ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 $9::text::date, $10::text::date, $11, $12, $13, $14::text::jsonb) \
+                 $9::text::date, $10::text::date, $11, $12, $13, $14::text::jsonb, \
+                 $15::text::jsonb) \
              ON CONFLICT (document_id) DO UPDATE SET \
                 source = EXCLUDED.source, \
                 kind = EXCLUDED.kind, \
@@ -84,6 +86,7 @@ pub fn insert_legi_documents(
                 valid_to_raw = EXCLUDED.valid_to_raw, \
                 source_url = EXCLUDED.source_url, \
                 source_payload_hash = EXCLUDED.source_payload_hash, \
+                hierarchy_path = EXCLUDED.hierarchy_path, \
                 canonical_json = EXCLUDED.canonical_json, \
                 updated_at = now();",
         )
@@ -138,6 +141,7 @@ pub fn insert_legi_documents(
                 ),
             })?;
         let canonical_json = serde_json::to_string(document)?;
+        let document_hierarchy_path = serde_json::to_string(&document.hierarchy_path)?;
         transaction
             .execute(
                 &document_statement,
@@ -155,6 +159,7 @@ pub fn insert_legi_documents(
                     &document.valid_to_raw,
                     &document.source_url,
                     &document.source_payload_hash,
+                    &document_hierarchy_path,
                     &canonical_json,
                 ],
             )
@@ -435,6 +440,7 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
         .prepare(
             "UPDATE documents \
              SET canonical_json = $2::text::jsonb, \
+                 hierarchy_path = COALESCE($2::text::jsonb->'hierarchy_path', hierarchy_path), \
                  updated_at = now() \
              WHERE document_id = $1;",
         )

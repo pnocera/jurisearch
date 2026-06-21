@@ -151,23 +151,27 @@ fn context_documents_json_reconstructs_hierarchy_and_date_filtered_siblings()
     postgres.execute_sql(
         "INSERT INTO documents \
            (document_id, source, kind, source_uid, citation, title, body, \
-            valid_from, valid_to, source_payload_hash, canonical_json) \
+            valid_from, valid_to, source_payload_hash, hierarchy_path, canonical_json) \
          VALUES \
            ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
             'LEGIARTI000006419320', 'Code civil article 1240', 'Article 1240', \
             'Responsabilite civile.', '1804-02-21', NULL, 'sha256:1240', \
+            '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
             '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
            ('legi:LEGIARTI000006419321@1804-02-21', 'legi', 'article', \
             'LEGIARTI000006419321', 'Code civil article 1241', 'Article 1241', \
             'Responsabilite voisine.', '1804-02-21', NULL, 'sha256:1241', \
+            '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
             '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
            ('legi:LEGIARTI000006419322@2025-01-01', 'legi', 'article', \
             'LEGIARTI000006419322', 'Code civil article futur', 'Article futur', \
             'Version future.', '2025-01-01', NULL, 'sha256:future', \
+            '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
             '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'), \
            ('legi:LEGIARTI000006419400@1804-02-21', 'legi', 'article', \
             'LEGIARTI000006419400', 'Code civil article autre', 'Article autre', \
             'Autre section.', '1804-02-21', NULL, 'sha256:other', \
+            '[\"Code civil\",\"Livre III\",\"Titre V\"]'::jsonb, \
             '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre V\"]}'); \
          INSERT INTO chunks \
            (chunk_id, document_id, chunk_index, body, contextualized_body, chunking, boundary, \
@@ -236,12 +240,13 @@ fn context_documents_json_reconstructs_hierarchy_and_date_filtered_siblings()
     postgres.execute_sql(
         "INSERT INTO documents \
            (document_id, source, kind, source_uid, citation, title, body, \
-            valid_from, valid_to, source_payload_hash, canonical_json) \
+            valid_from, valid_to, source_payload_hash, hierarchy_path, canonical_json) \
          SELECT \
            'legi:generated-sibling-' || g::text || '@1804-02-21', 'legi', 'article', \
            'generated-sibling-' || g::text, 'Code civil generated sibling ' || g::text, \
            'Article S' || lpad(g::text, 2, '0'), 'Generated sibling.', \
            '1804-02-21'::date, NULL::date, 'sha256:generated-sibling-' || g::text, \
+           '[\"Code civil\",\"Livre III\",\"Titre IV\"]'::jsonb, \
            '{\"hierarchy_path\":[\"Code civil\",\"Livre III\",\"Titre IV\"]}'::jsonb \
          FROM generate_series(1, 55) AS g; \
          INSERT INTO chunks \
@@ -274,14 +279,16 @@ fn context_documents_json_reconstructs_hierarchy_and_date_filtered_siblings()
     postgres.execute_sql(
         "INSERT INTO documents \
            (document_id, source, kind, source_uid, citation, title, body, \
-            valid_from, source_payload_hash, canonical_json) \
+            valid_from, source_payload_hash, hierarchy_path, canonical_json) \
          VALUES \
            ('legi:empty-path-target@1804-02-21', 'legi', 'article', 'empty-target', \
             'Empty path target', 'Article empty', 'Empty hierarchy target.', \
-            '1804-02-21', 'sha256:empty-target', '{\"hierarchy_path\":[]}'::jsonb), \
+            '1804-02-21', 'sha256:empty-target', '[]'::jsonb, \
+            '{\"hierarchy_path\":[]}'::jsonb), \
            ('legi:empty-path-other@1804-02-21', 'legi', 'article', 'empty-other', \
             'Empty path other', 'Article empty other', 'Empty hierarchy other.', \
-            '1804-02-21', 'sha256:empty-other', '{\"hierarchy_path\":[]}'::jsonb); \
+            '1804-02-21', 'sha256:empty-other', '[]'::jsonb, \
+            '{\"hierarchy_path\":[]}'::jsonb); \
          INSERT INTO chunks \
            (chunk_id, document_id, chunk_index, body, source_payload_hash, chunk_builder_version) \
          VALUES \
