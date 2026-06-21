@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use quick_xml::{
     Reader,
-    events::{BytesRef, Event},
+    events::{BytesRef, BytesStart, Event},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,6 +67,7 @@ pub struct CanonicalDocument {
     pub source_archive: Option<String>,
     pub source_member_path: Option<String>,
     pub hierarchy_path: Vec<String>,
+    pub publisher_edges: Vec<CanonicalGraphEdge>,
     pub canonical_version: String,
 }
 
@@ -122,6 +123,29 @@ impl CanonicalDocument {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalGraphEdge {
+    pub edge_id: String,
+    pub from_document_id: String,
+    pub from_source_uid: String,
+    pub to_source_uid: Option<String>,
+    pub to_document_id: Option<String>,
+    pub relation: String,
+    pub edge_source: String,
+    pub source_tag: String,
+    pub source_text: Option<String>,
+    pub source_payload_hash: String,
+    pub source_archive: Option<String>,
+    pub source_member_path: Option<String>,
+    pub attributes: Vec<GraphEdgeAttribute>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphEdgeAttribute {
+    pub key: String,
+    pub value: String,
+}
+
 #[derive(Debug, Error)]
 pub enum CanonicalValidationError {
     #[error("canonical document source must be `legi`, got `{actual}`")]
@@ -173,6 +197,14 @@ struct RawArticle {
     date_fin: Option<String>,
     body: String,
     hierarchy_path: Vec<String>,
+    publisher_links: Vec<RawPublisherLink>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawPublisherLink {
+    source_tag: String,
+    text: String,
+    attributes: Vec<GraphEdgeAttribute>,
 }
 
 pub fn parse_legi_xml(
@@ -229,16 +261,38 @@ fn parse_article(
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut stack = Vec::<String>::new();
+    let mut link_stack = Vec::<usize>::new();
     let mut raw = RawArticle::default();
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(start)) => stack.push(local_name(start.local_name().as_ref())),
+            Ok(Event::Start(start)) => {
+                let name = local_name(start.local_name().as_ref());
+                let link_index = if is_publisher_link_tag(name.as_str()) {
+                    Some(push_publisher_link(&mut raw, &start, name.as_str())?)
+                } else {
+                    None
+                };
+                stack.push(name);
+                if let Some(link_index) = link_index {
+                    link_stack.push(link_index);
+                }
+            }
             Ok(Event::Empty(start)) => {
-                stack.push(local_name(start.local_name().as_ref()));
+                let name = local_name(start.local_name().as_ref());
+                if is_publisher_link_tag(name.as_str()) {
+                    push_publisher_link(&mut raw, &start, name.as_str())?;
+                }
+                stack.push(name);
                 stack.pop();
             }
             Ok(Event::End(_)) => {
+                if stack
+                    .last()
+                    .is_some_and(|name| is_publisher_link_tag(name.as_str()))
+                {
+                    link_stack.pop();
+                }
                 stack.pop();
             }
             Ok(Event::Text(text)) => {
@@ -246,14 +300,17 @@ fn parse_article(
                     message: error.to_string(),
                 })?;
                 assign_article_text(&mut raw, &stack, value.as_ref());
+                assign_link_text(&mut raw, &link_stack, value.as_ref());
             }
             Ok(Event::CData(text)) => {
                 let value = String::from_utf8_lossy(text.as_ref());
                 assign_article_text(&mut raw, &stack, value.as_ref());
+                assign_link_text(&mut raw, &link_stack, value.as_ref());
             }
             Ok(Event::GeneralRef(reference)) => {
                 let value = resolve_reference(&reference)?;
                 assign_article_text(&mut raw, &stack, value.as_str());
+                assign_link_text(&mut raw, &link_stack, value.as_str());
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
@@ -324,6 +381,7 @@ impl RawArticle {
         let source_payload_hash = provenance
             .payload_hash
             .unwrap_or_else(|| source_payload_hash(xml.as_bytes()));
+        let publisher_links = self.publisher_links;
         let title = format!("Article {num}");
         let citation_prefix = self
             .hierarchy_path
@@ -351,11 +409,18 @@ impl RawArticle {
             source_archive: provenance.archive_name,
             source_member_path: provenance.member_path,
             hierarchy_path: self.hierarchy_path,
+            publisher_edges: Vec::new(),
             canonical_version: format!(
                 "legi_article:v1:nature={nature}:etat={}:type={article_type}",
                 etat.as_deref().unwrap_or("absent")
             ),
         };
+        let mut document = document;
+        document.publisher_edges = publisher_links
+            .into_iter()
+            .enumerate()
+            .map(|(index, link)| link.into_edge(index, &document))
+            .collect();
         document.validate().map_err(|error| LegiParseError::Xml {
             message: format!("canonical validation failed: {error}"),
         })?;
@@ -393,6 +458,133 @@ fn optional_non_empty(value: Option<String>) -> Option<String> {
             Some(trimmed.to_owned())
         }
     })
+}
+
+impl RawPublisherLink {
+    fn into_edge(self, index: usize, document: &CanonicalDocument) -> CanonicalGraphEdge {
+        let to_source_uid = self.target_source_uid();
+        let source_text = optional_non_empty(Some(self.text));
+        let edge_id = publisher_edge_id(
+            document.document_id.as_str(),
+            index,
+            self.source_tag.as_str(),
+            to_source_uid.as_deref(),
+            source_text.as_deref(),
+        );
+
+        CanonicalGraphEdge {
+            edge_id,
+            from_document_id: document.document_id.clone(),
+            from_source_uid: document.source_uid.clone(),
+            to_source_uid,
+            to_document_id: None,
+            relation: "refers_to".to_owned(),
+            edge_source: "publisher".to_owned(),
+            source_tag: self.source_tag,
+            source_text,
+            source_payload_hash: document.source_payload_hash.clone(),
+            source_archive: document.source_archive.clone(),
+            source_member_path: document.source_member_path.clone(),
+            attributes: self.attributes,
+        }
+    }
+
+    fn target_source_uid(&self) -> Option<String> {
+        ["id", "cid", "cidtexte", "href"]
+            .iter()
+            .find_map(|key| self.attribute_value(key))
+            .map(|value| extract_known_source_uid(value.as_str()).unwrap_or(value))
+    }
+
+    fn attribute_value(&self, key: &str) -> Option<String> {
+        self.attributes
+            .iter()
+            .find(|attribute| attribute.key == key)
+            .and_then(|attribute| optional_non_empty(Some(attribute.value.clone())))
+    }
+}
+
+fn push_publisher_link(
+    raw: &mut RawArticle,
+    start: &BytesStart<'_>,
+    source_tag: &str,
+) -> Result<usize, LegiParseError> {
+    let attributes = collect_attributes(start)?;
+    raw.publisher_links.push(RawPublisherLink {
+        source_tag: source_tag.to_owned(),
+        text: String::new(),
+        attributes,
+    });
+    Ok(raw.publisher_links.len() - 1)
+}
+
+fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>, LegiParseError> {
+    let mut attributes = Vec::new();
+    for attribute in start.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| LegiParseError::Xml {
+            message: error.to_string(),
+        })?;
+        let value = attribute
+            .decode_and_unescape_value(start.decoder())
+            .map_err(|error| LegiParseError::Xml {
+                message: error.to_string(),
+            })?;
+        attributes.push(GraphEdgeAttribute {
+            key: local_name(attribute.key.as_ref()),
+            value: value.into_owned(),
+        });
+    }
+    Ok(attributes)
+}
+
+fn assign_link_text(raw: &mut RawArticle, link_stack: &[usize], value: &str) {
+    if let Some(link) = link_stack
+        .last()
+        .and_then(|index| raw.publisher_links.get_mut(*index))
+    {
+        append_xml_content(&mut link.text, value);
+    }
+}
+
+fn is_publisher_link_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "LIEN" | "LIEN_ART" | "LIEN_SECTION_TA" | "LIEN_TXT" | "a" | "A"
+    )
+}
+
+fn publisher_edge_id(
+    from_document_id: &str,
+    index: usize,
+    source_tag: &str,
+    to_source_uid: Option<&str>,
+    source_text: Option<&str>,
+) -> String {
+    let evidence = format!(
+        "{from_document_id}|{index}|{source_tag}|{}|{}",
+        to_source_uid.unwrap_or_default(),
+        source_text.unwrap_or_default()
+    );
+    let hash = source_payload_hash(evidence.as_bytes());
+    let digest = hash.strip_prefix("sha256:").unwrap_or(hash.as_str());
+    format!("publisher-edge:{digest}")
+}
+
+fn extract_known_source_uid(value: &str) -> Option<String> {
+    ["LEGIARTI", "LEGISCTA", "LEGITEXT", "JORFTEXT"]
+        .iter()
+        .find_map(|prefix| {
+            let start = value.find(prefix)?;
+            let suffix = value[start + prefix.len()..]
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric())
+                .collect::<String>();
+            if suffix.is_empty() {
+                None
+            } else {
+                Some(format!("{prefix}{suffix}"))
+            }
+        })
 }
 
 fn validate_id(
@@ -595,6 +787,28 @@ mod tests {
                 "Titre IV : Des engagements qui se forment sans convention".to_owned(),
             ]
         );
+        assert_eq!(document.publisher_edges.len(), 1);
+        let edge = &document.publisher_edges[0];
+        assert_eq!(edge.from_document_id, document.document_id);
+        assert_eq!(edge.from_source_uid, document.source_uid);
+        assert_eq!(edge.to_source_uid.as_deref(), Some("LEGIARTI000006554637"));
+        assert_eq!(edge.to_document_id, None);
+        assert_eq!(edge.relation, "refers_to");
+        assert_eq!(edge.edge_source, "publisher");
+        assert_eq!(edge.source_tag, "LIEN");
+        assert_eq!(
+            edge.source_text.as_deref(),
+            Some("Decret no 73-138 - art. 11")
+        );
+        assert_eq!(edge.source_payload_hash, document.source_payload_hash);
+        assert_eq!(edge.source_archive, document.source_archive);
+        assert_eq!(edge.source_member_path, document.source_member_path);
+        assert!(
+            edge.attributes
+                .iter()
+                .any(|attribute| attribute.key == "typelien" && attribute.value == "MODIFICATION")
+        );
+        assert!(edge.edge_id.starts_with("publisher-edge:"));
         assert_eq!(
             document.source_archive.as_deref(),
             Some("Freemium_legi_global.tar.gz")
@@ -617,6 +831,28 @@ mod tests {
         assert_eq!(document.body, "Droit & obligations <ref> café inline suite");
         assert!(!document.body.contains("Droit  obligations"));
         assert!(!document.body.contains("inline\nsuite"));
+    }
+
+    #[test]
+    fn extracts_inline_anchor_publisher_edges() {
+        let xml = article_fixture().replace(
+            "<p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>",
+            r#"<p>Voir <a href="/codes/article_lc/LEGIARTI000006419321">article suivant</a>.</p>"#,
+        );
+        let document = parse_article_fixture(&xml).unwrap();
+
+        let anchor_edge = document
+            .publisher_edges
+            .iter()
+            .find(|edge| edge.source_tag == "a")
+            .expect("expected inline anchor edge");
+
+        assert_eq!(
+            anchor_edge.to_source_uid.as_deref(),
+            Some("LEGIARTI000006419321")
+        );
+        assert_eq!(anchor_edge.source_text.as_deref(), Some("article suivant"));
+        assert_eq!(anchor_edge.edge_source, "publisher");
     }
 
     #[test]
@@ -805,6 +1041,9 @@ mod tests {
       <p>Tout fait quelconque de l'homme, qui cause a autrui un dommage, oblige celui par la faute duquel il est arrive a le reparer.</p>
     </CONTENU>
   </BLOC_TEXTUEL>
+  <LIENS>
+    <LIEN cidtexte="JORFTEXT000000696195" id="LEGIARTI000006554637" sens="cible" typelien="MODIFICATION">Decret no 73-138 - art. 11</LIEN>
+  </LIENS>
 </ARTICLE>
 "#
         .to_owned()

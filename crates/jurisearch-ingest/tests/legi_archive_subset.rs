@@ -34,6 +34,7 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
     let mut visited_members = 0usize;
     let mut article_attempts = 0usize;
     let mut parsed_articles = 0usize;
+    let mut publisher_edges = 0usize;
     let mut unsupported_roots = BTreeSet::new();
     let mut parse_errors = Vec::new();
 
@@ -62,6 +63,12 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
                     document.validate().unwrap_or_else(|error| {
                         panic!("{member_path} produced an invalid canonical document: {error}")
                     });
+                    publisher_edges += document.publisher_edges.len();
+                    for edge in &document.publisher_edges {
+                        assert_eq!(edge.from_document_id, document.document_id);
+                        assert_eq!(edge.edge_source, "publisher");
+                        assert!(edge.edge_id.starts_with("publisher-edge:"));
+                    }
                 }
                 Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
                     unsupported_roots.insert(root);
@@ -93,6 +100,10 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
         parse_errors.join("\n")
     );
     assert_eq!(parsed_articles, ARTICLE_SAMPLE_TARGET);
+    assert!(
+        publisher_edges > 0,
+        "expected real LEGI article sample to emit publisher graph-edge candidates"
+    );
     // The default baseline currently starts with text-version XML before articles. This keeps
     // unsupported-root classification visible in the smoke, but the test remains ignored because
     // tar member ordering is source-archive-specific.
@@ -101,7 +112,7 @@ fn parses_real_archive_article_subset_with_raw_member_hashes() {
         "expected the sample to classify at least one TEXTELR root before articles; visited {visited_xml} XML members, unsupported roots: {unsupported_roots:?}"
     );
     eprintln!(
-        "parsed {parsed_articles} ARTICLE members from `{}` after visiting {visited_xml} XML members; unsupported roots: {unsupported_roots:?}",
+        "parsed {parsed_articles} ARTICLE members and {publisher_edges} publisher edges from `{}` after visiting {visited_xml} XML members; unsupported roots: {unsupported_roots:?}",
         archive_path.display()
     );
 }
