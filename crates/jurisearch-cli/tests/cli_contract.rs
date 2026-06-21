@@ -307,6 +307,27 @@ fn status_marks_initialized_index_not_ready_when_embedding_coverage_is_incomplet
     assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 1);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 0);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .args(["search", "responsabilite civile"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "index_unavailable");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("embedding coverage gate is incomplete")
+    );
     Ok(())
 }
 

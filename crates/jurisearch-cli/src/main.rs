@@ -399,6 +399,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     }
 
     let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
     let embedding_config = embedding_config_from_env();
     let expected_fingerprint = embedding_config.fingerprint();
     let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
@@ -453,6 +454,7 @@ fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, Err
     }
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
     let ids = args.ids.iter().map(String::as_str).collect::<Vec<_>>();
     let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
         .map_err(storage_error_object)?;
@@ -1385,6 +1387,75 @@ fn pending_ingest_health() -> Value {
 
 fn coverage_complete(covered: i64, total: i64) -> bool {
     total > 0 && covered == total
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QueryReadinessGate {
+    Fetch,
+    Search,
+}
+
+impl QueryReadinessGate {
+    fn command(self) -> &'static str {
+        match self {
+            Self::Fetch => "fetch",
+            Self::Search => "search",
+        }
+    }
+}
+
+fn ensure_query_readiness(
+    postgres: &ManagedPostgres,
+    gate: QueryReadinessGate,
+) -> Result<(), ErrorObject> {
+    let report = load_ingest_health(postgres).map_err(storage_error_object)?;
+    let projection_ready = coverage_complete(
+        report.projection_coverage.covered,
+        report.projection_coverage.total,
+    );
+    if !projection_ready {
+        return Err(index_not_query_ready(
+            gate,
+            "projection coverage gate is incomplete",
+            &report,
+        ));
+    }
+
+    let embedding_ready = coverage_complete(
+        report.embedding_coverage.covered,
+        report.embedding_coverage.total,
+    );
+    if matches!(gate, QueryReadinessGate::Search) && !embedding_ready {
+        return Err(index_not_query_ready(
+            gate,
+            "embedding coverage gate is incomplete",
+            &report,
+        ));
+    }
+
+    Ok(())
+}
+
+fn index_not_query_ready(
+    gate: QueryReadinessGate,
+    reason: &str,
+    report: &IngestHealthReport,
+) -> ErrorObject {
+    ErrorObject {
+        code: ErrorCode::IndexUnavailable,
+        message: format!(
+            "index is not query-ready for `{}`: {reason}; projection coverage {}/{}, embedding coverage {}/{}",
+            gate.command(),
+            report.projection_coverage.covered,
+            report.projection_coverage.total,
+            report.embedding_coverage.covered,
+            report.embedding_coverage.total
+        ),
+        suggestions: vec![
+            "Run `jurisearch status` to inspect ingest health and coverage gates.".into(),
+            "Run `jurisearch ingest legi-archives` and `jurisearch ingest embed-chunks` before retrieval commands.".into(),
+        ],
+    }
 }
 
 fn index_unavailable(message: impl Into<String>) -> ErrorObject {
