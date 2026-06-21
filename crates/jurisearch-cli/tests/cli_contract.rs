@@ -1,6 +1,12 @@
 use assert_cmd::Command;
 use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
-use jurisearch_storage::runtime::{PgConfig, StorageError};
+use jurisearch_storage::{
+    ingest_accounting::{
+        IngestCompatibility, IngestMemberInput, IngestMemberStatus, IngestRunInput,
+        finish_ingest_run, record_ingest_member, start_ingest_run,
+    },
+    runtime::{PgConfig, StorageError},
+};
 use predicates::prelude::*;
 use serde_json::Value;
 
@@ -83,6 +89,113 @@ fn status_reports_embedding_budget_env_overrides() {
     assert!(json["embedding"]["max_input_chars"].is_null());
     assert!(json["embedding"]["max_estimated_tokens"].is_null());
     assert_eq!(json["embedding"]["estimated_chars_per_token"], 3);
+}
+
+#[test]
+fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI status ingest health")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-status-health.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let compatibility = IngestCompatibility {
+        parser_version: "legi-parser:v1",
+        schema_version: "canonical:v1",
+        code_version: "test-code-sha",
+        source_payload_hash: "sha256:article-1240",
+    };
+
+    {
+        let postgres =
+            jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+        start_ingest_run(
+            &postgres,
+            &IngestRunInput {
+                run_id: "run-status",
+                source: "legi",
+                parser_version: compatibility.parser_version,
+                schema_version: compatibility.schema_version,
+                code_version: compatibility.code_version,
+                safe_mode: false,
+                archive_plan_json: None,
+                manifest_json: None,
+            },
+        )?;
+        record_ingest_member(
+            &postgres,
+            &IngestMemberInput {
+                run_id: "run-status",
+                archive_name: "Freemium_legi_global_20240101-000000.tar.gz",
+                member_path: "legi/articles/LEGIARTI000006419320.xml",
+                source: "legi",
+                source_entity: Some("LEGIARTI000006419320"),
+                date_anchor: Some("1804-02-21"),
+                status: IngestMemberStatus::Inserted,
+                compatibility,
+            },
+        )?;
+        postgres.execute_sql(&format!(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
+                 '1804-02-21', 'sha256:article-1240', '{{\"official\":true}}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'responsabilite civile faute reparation dommage article 1240', \
+                 'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
+             INSERT INTO chunk_embeddings \
+                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             VALUES \
+                ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+            unit_vector_literal(0)
+        ))?;
+        finish_ingest_run(
+            &postgres,
+            "run-status",
+            jurisearch_storage::ingest_accounting::IngestRunStatus::Completed,
+            None,
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["index"]["state"], "ready");
+    assert_eq!(json["index"]["query_ready"], true);
+    assert_eq!(json["ingest_health"]["state"], "available");
+    assert_eq!(json["ingest_health"]["latest_run_id"], "run-status");
+    assert_eq!(json["ingest_health"]["latest_completed_run"], "run-status");
+    assert_eq!(json["ingest_health"]["total_members"], 1);
+    assert_eq!(json["ingest_health"]["inserted_members"], 1);
+    assert_eq!(json["ingest_health"]["projection_coverage"]["covered"], 1);
+    assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 1);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 1);
+    assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
+    assert!(
+        json["ingest_health"]["recovery_warnings"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    Ok(())
 }
 
 #[test]
@@ -531,4 +644,11 @@ fn pgvector_literal(values: &[f32]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!("[{values}]")
+}
+
+fn unit_vector_literal(active_index: usize) -> String {
+    let values = (0..1024)
+        .map(|index| if index == active_index { 1.0 } else { 0.0 })
+        .collect::<Vec<_>>();
+    pgvector_literal(&values)
 }

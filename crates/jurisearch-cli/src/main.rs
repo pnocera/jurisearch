@@ -21,6 +21,7 @@ use jurisearch_storage::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
     },
+    ingest_accounting::load_ingest_health,
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
@@ -274,7 +275,7 @@ fn run() -> anyhow::Result<()> {
 
     match command {
         Command::Help(help) => emit_help(help),
-        Command::Status => write_json(&status_payload()),
+        Command::Status => write_json(&status_payload(index_dir.as_deref())),
         Command::Session(args) => run_jsonl(args, true),
         Command::Batch(args) => run_jsonl(args, false),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
@@ -629,9 +630,7 @@ fn embed_chunks_payload(
 }
 
 fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {
-    let configured = index_dir
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::var_os("JURISEARCH_INDEX_DIR").map(PathBuf::from));
+    let configured = configured_index_dir(index_dir);
     let Some(index_dir) = configured else {
         return Err(index_unavailable(
             "index directory is required; pass `--index-dir` or set JURISEARCH_INDEX_DIR",
@@ -644,6 +643,12 @@ fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, Error
         )));
     }
     Ok(index_dir)
+}
+
+fn configured_index_dir(index_dir: Option<&Path>) -> Option<PathBuf> {
+    index_dir
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("JURISEARCH_INDEX_DIR").map(PathBuf::from))
 }
 
 fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
@@ -729,7 +734,7 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
     let result = match command {
         "help" | "help agent" => Ok(json!({ "text": agent_help() })),
         "help schema" | "schema" => Ok(compiled_schema()),
-        "status" => Ok(status_payload()),
+        "status" => Ok(status_payload(None)),
         "search" => session_search_payload(args),
         "fetch" => session_fetch_payload(args),
         "cite" | "related" | "context" | "expand" | "model fetch" | "setup" | "ingest" | "sync" => {
@@ -746,19 +751,16 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
     }
 }
 
-fn status_payload() -> Value {
+fn status_payload(index_dir: Option<&Path>) -> Value {
     let embedding_config = embedding_config_from_env();
     let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint;
+    let (index, ingest_health) = status_index_and_ingest_health(index_dir);
 
     json!({
         "schema_version": SCHEMA_VERSION,
-        "index": {
-            "state": "not_configured",
-            "query_ready": false,
-            "message": "No index has been built yet; Phase 0 scaffold is installed."
-        },
+        "index": index,
         "embedding": {
             "provider": embedding_fingerprint.provider,
             "base_url": embedding_base_url,
@@ -773,14 +775,125 @@ fn status_payload() -> Value {
             "provisional": embedding_manifest.provisional,
             "reembeddable": embedding_manifest.reembeddable
         },
-        "ingest_health": {
-            "state": "pending",
+        "ingest_health": ingest_health
+    })
+}
+
+fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
+    let Some(index_dir) = configured_index_dir(index_dir) else {
+        return (
+            json!({
+                "state": "not_configured",
+                "query_ready": false,
+                "message": "No index has been built yet; Phase 0 scaffold is installed."
+            }),
+            pending_ingest_health(),
+        );
+    };
+
+    if !index_dir.join("pg/data/PG_VERSION").is_file() {
+        return (
+            json!({
+                "state": "not_initialized",
+                "query_ready": false,
+                "path": index_dir,
+                "message": "The configured index directory is not initialized."
+            }),
+            pending_ingest_health(),
+        );
+    }
+
+    match open_index(&index_dir) {
+        Ok(postgres) => match load_ingest_health(&postgres) {
+            Ok(report) => {
+                let query_ready = coverage_complete(
+                    report.projection_coverage.covered,
+                    report.projection_coverage.total,
+                ) && coverage_complete(
+                    report.embedding_coverage.covered,
+                    report.embedding_coverage.total,
+                );
+                let message = if query_ready {
+                    "Index is initialized and projection/embedding coverage gates pass."
+                } else {
+                    "Index is initialized but projection/embedding coverage gates are incomplete."
+                };
+                (
+                    json!({
+                        "state": "ready",
+                        "query_ready": query_ready,
+                        "path": index_dir,
+                        "message": message
+                    }),
+                    ingest_health_payload(report),
+                )
+            }
+            Err(error) => {
+                let error = storage_error_object(error);
+                (
+                    json!({
+                        "state": "unavailable",
+                        "query_ready": false,
+                        "path": index_dir,
+                        "message": "Index exists but ingest health could not be loaded.",
+                        "error": error
+                    }),
+                    pending_ingest_health(),
+                )
+            }
+        },
+        Err(error) => (
+            json!({
+                "state": "unavailable",
+                "query_ready": false,
+                "path": index_dir,
+                "message": "Index exists but could not be opened.",
+                "error": error
+            }),
+            pending_ingest_health(),
+        ),
+    }
+}
+
+fn ingest_health_payload(
+    report: jurisearch_storage::ingest_accounting::IngestHealthReport,
+) -> Value {
+    let latest_completed_run = if report.latest_run_status.as_deref() == Some("completed") {
+        report.latest_run_id.clone()
+    } else {
+        None
+    };
+    let mut value = serde_json::to_value(report).unwrap_or_else(|error| {
+        json!({
+            "state": "unavailable",
             "latest_completed_run": null,
             "projection_coverage": null,
             "embedding_coverage": null,
-            "recovery_warnings": []
-        }
+            "recovery_warnings": [format!("failed to serialize ingest health: {error}")]
+        })
+    });
+    if let Value::Object(map) = &mut value {
+        map.insert("state".to_owned(), json!("available"));
+        map.insert(
+            "latest_completed_run".to_owned(),
+            json!(latest_completed_run),
+        );
+    }
+    value
+}
+
+fn pending_ingest_health() -> Value {
+    json!({
+        "state": "pending",
+        "latest_completed_run": null,
+        "projection_coverage": null,
+        "embedding_coverage": null,
+        "recovery_warnings": []
     })
+}
+
+fn coverage_complete(covered: i64, total: i64) -> bool {
+    total > 0 && covered == total
 }
 
 fn index_unavailable(message: impl Into<String>) -> ErrorObject {
