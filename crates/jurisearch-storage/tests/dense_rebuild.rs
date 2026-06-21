@@ -2,7 +2,10 @@ mod common;
 
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
-    dense::{DENSE_VECTOR_INDEX_NAME, DenseRebuildSpec, finalize_dense_rebuild},
+    dense::{
+        DENSE_VECTOR_INDEX_NAME, DenseRebuildSpec, finalize_dense_rebuild,
+        load_chunk_embedding_inputs,
+    },
     runtime::{ManagedPostgres, StorageError},
 };
 
@@ -107,6 +110,60 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
     assert_eq!(manifest["coverage"]["embeddings"], 2);
     assert_eq!(manifest["vector_index"]["name"], DENSE_VECTOR_INDEX_NAME);
     assert_eq!(manifest["vector_index"]["lists"], 1);
+
+    Ok(())
+}
+
+#[test]
+fn chunk_embedding_inputs_prefer_contextualized_body_and_honor_limit() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("chunk embedding inputs")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-chunk-embedding-inputs.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    postgres.execute_sql(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, citation, title, body, \
+            valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+           ('legi:LEGIARTI000000000001@2024-01-01', 'legi', 'article', \
+            'LEGIARTI000000000001', 'Code civil article 1', \
+            'Article 1', 'Disposition generale.', \
+            '2024-01-01', 'sha256:article-1', \
+            '{\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1\\nDisposition generale contextualisee.\"}]}'), \
+           ('legi:LEGIARTI000000000002@2024-01-01', 'legi', 'article', \
+            'LEGIARTI000000000002', 'Code civil article 2', \
+            'Article 2', 'Fallback body.', \
+            '2024-01-01', 'sha256:article-2', \
+            '{\"chunks\":[{}]}'); \
+         INSERT INTO chunks \
+           (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+            chunk_builder_version, embedding_fingerprint) \
+         VALUES \
+           ('chunk:article-1:0', 'legi:LEGIARTI000000000001@2024-01-01', 0, \
+            'plain body should not be embedded first', \
+            'sha256:article-1', 'chunker:v0', NULL), \
+           ('chunk:article-2:0', 'legi:LEGIARTI000000000002@2024-01-01', 0, \
+            'fallback body should be embedded', \
+            'sha256:article-2', 'chunker:v0', NULL);",
+    )?;
+
+    let limited = load_chunk_embedding_inputs(&postgres, Some(1))?;
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].chunk_id, "chunk:article-1:0");
+    assert_eq!(
+        limited[0].embedding_text,
+        "Code civil > Article 1\nDisposition generale contextualisee."
+    );
+
+    let all = load_chunk_embedding_inputs(&postgres, None)?;
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].chunk_id, "chunk:article-2:0");
+    assert_eq!(all[1].embedding_text, "fallback body should be embedded");
 
     Ok(())
 }

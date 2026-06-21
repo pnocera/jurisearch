@@ -17,6 +17,11 @@ use jurisearch_core::{
 use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
 use jurisearch_ingest::archive::{ArchiveSource, plan_from_dir};
 use jurisearch_storage::{
+    dense::{
+        DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
+        load_chunk_embedding_inputs,
+    },
+    projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
     retrieval::{
         FetchDocumentsQuery, HybridCandidateQuery, fetch_documents_json, hybrid_candidates_json,
     },
@@ -188,6 +193,13 @@ enum IngestSubcommand {
         #[arg(long)]
         archives_dir: PathBuf,
     },
+    /// Embed stored canonical chunks and finalize the dense ANN index.
+    EmbedChunks {
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = 32)]
+        index_lists: u32,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -263,7 +275,7 @@ fn run() -> anyhow::Result<()> {
         Command::Status => write_json(&status_payload()),
         Command::Session(args) => run_jsonl(args, true),
         Command::Batch(args) => run_jsonl(args, false),
-        Command::Ingest(ingest) => emit_ingest(ingest),
+        Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
         Command::Search(args) => {
             if args.query.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("search query must not be empty"))
@@ -471,7 +483,7 @@ fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
     }
 }
 
-fn emit_ingest(ingest: IngestCommand) -> anyhow::Result<()> {
+fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match ingest.command {
         Some(IngestSubcommand::PlanArchives {
             source,
@@ -490,8 +502,123 @@ fn emit_ingest(ingest: IngestCommand) -> anyhow::Result<()> {
                 "plan": plan,
             }))
         }
+        Some(IngestSubcommand::EmbedChunks { limit, index_lists }) => {
+            if limit == Some(0) {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-chunks --limit must be at least 1 when provided",
+                ));
+            }
+            if index_lists == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-chunks --index-lists must be at least 1",
+                ));
+            }
+            match embed_chunks_payload(index_dir, limit, index_lists) {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
         None => emit_error(ErrorObject::not_implemented("ingest")),
     }
+}
+
+fn embed_chunks_payload(
+    index_dir: Option<&Path>,
+    limit: Option<u32>,
+    index_lists: u32,
+) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    let embedding_config = embedding_config_from_env();
+    let expected_fingerprint = embedding_config.fingerprint();
+    let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
+    let dimension = i32::try_from(embedding_config.dimension).map_err(|_| {
+        dependency_unavailable(format!(
+            "embedding dimension {} is too large for dense rebuild metadata",
+            embedding_config.dimension
+        ))
+    })?;
+    if dimension != DENSE_VECTOR_DIMENSION {
+        return Err(dependency_unavailable(format!(
+            "embedding dimension {} does not match storage vector({})",
+            embedding_config.dimension, DENSE_VECTOR_DIMENSION
+        )));
+    }
+
+    let load_limit = limit.map(|value| value.saturating_add(1));
+    let inputs =
+        load_chunk_embedding_inputs(&postgres, load_limit).map_err(storage_error_object)?;
+    if let Some(limit) = limit {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        if inputs.len() > limit {
+            return Err(ErrorObject::bad_input(
+                "ingest embed-chunks --limit would leave chunks unembedded; run on a smaller smoke index or omit --limit to finalize the full dense index",
+            ));
+        }
+    }
+    if inputs.is_empty() {
+        return Err(no_results("no chunks are available to embed"));
+    }
+
+    let client =
+        OpenAiCompatibleClient::new(embedding_config.clone()).map_err(embedding_error_object)?;
+    let mut owned_embeddings = Vec::with_capacity(inputs.len());
+    for input in &inputs {
+        let embedding = client
+            .embed_query(input.embedding_text.as_str(), &expected_fingerprint)
+            .map_err(embedding_error_object)?;
+        owned_embeddings.push((input.chunk_id.clone(), pgvector_literal(&embedding.values)));
+    }
+    let embeddings = owned_embeddings
+        .iter()
+        .map(|(chunk_id, embedding_literal)| ChunkEmbeddingInsert {
+            chunk_id: chunk_id.as_str(),
+            embedding_fingerprint: embedding_fingerprint.as_str(),
+            embedding_literal: embedding_literal.as_str(),
+            model: embedding_config.model.as_str(),
+            dimension: embedding_config.dimension,
+        })
+        .collect::<Vec<_>>();
+    let embeddings_inserted =
+        insert_chunk_embeddings(&postgres, &embeddings).map_err(storage_error_object)?;
+    let rebuild = finalize_dense_rebuild(
+        &postgres,
+        &DenseRebuildSpec {
+            embedding_fingerprint: embedding_fingerprint.as_str(),
+            model: embedding_config.model.as_str(),
+            dimension,
+            normalize: embedding_config.normalize,
+            provisional: embedding_config.provisional,
+            reembeddable: embedding_config.reembeddable,
+            index_lists,
+        },
+    )
+    .map_err(storage_error_object)?;
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest embed-chunks",
+        "index_dir": index_dir,
+        "limit": limit,
+        "chunks_considered": inputs.len(),
+        "embeddings_inserted": embeddings_inserted,
+        "embedding": {
+            "model": embedding_config.model,
+            "dimension": embedding_config.dimension,
+            "normalize": embedding_config.normalize,
+            "pooling": embedding_config.pooling,
+            "fingerprint": embedding_fingerprint,
+            "provisional": embedding_config.provisional,
+            "reembeddable": embedding_config.reembeddable
+        },
+        "dense_rebuild": {
+            "chunks": rebuild.chunks,
+            "embeddings": rebuild.embeddings,
+            "embedding_fingerprint": rebuild.embedding_fingerprint,
+            "index_name": rebuild.index_name,
+            "index_lists": rebuild.index_lists
+        }
+    }))
 }
 
 fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {

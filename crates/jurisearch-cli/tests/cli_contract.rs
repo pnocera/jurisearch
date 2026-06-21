@@ -98,6 +98,24 @@ fn retrieval_command_without_index_is_json_and_uses_exit_code_3() {
 }
 
 #[test]
+fn ingest_embed_chunks_rejects_zero_limit_before_opening_index() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["ingest", "embed-chunks", "--limit", "0"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+}
+
+#[test]
 fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI fetch existing index")? else {
         return Ok(());
@@ -194,6 +212,86 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "bad_input");
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a running OpenAI-compatible bge-m3 embeddings endpoint"]
+fn ingest_embed_chunks_uses_live_endpoint_and_finalizes_dense_index()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI live embed chunks")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-embed-chunks.")
+        .tempdir()?;
+    let embedding_base_url = std::env::var("JURISEARCH_EMBED_BASE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8097/v1".to_owned());
+
+    {
+        let postgres = jurisearch_storage::runtime::ManagedPostgres::start_durable(
+            pg_config.clone(),
+            root.path(),
+        )?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
+                 '1804-02-21', 'sha256:article-1240', \
+                 '{\"chunks\":[{\"contextualized_body\":\"Code civil > Article 1240\\nresponsabilite civile faute reparation dommage\"}]}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'plain fallback chunk text', \
+                 'sha256:article-1240', 'chunker:v0', NULL);",
+        )?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_EMBED_BASE_URL", embedding_base_url)
+        .args(["ingest", "embed-chunks", "--index-lists", "1"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "ingest embed-chunks");
+    assert_eq!(json["chunks_considered"], 1);
+    assert_eq!(json["embeddings_inserted"], 1);
+    assert_eq!(
+        json["embedding"]["fingerprint"],
+        "bge-m3:1024:normalize:true"
+    );
+    assert_eq!(json["dense_rebuild"]["chunks"], 1);
+    assert_eq!(json["dense_rebuild"]["embeddings"], 1);
+    assert_eq!(json["dense_rebuild"]["index_lists"], 1);
+
+    let postgres =
+        jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+    let stored = postgres.execute_sql(
+        "SELECT concat(embedding_fingerprint, '|', model, '|', dimension::text) \
+         FROM chunk_embeddings \
+         WHERE chunk_id = 'chunk:1240:0';",
+    )?;
+    assert_eq!(stored, "bge-m3:1024:normalize:true|bge-m3|1024");
+    let manifest = postgres.execute_sql(
+        "SELECT value->>'embedding_fingerprint' \
+         FROM index_manifest \
+         WHERE key = 'embedding';",
+    )?;
+    assert_eq!(manifest, "bge-m3:1024:normalize:true");
+
     Ok(())
 }
 

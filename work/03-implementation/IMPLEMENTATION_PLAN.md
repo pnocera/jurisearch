@@ -370,7 +370,7 @@ Acceptance:
 
 ### 0.6 Baseline Hybrid Retrieval
 
-Scope qualifier: this step is being landed in slices. The first slice proves storage projection plus retrieval on a small official LEGI subset; CLI command wiring and live endpoint embedding remain separate follow-ups.
+Scope qualifier: this step is being landed in slices. The current slice proves storage projection, retrieval, CLI search/fetch wiring, dense rebuild finalization, and endpoint-driven chunk embedding over a small official LEGI-compatible subset.
 
 Tasks:
 
@@ -384,17 +384,18 @@ Tasks:
 - Done: CLI `fetch` is covered by an integration-style test that creates a durable index, drops it, then invokes the binary and JSONL session path against the existing root; missing IDs return `no_results`, and reserved `--as-of`/`--part` flags fail as `bad_input` until they are actually implemented.
 - Done: ignored live CLI search smoke creates a tiny durable index with a live bge-m3 embedding, invokes `jurisearch search` against `JURISEARCH_INDEX_DIR`, and verifies the expected document plus dense rank.
 - Done: `help schema --json` now advertises the implemented `SearchResponse.candidates` and `FetchResponse.documents` shapes instead of the old stub `results` shape.
-- Remaining: replace deterministic storage test vectors with live embedding endpoint calls in a reusable ingestion/index-build path once that path owns endpoint configuration.
 - Done: storage dense rebuild finalization verifies full chunk embedding coverage for the expected fingerprint/model/dimension, rebuilds the ivfflat ANN index, and writes the embedding manifest with coverage and index parameters.
-- Remaining: add the higher-level embedding loop that calls the configured endpoint over canonical chunks and feeds the dense rebuild finalizer.
-- Remaining: decide whether live embeddings read `chunks.body` or chunk `contextualized_body` recovered from `documents.canonical_json` until chunk provenance gets first-class storage columns.
+- Done: `jurisearch ingest embed-chunks` opens an existing durable index, loads canonical chunk embedding inputs, calls the configured OpenAI-compatible endpoint, inserts `chunk_embeddings`, and feeds the dense rebuild finalizer; `--limit` supports smoke runs and `--index-lists` controls the rebuilt ivfflat index.
+- Done: live chunk embeddings use canonical `contextualized_body` recovered from `documents.canonical_json` when present, falling back to `chunks.body` until chunk provenance gets first-class storage columns.
+- Done: ignored live CLI embed smoke creates a tiny durable index without dense rows, invokes `jurisearch ingest embed-chunks`, and verifies one endpoint-produced embedding plus the dense manifest/index coverage.
+- Remaining: add tokenizer or endpoint-specific token-budget preflight before running the embedding loop on larger corpora.
 
 Acceptance:
 
 - Met in storage layer: `search` returns compact IDs, citations, snippets, source URLs, validity blocks, scores, and cursors.
 - Met in storage and CLI layer: `fetch` returns full text for selected IDs.
 - Met in storage layer: historical `--as-of` queries do not leak future LEGI versions in the real-archive smoke.
-- Partially met: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance, CLI live search is smoke-tested, and storage can finalize/rebuild the ANN index and manifest after a full re-embed; endpoint-driven embedding orchestration remains pending.
+- Met for Phase 0 slice: dense rows are re-insertable from canonical chunk IDs and fingerprints without losing provenance, CLI live search is smoke-tested, endpoint-driven chunk embedding is smoke-tested, and storage can finalize/rebuild the ANN index and manifest after a full re-embed.
 
 ### 0.7 Reranker Feasibility Spike
 
