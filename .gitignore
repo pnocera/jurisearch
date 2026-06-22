@@ -22,3 +22,10 @@ index/
 .venv/
 __pycache__/
 *.pyc
+
+# codex-review skill byproducts (keep only the .md review artifacts)
+*.codex-log.txt
+*.done
+*.inprogress
+*.lock
+*.failed
