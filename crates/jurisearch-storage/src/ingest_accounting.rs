@@ -358,9 +358,30 @@ pub fn record_ingest_member_with_client<C: GenericClient>(
         )
         .map_err(StorageError::PostgresClient)?;
     let status: String = row.get(2);
+    let member_id = row.get(0);
+    let attempt_count = row.get(1);
+    if input.status != IngestMemberStatus::Failed && attempt_count > 1 {
+        client
+            .execute(
+                "UPDATE ingest_member \
+                 SET error_count = 0, \
+                     last_error_class = NULL, \
+                     last_error_code = NULL, \
+                     last_error_message = NULL \
+                 WHERE member_id = $1;",
+                &[&member_id],
+            )
+            .map_err(StorageError::PostgresClient)?;
+        client
+            .execute(
+                "DELETE FROM ingest_error WHERE member_id = $1;",
+                &[&member_id],
+            )
+            .map_err(StorageError::PostgresClient)?;
+    }
     Ok(IngestMemberRecord {
-        member_id: row.get(0),
-        attempt_count: row.get(1),
+        member_id,
+        attempt_count,
         status: IngestMemberStatus::from_db(&status)?,
     })
 }

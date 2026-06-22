@@ -12,6 +12,7 @@ use crate::archive::ArchiveMember;
 
 const LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS: usize = 6_000;
 const LEGI_ARTICLE_CHUNK_BUILDER_VERSION: &str = "legi_article_structural:v2";
+const LEGI_EMPTY_XML_ROOT: &str = "EMPTY_XML";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceProvenance {
@@ -463,9 +464,7 @@ fn detect_root(xml: &str) -> Result<String, LegiParseError> {
                 return Ok(local_name(start.local_name().as_ref()));
             }
             Ok(Event::Eof) => {
-                return Err(LegiParseError::Xml {
-                    message: "missing XML root element".to_owned(),
-                });
+                return Ok(LEGI_EMPTY_XML_ROOT.to_owned());
             }
             Ok(_) => {}
             Err(error) => {
@@ -2055,6 +2054,31 @@ mod tests {
             document.source_payload_hash,
             source_payload_hash(&member.bytes)
         );
+    }
+
+    #[test]
+    fn rootless_archive_members_are_skipped_as_empty_xml() {
+        for bytes in [
+            b" \n\t ".as_slice(),
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+            b"<!-- placeholder -->\n",
+            b"\xEF\xBB\xBF",
+        ] {
+            let member = ArchiveMember {
+                archive_path: PathBuf::from("/tmp/Freemium_legi_global.tar.gz"),
+                member_path: "legi/global/eli/example/versions.xml".to_owned(),
+                bytes: bytes.to_vec(),
+            };
+
+            let parsed = parse_legi_member(&member).unwrap();
+
+            assert_eq!(
+                parsed,
+                ParsedLegiXml::UnsupportedRoot {
+                    root: "EMPTY_XML".to_owned()
+                }
+            );
+        }
     }
 
     #[test]

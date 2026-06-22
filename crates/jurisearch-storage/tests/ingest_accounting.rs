@@ -161,6 +161,25 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(failed_retry.action, IngestResumeAction::Retry);
     assert_eq!(failed_retry.reason, "previous_failed");
 
+    let recovered = record_ingest_member(
+        &postgres,
+        &IngestMemberInput {
+            run_id: "run-1",
+            archive_name: "Freemium_legi_global_20240101-000000.tar.gz",
+            member_path: "legi/articles/BROKEN.xml",
+            source: "legi",
+            source_entity: None,
+            date_anchor: None,
+            status: IngestMemberStatus::Skipped,
+            compatibility: IngestCompatibility {
+                source_payload_hash: "sha256:broken",
+                ..compatibility
+            },
+        },
+    )?;
+    assert_eq!(recovered.member_id, failed.member_id);
+    assert_eq!(recovered.status, IngestMemberStatus::Skipped);
+
     let parsed = record_ingest_member(
         &postgres,
         &IngestMemberInput {
@@ -217,11 +236,9 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(health.latest_manifest["fixture"], true);
     assert_eq!(health.total_members, 3);
     assert_eq!(health.inserted_members, 1);
-    assert_eq!(health.failed_members, 1);
-    assert_eq!(
-        health.error_classes[0].error_code,
-        "validation_missing_required_field"
-    );
+    assert_eq!(health.skipped_members, 1);
+    assert_eq!(health.failed_members, 0);
+    assert!(health.error_classes.is_empty());
     assert_eq!(health.projection_coverage.covered, 1);
     assert_eq!(health.projection_coverage.total, 2);
     assert_eq!(health.embedding_coverage.covered, 2);
@@ -276,12 +293,7 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     let repaired_embedding_readiness = load_ingest_readiness(&postgres)?;
     assert_eq!(repaired_embedding_readiness.embedding_coverage.covered, 2);
     assert_eq!(repaired_embedding_readiness.embedding_coverage.total, 2);
-    assert!(
-        health
-            .recovery_warnings
-            .iter()
-            .any(|warning| { warning == "1 member(s) failed in latest ingest run" })
-    );
+    assert!(health.recovery_warnings.is_empty());
 
     Ok(())
 }
