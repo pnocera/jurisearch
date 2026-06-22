@@ -778,12 +778,38 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     }
 
     let postgres = open_index(index_dir.as_path())?;
+    search_with_postgres(
+        &postgres,
+        &args,
+        retrieval_mode,
+        output_format,
+        after_cursor.as_ref(),
+        &query_text,
+        kind,
+    )
+}
+
+/// Run one search against an already-open index. Split out from `search_payload` so an
+/// eval/batch path can `open_index` once and run many queries under a single Postgres lifecycle
+/// (avoiding per-query cold starts). Query/kind validation and index opening stay in
+/// `search_payload` to preserve error precedence (an unsearchable query reports `bad_input`
+/// before any index check).
+#[allow(clippy::too_many_arguments)]
+fn search_with_postgres(
+    postgres: &ManagedPostgres,
+    args: &SearchArgs,
+    retrieval_mode: RetrievalMode,
+    output_format: OutputFormat,
+    after_cursor: Option<&ParsedSearchCursor>,
+    query_text: &str,
+    kind: LegalKind,
+) -> Result<Value, ErrorObject> {
     let readiness_gate = if retrieval_mode.uses_dense() {
         QueryReadinessGate::Search
     } else {
         QueryReadinessGate::SearchLexical
     };
-    ensure_query_readiness(&postgres, readiness_gate)?;
+    ensure_query_readiness(postgres, readiness_gate)?;
     let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
         let embedding_config = embedding_config_from_env();
         ensure_embedding_runtime_ready(&embedding_config, false)?;
@@ -801,7 +827,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     } else {
         (None, None)
     };
-    let as_of = args.as_of.unwrap_or_else(today_utc);
+    let as_of = args.as_of.clone().unwrap_or_else(today_utc);
     let kind_filter = if matches!(kind, LegalKind::Code) {
         Some("article")
     } else {
@@ -811,13 +837,13 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     let dense_limit = args.top_k.saturating_mul(4);
     let query_limit = args.top_k.saturating_add(1);
     let response = hybrid_candidates_json(
-        &postgres,
+        postgres,
         &HybridCandidateQuery {
-            query_text: query_text.as_str(),
+            query_text,
             query_embedding: query_embedding.as_deref(),
             embedding_fingerprint: embedding_fingerprint.as_deref(),
             retrieval_mode,
-            after_cursor: after_cursor.as_ref().map(|cursor| RetrievalCursor {
+            after_cursor: after_cursor.map(|cursor| RetrievalCursor {
                 score: cursor.score.as_str(),
                 chunk_id: cursor.chunk_id.as_str(),
             }),
@@ -865,9 +891,9 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     });
     if matches!(output_format, OutputFormat::Detailed) {
         response["diagnostics"] = json!({
-            "query_input": args.query,
+            "query_input": args.query.clone(),
             "lexical_query_text": if retrieval_mode.uses_lexical() {
-                Some(query_text.as_str())
+                Some(query_text)
             } else {
                 None
             },
