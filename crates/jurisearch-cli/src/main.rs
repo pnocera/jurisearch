@@ -90,6 +90,16 @@ const PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS: u64 = 200;
 const PHASE1_EXTERNAL_MIN_HYBRID_RECALL_AT_20: f64 = 0.75;
 const PHASE1_EXTERNAL_MIN_HYBRID_NDCG_AT_20: f64 = 0.60;
 const PHASE1_EXTERNAL_MIN_HYBRID_MRR_AT_20: f64 = 0.50;
+const PHASE1_FRANCE_LEGI_BENCHMARK_ENV: &str = "JURISEARCH_PHASE1_FRANCE_LEGI_BENCHMARK";
+// France-LEGI official-evidence gate floors. Provisional pending a first full
+// production-pipeline calibration sweep; see
+// work/03-implementation/02-evidence/2026-06-22-france-legi-official-evidence-benchmark-feasibility.md
+const PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10: f64 = 0.85;
+const PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10: f64 = 0.90;
+const PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10: f64 = 0.60;
+const PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES: u64 = 10;
+const PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES: u64 = 4;
+const PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES: u64 = 50;
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -3689,13 +3699,27 @@ fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshot
 }
 
 fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
+    let external_benchmark = phase1_external_benchmark_payload();
+    let france_legi = phase1_france_legi_payload();
+    phase1_gate_payload_with(index, ingest_health, external_benchmark, france_legi)
+}
+
+// Pure gate builder: takes the already-resolved benchmark payloads so tests do not depend on the
+// `JURISEARCH_PHASE1_*_BENCHMARK` ambient env vars. The public `phase1_gate_payload` resolves
+// those from the environment and delegates here.
+fn phase1_gate_payload_with(
+    index: &Value,
+    ingest_health: &Value,
+    external_benchmark: Value,
+    france_legi: Value,
+) -> Value {
     let eval_summary = phase1_eval_fixture_summary();
     let ingest_available = ingest_health["state"] == "available";
     let query_ready = index["query_ready"].as_bool().unwrap_or(false);
     let locked_embedding_model = phase1_embedding_model_locked(ingest_health);
     let reranker_decision = phase1_reranker_decision_payload();
-    let external_benchmark = phase1_external_benchmark_payload();
     let external_benchmark_status = phase1_external_benchmark_check_status(&external_benchmark);
+    let france_legi_status = phase1_france_legi_check_status(&france_legi);
     let replay_snapshot_status = ingest_health["replay_snapshot_status"]
         .as_str()
         .unwrap_or("unknown");
@@ -3755,10 +3779,15 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
             },
             replay_snapshot_message,
         ),
-        phase1_gate_check(
+        phase1_gate_check_advisory(
             "external_expert_annotated_eval",
             external_benchmark_status,
-            "Phase 1 requires a passing external expert-annotated French legal retrieval benchmark; internal LEGI fixtures remain smoke/candidate evidence",
+            "Advisory cross-lingual robustness signal (BSARD, Belgian statutory). Not a Phase 1 release gate: jurisdiction-correct release evidence is `france_legi_official_eval`",
+        ),
+        phase1_gate_check(
+            "france_legi_official_eval",
+            france_legi_status,
+            "Phase 1 requires a passing France-LEGI official-evidence benchmark (known-item, temporal, cross-reference) run through the production pipeline; jurisdiction-correct release evidence, unlike the Belgian BSARD proxy",
         ),
         phase1_gate_check(
             "final_embedding_model",
@@ -3779,8 +3808,10 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
             "reranker adoption is deferred for Phase 1; disabled provider remains the default until legal eval proves a material rerank gain",
         ),
     ];
+    // Advisory checks (`gating: false`) are reported but do not block the claim.
     let claim_allowed = checks
         .iter()
+        .filter(|check| check["gating"].as_bool() != Some(false))
         .all(|check| check["status"].as_str() == Some("pass"));
 
     json!({
@@ -3790,6 +3821,7 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
         "checks": checks,
         "eval_fixtures": eval_summary,
         "external_benchmark": external_benchmark,
+        "france_legi_benchmark": france_legi,
         "reranker_decision": reranker_decision,
     })
 }
@@ -4083,6 +4115,257 @@ fn phase1_external_benchmark_check_status(external_benchmark: &Value) -> &'stati
     }
 }
 
+fn phase1_france_legi_payload() -> Value {
+    let artifact_path = std::env::var_os(PHASE1_FRANCE_LEGI_BENCHMARK_ENV).map(PathBuf::from);
+    phase1_france_legi_payload_with_path(artifact_path.as_deref())
+}
+
+fn phase1_france_legi_payload_with_path(artifact_path: Option<&Path>) -> Value {
+    let mut payload = phase1_france_legi_default_payload();
+    let Some(artifact_path) = artifact_path else {
+        return payload;
+    };
+
+    payload["artifact_path"] = json!(artifact_path.to_string_lossy());
+    payload["source"] = json!(PHASE1_FRANCE_LEGI_BENCHMARK_ENV);
+    let contents = match fs::read_to_string(artifact_path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            payload["state"] = json!("failed");
+            payload["artifact_error"] = json!(format!(
+                "failed to read France-LEGI benchmark artifact `{}`: {error}",
+                artifact_path.display()
+            ));
+            return payload;
+        }
+    };
+    let artifact = match serde_json::from_str::<Value>(&contents) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            payload["state"] = json!("failed");
+            payload["artifact_error"] = json!(format!(
+                "failed to parse France-LEGI benchmark artifact `{}` as JSON: {error}",
+                artifact_path.display()
+            ));
+            return payload;
+        }
+    };
+
+    payload["artifact"] = artifact.clone();
+    payload["evidence"] = artifact["evidence"]
+        .as_array()
+        .map(|_| artifact["evidence"].clone())
+        .unwrap_or_else(|| json!([]));
+    payload["categories"] = artifact["categories"].clone();
+    payload["thresholds"] = artifact["thresholds"].clone();
+    payload["provenance"] = artifact["provenance"].clone();
+    payload["artifact_error"] = Value::Null;
+
+    let validation_errors = phase1_france_legi_artifact_errors(&artifact);
+    if validation_errors.is_empty() {
+        payload["state"] = json!(artifact["state"].as_str().unwrap_or("pending"));
+    } else {
+        payload["state"] = json!("failed");
+        payload["artifact_error"] = json!(validation_errors.join("; "));
+    }
+
+    payload
+}
+
+fn phase1_france_legi_default_payload() -> Value {
+    json!({
+        "state": "pending",
+        "source": "not_configured",
+        "artifact_path": null,
+        "artifact_error": null,
+        "decision_date": "2026-06-22",
+        "claim_scope": "France-LEGI official-evidence statutory retrieval (known-item, temporal as-of, cross-reference) through the production pipeline",
+        "jurisdiction": "france",
+        "retriever": "production jurisearch search (BM25 + dense + RRF)",
+        "required_evidence": [
+            "gold derived only from official DILA/Légifrance fields (no human, no LLM): ID/NUM/TITRE_TXT for known-item, CID/DATE_DEBUT/DATE_FIN for temporal as-of, LIEN CITATION targets for cross-reference",
+            "retrieval executed through the production search pipeline, not a proxy harness",
+            "per-category metrics recorded with query counts and the locked bge-m3 fingerprint",
+            "per-category thresholds at or above policy floors recorded for status to consume before this gate can pass",
+            "structured provenance: pinned official_source + source_revision, production pipeline + code_version + index_revision, and sampled=false / human_in_gold=false / llm_in_gold=false"
+        ],
+        "categories": null,
+        "thresholds": null,
+        "provenance": null,
+        "artifact": null,
+        "evidence": [],
+        "reason": "BSARD is a Belgian proxy; a jurisdiction-correct France-LEGI official-evidence benchmark over the production pipeline is the release-gating signal. Gold is structurally derived from official Légifrance fields, so it needs no human annotation. See work/03-implementation/02-evidence/2026-06-22-france-legi-official-evidence-benchmark-feasibility.md"
+    })
+}
+
+fn phase1_france_legi_artifact_errors(artifact: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    match artifact["state"].as_str() {
+        Some("pending" | "passed" | "failed") => {}
+        Some(other) => errors.push(format!("invalid state `{other}`")),
+        None => errors.push("missing state".to_owned()),
+    }
+    if artifact["kind"].as_str() != Some("phase1_france_legi_benchmark") {
+        errors.push("kind must be `phase1_france_legi_benchmark`".to_owned());
+    }
+    if artifact["schema_version"].as_u64() != Some(1) {
+        errors.push("schema_version must be 1".to_owned());
+    }
+    if artifact["jurisdiction"].as_str() != Some("france") {
+        errors.push("jurisdiction must be `france`".to_owned());
+    }
+    if artifact["state"].as_str() == Some("passed")
+        && !artifact["evidence"]
+            .as_array()
+            .is_some_and(|evidence| !evidence.is_empty())
+    {
+        errors.push("passed artifact must include non-empty evidence".to_owned());
+    }
+    if artifact_pointer_str(artifact, "embedding.fingerprint_model") != Some(PHASE0_EMBEDDING_MODEL)
+    {
+        errors.push(format!(
+            "embedding.fingerprint_model must be `{PHASE0_EMBEDDING_MODEL}`"
+        ));
+    }
+    if artifact_pointer_value(artifact, "embedding.dimension").and_then(Value::as_u64)
+        != Some(PHASE0_EMBEDDING_DIMENSION as u64)
+    {
+        errors.push(format!(
+            "embedding.dimension must be {}",
+            PHASE0_EMBEDDING_DIMENSION
+        ));
+    }
+    if artifact_pointer_value(artifact, "embedding.normalize").and_then(Value::as_bool)
+        != Some(true)
+    {
+        errors.push("embedding.normalize must be true".to_owned());
+    }
+    for path in ["claim_scope", "source", "retriever"] {
+        if artifact_pointer_str(artifact, path).is_none_or(|value| value.trim().is_empty()) {
+            errors.push(format!("{path} is required"));
+        }
+    }
+    // Structured provenance: the gate must not accept a proxy runner that only supplies
+    // good-looking category metrics. Require pinned official-source + production-pipeline
+    // identity, and assert the gold is structurally derived (no human, no LLM) over a full,
+    // unsampled qrel set.
+    for path in [
+        "provenance.official_source",
+        "provenance.source_revision",
+        "provenance.pipeline",
+        "provenance.code_version",
+        "provenance.index_revision",
+    ] {
+        if artifact_pointer_str(artifact, path).is_none_or(|value| value.trim().is_empty()) {
+            errors.push(format!("{path} is required"));
+        }
+    }
+    if artifact_pointer_str(artifact, "provenance.source_revision")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("unknown"))
+    {
+        errors.push("provenance.source_revision must be pinned, not `unknown`".to_owned());
+    }
+    for (path, message) in [
+        (
+            "provenance.sampled",
+            "provenance.sampled must be false (no sampled/truncated qrels for a gate artifact)",
+        ),
+        (
+            "provenance.human_in_gold",
+            "provenance.human_in_gold must be false (France-LEGI gold is structurally derived from official fields)",
+        ),
+        (
+            "provenance.llm_in_gold",
+            "provenance.llm_in_gold must be false (France-LEGI gold is structurally derived from official fields)",
+        ),
+    ] {
+        if artifact_pointer_value(artifact, path).and_then(Value::as_bool) != Some(false) {
+            errors.push(message.to_owned());
+        }
+    }
+    for path in ["categories", "thresholds"] {
+        if artifact_pointer_value(artifact, path).is_none_or(Value::is_null) {
+            errors.push(format!("{path} is required"));
+        }
+    }
+    phase1_france_legi_validate_category(
+        artifact,
+        "known_item",
+        "known_item_recall_at_10",
+        PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10,
+        PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES,
+        &mut errors,
+    );
+    phase1_france_legi_validate_category(
+        artifact,
+        "temporal",
+        "temporal_version_exactness_at_10",
+        PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10,
+        PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES,
+        &mut errors,
+    );
+    phase1_france_legi_validate_category(
+        artifact,
+        "cross_reference",
+        "cross_reference_recall_at_10",
+        PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10,
+        PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES,
+        &mut errors,
+    );
+    errors
+}
+
+fn phase1_france_legi_validate_category(
+    artifact: &Value,
+    category: &str,
+    threshold_key: &str,
+    policy_floor: f64,
+    min_queries: u64,
+    errors: &mut Vec<String>,
+) {
+    let threshold_path = format!("thresholds.{threshold_key}_min");
+    let value_path = format!("categories.{category}.metric_value");
+    let queries_path = format!("categories.{category}.queries");
+    let threshold = artifact_pointer_f64(artifact, &threshold_path);
+    let value = artifact_pointer_f64(artifact, &value_path);
+    match threshold {
+        Some(threshold) if threshold >= policy_floor => {}
+        Some(threshold) => errors.push(format!(
+            "{threshold_path} must be at least {policy_floor:.3}, got {threshold:.3}"
+        )),
+        None => errors.push(format!("{threshold_path} is required")),
+    }
+    if let (Some(value), Some(threshold)) = (value, threshold) {
+        if value < threshold {
+            errors.push(format!(
+                "{value_path} must be at least threshold {threshold:.3}, got {value:.3}"
+            ));
+        }
+    } else if value.is_none() {
+        errors.push(format!("{value_path} is required"));
+    }
+    if artifact_pointer_value(artifact, &queries_path)
+        .and_then(Value::as_u64)
+        .is_none_or(|count| count < min_queries)
+    {
+        errors.push(format!("{queries_path} must be at least {min_queries}"));
+    }
+}
+
+fn phase1_france_legi_check_status(france_legi: &Value) -> &'static str {
+    match france_legi["state"].as_str() {
+        Some("passed")
+            if france_legi["evidence"]
+                .as_array()
+                .is_some_and(|evidence| !evidence.is_empty()) =>
+        {
+            "pass"
+        }
+        Some("passed" | "failed") => "fail",
+        _ => "pending",
+    }
+}
+
 fn phase1_reranker_decision_payload() -> Value {
     // TODO(phase1-reranker): when the reranker provider seam lands, derive this
     // from runtime config/manifests instead of the Phase 1 static deferral.
@@ -4121,7 +4404,24 @@ fn phase1_gate_check(
     json!({
         "name": name,
         "status": status,
-        "message": message
+        "message": message,
+        "gating": true
+    })
+}
+
+// An advisory check is reported in `checks[]` but does NOT block `claim_allowed`.
+fn phase1_gate_check_advisory(
+    name: &str,
+    status: impl Into<Phase1GateStatus>,
+    message: impl Into<String>,
+) -> Value {
+    let status = status.into().as_str();
+    let message = message.into();
+    json!({
+        "name": name,
+        "status": status,
+        "message": message,
+        "gating": false
     })
 }
 
@@ -5000,6 +5300,71 @@ mod tests {
             .expect("phase1 gate check status exists")
     }
 
+    fn gating_flag(payload: &Value, name: &str) -> Option<bool> {
+        payload["checks"]
+            .as_array()?
+            .iter()
+            .find(|check| check["name"] == name)
+            .and_then(|check| check["gating"].as_bool())
+    }
+
+    #[test]
+    fn external_benchmark_is_advisory_and_france_legi_gates() {
+        let index = json!({ "query_ready": true });
+        let ingest_health = json!({
+            "state": "available",
+            "latest_completed_run": "2026-06-21T20:00:00Z",
+            "failed_members": 0,
+            "projection_coverage": { "covered": 2, "total": 2 },
+            "embedding_coverage": { "covered": 2, "total": 2 },
+            "embedding_manifest": locked_embedding_manifest_json(),
+            "replay_snapshot_status": "available",
+            "replay_snapshot_source": "refreshed"
+        });
+
+        // Passing France-LEGI artifact + pending (advisory) BSARD external benchmark.
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), valid_france_legi_artifact().to_string()).unwrap();
+        let france_legi = phase1_france_legi_payload_with_path(Some(temp.path()));
+        let external = phase1_external_benchmark_default_payload();
+
+        let payload = phase1_gate_payload_with(&index, &ingest_health, external, france_legi);
+
+        // BSARD is advisory: its pending status must NOT block the claim.
+        assert_eq!(
+            check_status(&payload, "external_expert_annotated_eval"),
+            "pending"
+        );
+        assert_eq!(
+            gating_flag(&payload, "external_expert_annotated_eval"),
+            Some(false)
+        );
+        // France-LEGI is the gating benchmark and it passed.
+        assert_eq!(check_status(&payload, "france_legi_official_eval"), "pass");
+        assert_eq!(
+            gating_flag(&payload, "france_legi_official_eval"),
+            Some(true)
+        );
+        // Claim opens because every GATING check passes.
+        assert_eq!(payload["claim_allowed"], true);
+        assert_eq!(payload["state"], "ready");
+
+        // A failing France-LEGI artifact must re-close the claim even though BSARD is advisory.
+        let bad = tempfile::NamedTempFile::new().unwrap();
+        let mut artifact = valid_france_legi_artifact();
+        artifact["categories"]["known_item"]["metric_value"] = json!(0.10);
+        fs::write(bad.path(), artifact.to_string()).unwrap();
+        let failing_france_legi = phase1_france_legi_payload_with_path(Some(bad.path()));
+        let reclosed = phase1_gate_payload_with(
+            &index,
+            &ingest_health,
+            phase1_external_benchmark_default_payload(),
+            failing_france_legi,
+        );
+        assert_eq!(check_status(&reclosed, "france_legi_official_eval"), "fail");
+        assert_eq!(reclosed["claim_allowed"], false);
+    }
+
     fn test_eval_fixture() -> LegalRetrievalFixture {
         LegalRetrievalFixture {
             id: "fixture".to_string(),
@@ -5099,7 +5464,14 @@ mod tests {
             "replay_snapshot_source": "refreshed"
         });
 
-        let payload = phase1_gate_payload(&index, &ingest_health);
+        // Use the pure builder with default (pending) benchmark payloads so the assertions do
+        // not depend on the ambient JURISEARCH_PHASE1_*_BENCHMARK env vars.
+        let payload = phase1_gate_payload_with(
+            &index,
+            &ingest_health,
+            phase1_external_benchmark_default_payload(),
+            phase1_france_legi_default_payload(),
+        );
 
         assert_eq!(check_status(&payload, "index_query_ready"), "pass");
         assert_eq!(
@@ -5126,6 +5498,12 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert_eq!(
+            check_status(&payload, "france_legi_official_eval"),
+            "pending"
+        );
+        assert_eq!(payload["france_legi_benchmark"]["state"], "pending");
+        assert_eq!(payload["france_legi_benchmark"]["jurisdiction"], "france");
         assert_eq!(check_status(&payload, "reranker_decision"), "pass");
         assert_eq!(payload["reranker_decision"]["state"], "deferred");
         assert_eq!(payload["reranker_decision"]["provider"], "disabled");
@@ -5281,6 +5659,158 @@ mod tests {
         assert_eq!(payload["artifact_error"], Value::Null);
         assert_eq!(payload["dataset"]["revision"], "test-revision");
         assert_eq!(phase1_external_benchmark_check_status(&payload), "pass");
+    }
+
+    fn valid_france_legi_artifact() -> Value {
+        json!({
+            "schema_version": 1,
+            "kind": "phase1_france_legi_benchmark",
+            "state": "passed",
+            "jurisdiction": "france",
+            "claim_scope": "France-LEGI official-evidence statutory retrieval",
+            "source": "DILA LEGI (Licence Ouverte) official fields",
+            "retriever": "production jurisearch search (BM25+dense+RRF)",
+            "embedding": {
+                "fingerprint_model": "bge-m3",
+                "dimension": 1024,
+                "normalize": true
+            },
+            "thresholds": {
+                "known_item_recall_at_10_min": 0.85,
+                "temporal_version_exactness_at_10_min": 0.90,
+                "cross_reference_recall_at_10_min": 0.60
+            },
+            "categories": {
+                "known_item": { "metric_value": 0.92, "queries": 12 },
+                "temporal": { "metric_value": 0.95, "queries": 6 },
+                "cross_reference": { "metric_value": 0.64, "queries": 80 }
+            },
+            "provenance": {
+                "official_source": "DILA LEGI Freemium_legi_global_20250713 (Licence Ouverte)",
+                "source_revision": "20250713-140000",
+                "pipeline": "jurisearch search BM25+dense+RRF",
+                "code_version": "test-commit",
+                "index_revision": "phase1-freemium-20250713",
+                "sampled": false,
+                "human_in_gold": false,
+                "llm_in_gold": false
+            },
+            "evidence": [
+                "work/03-implementation/02-evidence/2026-06-22-france-legi-eval-phase1-live-hybrid.json"
+            ]
+        })
+    }
+
+    #[test]
+    fn france_legi_payload_consumes_valid_artifact() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), valid_france_legi_artifact().to_string()).unwrap();
+
+        let payload = phase1_france_legi_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "passed");
+        assert_eq!(payload["source"], json!(PHASE1_FRANCE_LEGI_BENCHMARK_ENV));
+        assert_eq!(payload["artifact_error"], Value::Null);
+        assert_eq!(payload["jurisdiction"], "france");
+        assert_eq!(payload["categories"]["known_item"]["queries"], 12);
+        assert_eq!(payload["provenance"]["human_in_gold"], false);
+        assert_eq!(phase1_france_legi_check_status(&payload), "pass");
+    }
+
+    #[test]
+    fn france_legi_payload_rejects_bad_provenance() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut artifact = valid_france_legi_artifact();
+        artifact["provenance"]["sampled"] = json!(true);
+        artifact["provenance"]["human_in_gold"] = json!(true);
+        // whitespace + case variant must still be rejected as unpinned
+        artifact["provenance"]["source_revision"] = json!("  UNKNOWN  ");
+        artifact["provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("official_source");
+        fs::write(temp.path(), artifact.to_string()).unwrap();
+
+        let payload = phase1_france_legi_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "failed");
+        assert_eq!(phase1_france_legi_check_status(&payload), "fail");
+        let error = payload["artifact_error"].as_str().unwrap();
+        assert!(error.contains("provenance.official_source is required"));
+        assert!(error.contains("provenance.source_revision must be pinned, not `unknown`"));
+        assert!(error.contains("provenance.sampled must be false"));
+        assert!(error.contains("provenance.human_in_gold must be false"));
+    }
+
+    #[test]
+    fn france_legi_payload_with_no_path_is_pending() {
+        let payload = phase1_france_legi_payload_with_path(None);
+        assert_eq!(payload["state"], "pending");
+        assert_eq!(payload["jurisdiction"], "france");
+        assert_eq!(phase1_france_legi_check_status(&payload), "pending");
+    }
+
+    #[test]
+    fn france_legi_payload_rejects_low_metrics_wrong_jurisdiction_and_small_eval() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            temp.path(),
+            json!({
+                "schema_version": 1,
+                "kind": "phase1_france_legi_benchmark",
+                "state": "passed",
+                "jurisdiction": "belgium",
+                "claim_scope": "x",
+                "source": "x",
+                "retriever": "x",
+                "embedding": { "fingerprint_model": "bge-m3", "dimension": 1024, "normalize": true },
+                "thresholds": {
+                    "known_item_recall_at_10_min": 0.50,
+                    "temporal_version_exactness_at_10_min": 0.90,
+                    "cross_reference_recall_at_10_min": 0.60
+                },
+                "categories": {
+                    "known_item": { "metric_value": 0.40, "queries": 3 },
+                    "temporal": { "metric_value": 0.95, "queries": 2 }
+                },
+                "evidence": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let payload = phase1_france_legi_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "failed");
+        assert_eq!(phase1_france_legi_check_status(&payload), "fail");
+        let error = payload["artifact_error"].as_str().unwrap();
+        assert!(error.contains("passed artifact must include non-empty evidence"));
+        assert!(error.contains("jurisdiction must be `france`"));
+        assert!(error.contains("thresholds.known_item_recall_at_10_min must be at least 0.850"));
+        assert!(error.contains("categories.known_item.metric_value must be at least threshold"));
+        assert!(error.contains("categories.known_item.queries must be at least 10"));
+        assert!(error.contains("categories.temporal.queries must be at least 4"));
+        assert!(error.contains("categories.cross_reference.metric_value is required"));
+    }
+
+    #[test]
+    fn france_legi_check_status_requires_evidence_for_pass() {
+        assert_eq!(
+            phase1_france_legi_check_status(&json!({ "state": "pending", "evidence": [] })),
+            "pending"
+        );
+        assert_eq!(
+            phase1_france_legi_check_status(&json!({ "state": "passed", "evidence": [] })),
+            "fail"
+        );
+        assert_eq!(
+            phase1_france_legi_check_status(&json!({ "state": "passed", "evidence": ["e"] })),
+            "pass"
+        );
+        assert_eq!(
+            phase1_france_legi_check_status(&json!({ "state": "failed", "evidence": ["e"] })),
+            "fail"
+        );
     }
 
     #[test]

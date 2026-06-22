@@ -40,6 +40,7 @@ fn jurisearch_command_without_embedding_env() -> Command {
         "JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN",
         "JURISEARCH_EMBED_TOKENIZER_JSON",
         "JURISEARCH_PHASE1_EXTERNAL_BENCHMARK",
+        "JURISEARCH_PHASE1_FRANCE_LEGI_BENCHMARK",
         "JURISEARCH_MODEL_DIR",
         "OPENROUTER_API_KEY",
         "XDG_CACHE_HOME",
@@ -3204,6 +3205,8 @@ fn cite_resolves_local_statutory_citations_and_strict_states() -> Result<(), Sto
         .env("JURISEARCH_PISTE_OAUTH_BASE_URL", &failing_online_base_url)
         .env("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID", "client-id")
         .env("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET", "client-secret")
+        // Probe failure must map fast: disable upstream retries so the 500 mock needs one request.
+        .env("JURISEARCH_PISTE_MAX_RETRIES", "0")
         .args([
             "cite",
             "Code civil article 1240",

@@ -411,6 +411,7 @@ pub fn compiled_schema() -> Value {
                     },
                     "eval_fixtures": { "$ref": "#/schemas/EvalFixtureSummary" },
                     "external_benchmark": { "$ref": "#/schemas/ExternalBenchmarkGate" },
+                    "france_legi_benchmark": { "$ref": "#/schemas/FranceLegiGate" },
                     "reranker_decision": { "$ref": "#/schemas/RerankerDecision" }
                 }
             },
@@ -418,7 +419,8 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "name": { "type": "string" },
                     "status": { "enum": ["pass", "pending", "fail"] },
-                    "message": { "type": "string" }
+                    "message": { "type": "string" },
+                    "gating": { "type": "boolean" }
                 }
             },
             "ExternalBenchmarkGate": {
@@ -440,6 +442,25 @@ pub fn compiled_schema() -> Value {
                     "evidence": { "type": "array", "items": { "type": "string" } },
                     "candidate_datasets": { "type": "array", "items": { "type": "object" } },
                     "non_gating_inputs": { "type": "array", "items": { "type": "object" } },
+                    "reason": { "type": "string" }
+                }
+            },
+            "FranceLegiGate": {
+                "properties": {
+                    "state": { "enum": ["pending", "passed", "failed"] },
+                    "source": { "type": "string" },
+                    "artifact_path": { "type": ["string", "null"] },
+                    "artifact_error": { "type": ["string", "null"] },
+                    "decision_date": { "type": "string", "format": "date" },
+                    "claim_scope": { "type": "string" },
+                    "jurisdiction": { "type": "string" },
+                    "retriever": { "type": "string" },
+                    "categories": { "type": ["object", "null"] },
+                    "thresholds": { "type": ["object", "null"] },
+                    "provenance": { "type": ["object", "null"] },
+                    "artifact": { "type": ["object", "null"] },
+                    "required_evidence": { "type": "array", "items": { "type": "string" } },
+                    "evidence": { "type": "array", "items": { "type": "string" } },
                     "reason": { "type": "string" }
                 }
             },
