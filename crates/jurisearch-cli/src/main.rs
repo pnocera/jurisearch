@@ -84,6 +84,12 @@ const LEGI_INGEST_TRANSACTION_BATCH_SIZE: usize = 128;
 const LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 const EMBED_CHUNKS_DEFAULT_BATCH_SIZE: usize = 32;
 const EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY: usize = 4;
+const PHASE1_EXTERNAL_BENCHMARK_ENV: &str = "JURISEARCH_PHASE1_EXTERNAL_BENCHMARK";
+const PHASE1_EXTERNAL_MIN_BSARD_DOCUMENTS: u64 = 22_000;
+const PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS: u64 = 200;
+const PHASE1_EXTERNAL_MIN_HYBRID_RECALL_AT_20: f64 = 0.75;
+const PHASE1_EXTERNAL_MIN_HYBRID_NDCG_AT_20: f64 = 0.60;
+const PHASE1_EXTERNAL_MIN_HYBRID_MRR_AT_20: f64 = 0.50;
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -3789,8 +3795,68 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
 }
 
 fn phase1_external_benchmark_payload() -> Value {
+    let artifact_path = std::env::var_os(PHASE1_EXTERNAL_BENCHMARK_ENV).map(PathBuf::from);
+    phase1_external_benchmark_payload_with_path(artifact_path.as_deref())
+}
+
+fn phase1_external_benchmark_payload_with_path(artifact_path: Option<&Path>) -> Value {
+    let mut payload = phase1_external_benchmark_default_payload();
+    let Some(artifact_path) = artifact_path else {
+        return payload;
+    };
+
+    payload["artifact_path"] = json!(artifact_path.to_string_lossy());
+    payload["source"] = json!(PHASE1_EXTERNAL_BENCHMARK_ENV);
+    let contents = match fs::read_to_string(artifact_path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            payload["state"] = json!("failed");
+            payload["artifact_error"] = json!(format!(
+                "failed to read external benchmark artifact `{}`: {error}",
+                artifact_path.display()
+            ));
+            return payload;
+        }
+    };
+    let artifact = match serde_json::from_str::<Value>(&contents) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            payload["state"] = json!("failed");
+            payload["artifact_error"] = json!(format!(
+                "failed to parse external benchmark artifact `{}` as JSON: {error}",
+                artifact_path.display()
+            ));
+            return payload;
+        }
+    };
+
+    payload["artifact"] = artifact.clone();
+    payload["evidence"] = artifact["evidence"]
+        .as_array()
+        .map(|_| artifact["evidence"].clone())
+        .unwrap_or_else(|| json!([]));
+    payload["metrics"] = artifact["metrics"].clone();
+    payload["thresholds"] = artifact["thresholds"].clone();
+    payload["dataset"] = artifact["dataset"].clone();
+    payload["artifact_error"] = Value::Null;
+
+    let validation_errors = phase1_external_benchmark_artifact_errors(&artifact);
+    if validation_errors.is_empty() {
+        payload["state"] = json!(artifact["state"].as_str().unwrap_or("pending"));
+    } else {
+        payload["state"] = json!("failed");
+        payload["artifact_error"] = json!(validation_errors.join("; "));
+    }
+
+    payload
+}
+
+fn phase1_external_benchmark_default_payload() -> Value {
     json!({
         "state": "pending",
+        "source": "not_configured",
+        "artifact_path": null,
+        "artifact_error": null,
         "decision_date": "2026-06-22",
         "primary_candidate": "maastrichtlawtech/bsard",
         "claim_scope": "external expert-annotated French-language statutory retrieval benchmark, not France-LEGI human-reviewed gold",
@@ -3803,6 +3869,10 @@ fn phase1_external_benchmark_payload() -> Value {
             "metrics artifact path recorded for status to consume before this gate can pass",
             "Phase 1 adoption threshold documented before claim_allowed can become true"
         ],
+        "dataset": null,
+        "metrics": null,
+        "thresholds": null,
+        "artifact": null,
         "evidence": [],
         "candidate_datasets": [
             {
@@ -3850,6 +3920,153 @@ fn phase1_external_benchmark_payload() -> Value {
         ],
         "reason": "local human legal-domain review is unavailable, so Phase 1 promotion must rely on a passing external expert-annotated legal retrieval benchmark plus internal LEGI smoke evidence"
     })
+}
+
+fn phase1_external_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    let state = artifact["state"].as_str();
+    match state {
+        Some("pending" | "passed" | "failed") => {}
+        Some(other) => errors.push(format!("invalid state `{other}`")),
+        None => errors.push("missing state".to_owned()),
+    }
+    if artifact["kind"].as_str() != Some("phase1_external_expert_benchmark") {
+        errors.push("kind must be `phase1_external_expert_benchmark`".to_owned());
+    }
+    if artifact["schema_version"].as_u64() != Some(1) {
+        errors.push("schema_version must be 1".to_owned());
+    }
+    if state == Some("passed")
+        && !artifact["evidence"]
+            .as_array()
+            .is_some_and(|evidence| !evidence.is_empty())
+    {
+        errors.push("passed artifact must include non-empty evidence".to_owned());
+    }
+    for (path, expected) in [
+        ("dataset.id", "maastrichtlawtech/bsard"),
+        ("dataset.question_split", "test"),
+        ("dataset.jurisdiction", "belgium"),
+        ("dataset.usage_scope", "eval_only"),
+        ("dataset.license", "cc-by-nc-sa-4.0"),
+        ("embedding.fingerprint_model", PHASE0_EMBEDDING_MODEL),
+    ] {
+        if artifact_pointer_str(artifact, path) != Some(expected) {
+            errors.push(format!("{path} must be `{expected}`"));
+        }
+    }
+    if artifact_pointer_value(artifact, "embedding.dimension").and_then(Value::as_u64)
+        != Some(PHASE0_EMBEDDING_DIMENSION as u64)
+    {
+        errors.push(format!(
+            "embedding.dimension must be {}",
+            PHASE0_EMBEDDING_DIMENSION
+        ));
+    }
+    if artifact_pointer_value(artifact, "embedding.normalize").and_then(Value::as_bool)
+        != Some(true)
+    {
+        errors.push("embedding.normalize must be true".to_owned());
+    }
+    for path in ["dataset.revision", "claim_scope", "applicability"] {
+        if artifact_pointer_str(artifact, path).is_none_or(|value| value.trim().is_empty()) {
+            errors.push(format!("{path} is required"));
+        }
+    }
+    if artifact_pointer_str(artifact, "dataset.revision") == Some("unknown") {
+        errors.push("dataset.revision must be pinned, not `unknown`".to_owned());
+    }
+    for path in ["thresholds", "metrics"] {
+        if artifact_pointer_value(artifact, path).is_none_or(Value::is_null) {
+            errors.push(format!("{path} is required"));
+        }
+    }
+    for path in ["dataset.limit_corpus", "dataset.limit_questions"] {
+        if artifact_pointer_value(artifact, path).is_some_and(|value| !value.is_null()) {
+            errors.push(format!("{path} must be null for a gate artifact"));
+        }
+    }
+    if artifact_pointer_value(artifact, "dataset.corpus_documents")
+        .and_then(Value::as_u64)
+        .is_none_or(|count| count < PHASE1_EXTERNAL_MIN_BSARD_DOCUMENTS)
+    {
+        errors.push(format!(
+            "dataset.corpus_documents must be at least {}",
+            PHASE1_EXTERNAL_MIN_BSARD_DOCUMENTS
+        ));
+    }
+    if artifact_pointer_value(artifact, "dataset.questions")
+        .and_then(Value::as_u64)
+        .is_none_or(|count| count < PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS)
+    {
+        errors.push(format!(
+            "dataset.questions must be at least {}",
+            PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS
+        ));
+    }
+    phase1_validate_external_benchmark_metric(
+        artifact,
+        "recall_at_20",
+        PHASE1_EXTERNAL_MIN_HYBRID_RECALL_AT_20,
+        &mut errors,
+    );
+    phase1_validate_external_benchmark_metric(
+        artifact,
+        "ndcg_at_20",
+        PHASE1_EXTERNAL_MIN_HYBRID_NDCG_AT_20,
+        &mut errors,
+    );
+    phase1_validate_external_benchmark_metric(
+        artifact,
+        "mrr_at_20",
+        PHASE1_EXTERNAL_MIN_HYBRID_MRR_AT_20,
+        &mut errors,
+    );
+    errors
+}
+
+fn phase1_validate_external_benchmark_metric(
+    artifact: &Value,
+    metric_name: &str,
+    policy_floor: f64,
+    errors: &mut Vec<String>,
+) {
+    let threshold_path = format!("thresholds.hybrid_{metric_name}_min");
+    let metric_path = format!("metrics.hybrid.{metric_name}");
+    let threshold = artifact_pointer_f64(artifact, &threshold_path);
+    let metric = artifact_pointer_f64(artifact, &metric_path);
+    match threshold {
+        Some(threshold) if threshold >= policy_floor => {}
+        Some(threshold) => errors.push(format!(
+            "{threshold_path} must be at least {policy_floor:.3}, got {threshold:.3}"
+        )),
+        None => errors.push(format!("{threshold_path} is required")),
+    }
+    if let (Some(metric), Some(threshold)) = (metric, threshold) {
+        if metric < threshold {
+            errors.push(format!(
+                "{metric_path} must be at least threshold {threshold:.3}, got {metric:.3}"
+            ));
+        }
+    } else if metric.is_none() {
+        errors.push(format!("{metric_path} is required"));
+    }
+}
+
+fn artifact_pointer_value<'a>(value: &'a Value, dotted_path: &str) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in dotted_path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn artifact_pointer_str<'a>(value: &'a Value, dotted_path: &str) -> Option<&'a str> {
+    artifact_pointer_value(value, dotted_path)?.as_str()
+}
+
+fn artifact_pointer_f64(value: &Value, dotted_path: &str) -> Option<f64> {
+    artifact_pointer_value(value, dotted_path)?.as_f64()
 }
 
 fn phase1_external_benchmark_check_status(external_benchmark: &Value) -> &'static str {
@@ -5009,6 +5226,213 @@ mod tests {
                 "evidence": ["work/03-implementation/02-evidence/external-benchmark.json"]
             })),
             "pass"
+        );
+    }
+
+    #[test]
+    fn external_benchmark_payload_consumes_valid_metrics_artifact() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let artifact = json!({
+            "schema_version": 1,
+            "kind": "phase1_external_expert_benchmark",
+            "state": "passed",
+            "dataset": {
+                "id": "maastrichtlawtech/bsard",
+                "revision": "test-revision",
+                "question_split": "test",
+                "jurisdiction": "belgium",
+                "usage_scope": "eval_only",
+                "license": "cc-by-nc-sa-4.0",
+                "corpus_documents": 22633,
+                "questions": 222,
+                "limit_corpus": null,
+                "limit_questions": null
+            },
+            "claim_scope": "external expert-annotated French-language statutory retrieval benchmark",
+            "applicability": "Belgian statutory questions are used as a French-language statutory retrieval proxy, not as France-LEGI gold.",
+            "embedding": {
+                "fingerprint_model": "bge-m3",
+                "request_model": "baai/bge-m3",
+                "dimension": 1024,
+                "normalize": true
+            },
+            "thresholds": {
+                "hybrid_recall_at_20_min": 0.8,
+                "hybrid_ndcg_at_20_min": 0.6,
+                "hybrid_mrr_at_20_min": 0.5
+            },
+            "metrics": {
+                "hybrid": {
+                    "recall_at_20": 0.86,
+                    "ndcg_at_20": 0.72,
+                    "mrr_at_20": 0.58
+                }
+            },
+            "evidence": [
+                "work/03-implementation/02-evidence/phase1-external-benchmark.json"
+            ]
+        });
+        fs::write(temp.path(), artifact.to_string()).unwrap();
+
+        let payload = phase1_external_benchmark_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "passed");
+        assert_eq!(payload["source"], json!(PHASE1_EXTERNAL_BENCHMARK_ENV));
+        assert_eq!(payload["artifact_error"], Value::Null);
+        assert_eq!(payload["dataset"]["revision"], "test-revision");
+        assert_eq!(phase1_external_benchmark_check_status(&payload), "pass");
+    }
+
+    #[test]
+    fn external_benchmark_payload_fails_invalid_pass_artifact() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            temp.path(),
+            json!({
+                "schema_version": 1,
+                "kind": "phase1_external_expert_benchmark",
+                "state": "passed",
+                "dataset": {
+                    "id": "maastrichtlawtech/bsard",
+                    "question_split": "test",
+                    "jurisdiction": "belgium",
+                    "usage_scope": "eval_only",
+                    "license": "cc-by-nc-sa-4.0",
+                    "limit_corpus": 10
+                },
+                "evidence": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let payload = phase1_external_benchmark_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "failed");
+        assert_eq!(phase1_external_benchmark_check_status(&payload), "fail");
+        let error = payload["artifact_error"].as_str().unwrap();
+        assert!(error.contains("passed artifact must include non-empty evidence"));
+        assert!(error.contains("dataset.revision is required"));
+        assert!(error.contains("dataset.limit_corpus must be null"));
+        assert!(error.contains("embedding.fingerprint_model must be `bge-m3`"));
+        assert!(error.contains("metrics is required"));
+    }
+
+    #[test]
+    fn external_benchmark_payload_rejects_zero_threshold_pass_artifact() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            temp.path(),
+            json!({
+                "schema_version": 1,
+                "kind": "phase1_external_expert_benchmark",
+                "state": "passed",
+                "dataset": {
+                    "id": "maastrichtlawtech/bsard",
+                    "revision": "test-revision",
+                    "question_split": "test",
+                    "jurisdiction": "belgium",
+                    "usage_scope": "eval_only",
+                    "license": "cc-by-nc-sa-4.0",
+                    "corpus_documents": 22633,
+                    "questions": 222,
+                    "limit_corpus": null,
+                    "limit_questions": null
+                },
+                "claim_scope": "external expert-annotated French-language statutory retrieval benchmark",
+                "applicability": "Belgian statutory questions are used as a French-language statutory retrieval proxy, not as France-LEGI gold.",
+                "embedding": {
+                    "fingerprint_model": "bge-m3",
+                    "request_model": "baai/bge-m3",
+                    "dimension": 1024,
+                    "normalize": true
+                },
+                "thresholds": {
+                    "hybrid_recall_at_20_min": 0.0,
+                    "hybrid_ndcg_at_20_min": 0.0,
+                    "hybrid_mrr_at_20_min": 0.0
+                },
+                "metrics": {
+                    "hybrid": {
+                        "recall_at_20": 1.0,
+                        "ndcg_at_20": 1.0,
+                        "mrr_at_20": 1.0
+                    }
+                },
+                "evidence": [
+                    "work/03-implementation/02-evidence/phase1-external-benchmark.json"
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let payload = phase1_external_benchmark_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "failed");
+        let error = payload["artifact_error"].as_str().unwrap();
+        assert!(error.contains("thresholds.hybrid_recall_at_20_min must be at least 0.750"));
+        assert!(error.contains("thresholds.hybrid_ndcg_at_20_min must be at least 0.600"));
+        assert!(error.contains("thresholds.hybrid_mrr_at_20_min must be at least 0.500"));
+    }
+
+    #[test]
+    fn external_benchmark_payload_rejects_unknown_dataset_revision() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            temp.path(),
+            json!({
+                "schema_version": 1,
+                "kind": "phase1_external_expert_benchmark",
+                "state": "passed",
+                "dataset": {
+                    "id": "maastrichtlawtech/bsard",
+                    "revision": "unknown",
+                    "question_split": "test",
+                    "jurisdiction": "belgium",
+                    "usage_scope": "eval_only",
+                    "license": "cc-by-nc-sa-4.0",
+                    "corpus_documents": 22633,
+                    "questions": 222,
+                    "limit_corpus": null,
+                    "limit_questions": null
+                },
+                "claim_scope": "external expert-annotated French-language statutory retrieval benchmark",
+                "applicability": "Belgian statutory questions are used as a French-language statutory retrieval proxy, not as France-LEGI gold.",
+                "embedding": {
+                    "fingerprint_model": "bge-m3",
+                    "request_model": "baai/bge-m3",
+                    "dimension": 1024,
+                    "normalize": true
+                },
+                "thresholds": {
+                    "hybrid_recall_at_20_min": 0.8,
+                    "hybrid_ndcg_at_20_min": 0.6,
+                    "hybrid_mrr_at_20_min": 0.5
+                },
+                "metrics": {
+                    "hybrid": {
+                        "recall_at_20": 0.86,
+                        "ndcg_at_20": 0.72,
+                        "mrr_at_20": 0.58
+                    }
+                },
+                "evidence": [
+                    "work/03-implementation/02-evidence/phase1-external-benchmark.json"
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let payload = phase1_external_benchmark_payload_with_path(Some(temp.path()));
+
+        assert_eq!(payload["state"], "failed");
+        assert!(
+            payload["artifact_error"]
+                .as_str()
+                .unwrap()
+                .contains("dataset.revision must be pinned")
         );
     }
 }

@@ -39,6 +39,7 @@ fn jurisearch_command_without_embedding_env() -> Command {
         "JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS",
         "JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN",
         "JURISEARCH_EMBED_TOKENIZER_JSON",
+        "JURISEARCH_PHASE1_EXTERNAL_BENCHMARK",
         "JURISEARCH_MODEL_DIR",
         "OPENROUTER_API_KEY",
         "XDG_CACHE_HOME",
@@ -185,6 +186,10 @@ fn help_schema_json_is_valid_and_lists_commands() {
     );
     assert_eq!(
         json["schemas"]["ExternalBenchmarkGate"]["properties"]["claim_scope"]["type"],
+        "string"
+    );
+    assert_eq!(
+        json["schemas"]["ExternalBenchmarkGate"]["properties"]["artifact_path"]["type"][0],
         "string"
     );
     assert_eq!(
@@ -369,6 +374,88 @@ fn status_returns_json_without_index() {
         json["phase1_gate"]["external_benchmark"]["usage_scope"],
         "eval_only"
     );
+    assert_eq!(
+        json["phase1_gate"]["external_benchmark"]["source"],
+        "not_configured"
+    );
+    assert!(json["phase1_gate"]["external_benchmark"]["artifact_path"].is_null());
+}
+
+#[test]
+fn status_consumes_external_benchmark_artifact_from_env() {
+    let artifact = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        artifact.path(),
+        serde_json::json!({
+            "schema_version": 1,
+            "kind": "phase1_external_expert_benchmark",
+            "state": "passed",
+            "dataset": {
+                "id": "maastrichtlawtech/bsard",
+                "revision": "contract-test",
+                "question_split": "test",
+                "jurisdiction": "belgium",
+                "usage_scope": "eval_only",
+                "license": "cc-by-nc-sa-4.0",
+                "corpus_documents": 22633,
+                "questions": 222,
+                "limit_corpus": null,
+                "limit_questions": null
+            },
+            "claim_scope": "external expert-annotated French-language statutory retrieval benchmark",
+            "applicability": "Belgian statutory questions are a French-language statutory retrieval proxy, not France-LEGI human-reviewed gold.",
+            "embedding": {
+                "fingerprint_model": "bge-m3",
+                "request_model": "baai/bge-m3",
+                "dimension": 1024,
+                "normalize": true
+            },
+            "thresholds": {
+                "hybrid_recall_at_20_min": 0.8,
+                "hybrid_ndcg_at_20_min": 0.6,
+                "hybrid_mrr_at_20_min": 0.5
+            },
+            "metrics": {
+                "hybrid": {
+                    "recall_at_20": 0.86,
+                    "ndcg_at_20": 0.72,
+                    "mrr_at_20": 0.58
+                }
+            },
+            "evidence": [
+                "work/03-implementation/02-evidence/phase1-external-benchmark.json"
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_PHASE1_EXTERNAL_BENCHMARK", artifact.path())
+        .args(["status"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let external_benchmark = &json["phase1_gate"]["external_benchmark"];
+    assert_eq!(external_benchmark["state"], "passed");
+    assert_eq!(external_benchmark["dataset"]["revision"], "contract-test");
+    assert_eq!(external_benchmark["artifact_error"], Value::Null);
+    assert!(
+        json["phase1_gate"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["name"] == "external_expert_annotated_eval"
+                && check["status"] == "pass")
+    );
+    assert_eq!(json["phase1_gate"]["claim_allowed"], false);
 }
 
 #[test]

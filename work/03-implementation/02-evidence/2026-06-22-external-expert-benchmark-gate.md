@@ -37,6 +37,11 @@ Gate semantics:
 - `jurisearch status.phase1_gate.external_benchmark.state` starts as `pending`.
 - `phase1_gate.checks[]` uses `external_expert_annotated_eval` as the quality blocker.
 - The check must not pass from documentation alone.
+- Status consumes the durable artifact path from `JURISEARCH_PHASE1_EXTERNAL_BENCHMARK`.
+- The external runner is `external-benchmarks/bsard_benchmark.py`.
+- Limited smoke artifacts (`limit_corpus` / `limit_questions`) are rejected by status for gate purposes.
+- The Rust status gate re-derives pass from artifact metrics and policy floors instead of trusting the artifact's self-reported `state`.
+- Current enforced floors are hybrid `recall_at_20 >= 0.75`, `ndcg_at_20 >= 0.60`, and `mrr_at_20 >= 0.50`.
 - Required evidence before pass:
   - dataset access and license recorded;
   - corpus/questions/qrels imported or adapted with no training leakage;
