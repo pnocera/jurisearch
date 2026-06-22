@@ -29,6 +29,7 @@ fn jurisearch_command_without_embedding_env() -> Command {
         "JURISEARCH_EMBED_PROVIDER",
         "JURISEARCH_EMBED_BASE_URL",
         "JURISEARCH_EMBED_BASE_URLS",
+        "JURISEARCH_EMBED_POOL",
         "JURISEARCH_EMBED_API_KEY",
         "JURISEARCH_EMBED_MODEL",
         "JURISEARCH_EMBED_DIMENSION",
@@ -39,6 +40,7 @@ fn jurisearch_command_without_embedding_env() -> Command {
         "JURISEARCH_EMBED_ESTIMATED_CHARS_PER_TOKEN",
         "JURISEARCH_EMBED_TOKENIZER_JSON",
         "JURISEARCH_MODEL_DIR",
+        "OPENROUTER_API_KEY",
         "XDG_CACHE_HOME",
     ] {
         command.env_remove(name);
@@ -451,6 +453,11 @@ estimated_chars_per_token = 6
 tokenizer_json = "/tmp/config-tokenizer.json"
 provisional = false
 reembeddable = false
+
+[[embedding.pool]]
+base_url = "https://openrouter.ai/api/v1"
+request_model = "baai/bge-m3"
+api_key_env = "POOL_API_KEY"
 "#,
     )
     .unwrap();
@@ -458,6 +465,7 @@ reembeddable = false
     let output = jurisearch_command_without_embedding_env()
         .env_remove("JURISEARCH_INDEX_DIR")
         .env("XDG_CONFIG_HOME", config_home.path())
+        .env("POOL_API_KEY", "file-pool-secret")
         .arg("status")
         .assert()
         .success()
@@ -468,6 +476,7 @@ reembeddable = false
 
     let stdout = String::from_utf8(output.clone()).unwrap();
     assert!(!stdout.contains("file-secret-token"));
+    assert!(!stdout.contains("file-pool-secret"));
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["embedding"]["provider"], "openai_compatible");
     assert_eq!(
@@ -496,6 +505,13 @@ reembeddable = false
     );
     assert_eq!(json["embedding"]["provisional"], false);
     assert_eq!(json["embedding"]["reembeddable"], false);
+    let pool = json["embedding"]["pool"].as_array().unwrap();
+    assert_eq!(pool.len(), 1);
+    assert_eq!(json["embedding"]["pool_overrides_base_urls"], true);
+    assert_eq!(pool[0]["base_url"], "https://openrouter.ai/api/v1");
+    assert_eq!(pool[0]["request_model"], "baai/bge-m3");
+    assert_eq!(pool[0]["api_key_env"], "POOL_API_KEY");
+    assert_eq!(pool[0]["api_key_configured"], true);
     assert_eq!(
         json["embedding"]["config_path"],
         config_path.display().to_string()
@@ -558,6 +574,40 @@ dimension = 768
     assert_eq!(json["embedding"]["dimension"], 1024);
     assert_eq!(json["embedding"]["config_loaded"], true);
     assert!(json["embedding"]["config_error"].is_null());
+}
+
+#[test]
+fn status_reports_embedding_pool_without_leaking_endpoint_keys() {
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env("JURISEARCH_CONFIG", "none")
+        .env(
+            "JURISEARCH_EMBED_POOL",
+            "http://127.0.0.1:9/v1;https://openrouter.ai/api/v1|baai/bge-m3|OPENROUTER_API_KEY",
+        )
+        .env("OPENROUTER_API_KEY", "openrouter-secret-token")
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output.clone()).unwrap();
+    assert!(!stdout.contains("openrouter-secret-token"));
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let pool = json["embedding"]["pool"].as_array().unwrap();
+    assert_eq!(pool.len(), 2);
+    assert_eq!(json["embedding"]["pool_overrides_base_urls"], true);
+    assert_eq!(pool[0]["base_url"], "http://127.0.0.1:9/v1");
+    assert!(pool[0]["request_model"].is_null());
+    assert!(pool[0]["api_key_env"].is_null());
+    assert_eq!(pool[0]["api_key_configured"], false);
+    assert_eq!(pool[1]["base_url"], "https://openrouter.ai/api/v1");
+    assert_eq!(pool[1]["request_model"], "baai/bge-m3");
+    assert_eq!(pool[1]["api_key_env"], "OPENROUTER_API_KEY");
+    assert_eq!(pool[1]["api_key_configured"], true);
 }
 
 #[test]
@@ -3302,23 +3352,33 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
         )?;
     }
 
-    let slow_endpoint = spawn_server(1, |request| {
+    let local_endpoint = spawn_server(1, |request| {
         assert!(request.starts_with("POST /v1/embeddings "));
+        assert!(request.contains(r#""model":"bge-m3""#));
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
         thread::sleep(Duration::from_millis(150));
         ok_json(&embedding_response_json(0))
     });
-    let fast_endpoint = spawn_server(1, |request| {
-        assert!(request.starts_with("POST /v1/embeddings "));
+    let openrouter_endpoint = spawn_server(1, |request| {
+        assert!(request.starts_with("POST /api/v1/embeddings "));
+        assert!(request.contains(r#""model":"baai/bge-m3""#));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer openrouter-secret-token")
+        );
         ok_json(&embedding_response_json(1))
     });
-    let base_urls = format!("{slow_endpoint}/v1,{fast_endpoint}/v1");
+    let pool =
+        format!("{local_endpoint}/v1;{openrouter_endpoint}/api/v1|baai/bge-m3|OPENROUTER_API_KEY");
     let primary_base_url = "http://127.0.0.1:1/v1";
 
     let output = jurisearch_command_without_embedding_env()
         .env("JURISEARCH_INDEX_DIR", root.path())
         .env("JURISEARCH_CONFIG", "none")
         .env("JURISEARCH_EMBED_BASE_URL", primary_base_url)
-        .env("JURISEARCH_EMBED_BASE_URLS", base_urls)
+        .env("JURISEARCH_EMBED_POOL", pool)
+        .env("OPENROUTER_API_KEY", "openrouter-secret-token")
         .args([
             "ingest",
             "embed-chunks",
@@ -3353,6 +3413,14 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
             .iter()
             .all(|endpoint| endpoint["base_url"].as_str().unwrap() != primary_base_url)
     );
+    assert!(endpoints.iter().any(|endpoint| {
+        endpoint["base_url"].as_str().unwrap().ends_with("/v1")
+            && endpoint["request_model"].is_null()
+    }));
+    assert!(endpoints.iter().any(|endpoint| {
+        endpoint["base_url"].as_str().unwrap().ends_with("/api/v1")
+            && endpoint["request_model"] == "baai/bge-m3"
+    }));
     assert!(endpoints.iter().all(|endpoint| {
         endpoint["requests"].as_u64().unwrap() == 1 && endpoint["chunks"].as_u64().unwrap() == 1
     }));
@@ -3376,6 +3444,14 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
             "SELECT count(*)::text \
              FROM chunks \
              WHERE embedding_fingerprint = 'bge-m3:1024:normalize:true';",
+        )?,
+        "2"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM chunk_embeddings \
+             WHERE model = 'bge-m3' AND embedding_fingerprint = 'bge-m3:1024:normalize:true';",
         )?,
         "2"
     );

@@ -69,6 +69,7 @@ pub struct EmbeddingConfig {
     pub base_urls: Vec<String>,
     pub api_key: Option<String>,
     pub model: String,
+    pub request_model: Option<String>,
     pub dimension: usize,
     pub normalize: bool,
     pub pooling: String,
@@ -96,6 +97,7 @@ impl EmbeddingConfig {
             base_urls: vec![base_url],
             api_key,
             model: model.into(),
+            request_model: None,
             dimension,
             normalize,
             pooling: pooling.into(),
@@ -116,6 +118,7 @@ impl EmbeddingConfig {
             base_urls: vec![base_url],
             api_key,
             model: PHASE0_EMBEDDING_MODEL.to_owned(),
+            request_model: None,
             dimension: PHASE0_EMBEDDING_DIMENSION,
             normalize: true,
             pooling: PHASE0_EMBEDDING_POOLING.to_owned(),
@@ -135,6 +138,7 @@ impl EmbeddingConfig {
             base_urls: Vec::new(),
             api_key: None,
             model: model.into(),
+            request_model: None,
             dimension,
             normalize: true,
             pooling: PHASE0_EMBEDDING_POOLING.to_owned(),
@@ -208,6 +212,14 @@ impl EmbeddingConfig {
 
     pub fn preflight_input(&self, input: &str) -> Result<EmbeddingInputStats, EmbeddingError> {
         self.preflight_input_with_tokenizer(input, None)
+    }
+
+    #[must_use]
+    pub fn request_model(&self) -> &str {
+        self.request_model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or(self.model.as_str())
     }
 
     pub fn preflight_input_with_tokenizer(
@@ -413,7 +425,7 @@ impl OpenAiCompatibleClient {
 
         let response = request
             .send_json(json!({
-                "model": &self.config.model,
+                "model": self.config.request_model(),
                 "input": inputs,
             }))
             .map_err(endpoint_error)?;
@@ -571,6 +583,7 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
         path::Path,
+        sync::{Arc, Mutex},
         thread,
     };
 
@@ -631,6 +644,33 @@ mod tests {
         assert_eq!(embeddings.len(), 2);
         assert_eq!(embeddings[0].values, vec![1.0, 0.0, 0.0]);
         assert_eq!(embeddings[1].values, vec![0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn request_model_alias_does_not_change_stored_fingerprint() {
+        let request_log = Arc::new(Mutex::new(None::<String>));
+        let request_log_clone = Arc::clone(&request_log);
+        let base_url = spawn_embedding_server_with_request_check(
+            "200 OK",
+            r#"{"data":[{"embedding":[0.6,0.8,0.0]}]}"#,
+            move |request| {
+                *request_log_clone.lock().unwrap() = Some(request.to_owned());
+            },
+        );
+        let mut config =
+            EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
+        config.request_model = Some("baai/bge-m3".to_owned());
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let embedding = client
+            .embed_query("responsabilite civile", &expected)
+            .unwrap();
+
+        assert_eq!(embedding.fingerprint.model, "bge-m3");
+        assert_eq!(embedding.values, vec![0.6, 0.8, 0.0]);
+        let request = request_log.lock().unwrap().take().unwrap();
+        assert!(request.contains(r#""model":"baai/bge-m3""#));
     }
 
     #[test]
@@ -864,14 +904,21 @@ mod tests {
         status: &'static str,
         response_body: &'static str,
     ) -> String {
+        spawn_embedding_server_with_request_check(status, response_body, |_| {})
+    }
+
+    fn spawn_embedding_server_with_request_check(
+        status: &'static str,
+        response_body: &'static str,
+        check_request: impl FnOnce(&str) + Send + 'static,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 4096];
-            let read = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..read]);
+            let request = read_http_request(&mut stream);
             assert!(request.starts_with("POST /v1/embeddings "));
+            check_request(&request);
             let response = format!(
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 response_body.len(),
@@ -880,6 +927,41 @@ mod tests {
             stream.write_all(response.as_bytes()).unwrap();
         });
         format!("http://{address}/v1")
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if request_is_complete(&bytes) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn request_is_complete(bytes: &[u8]) -> bool {
+        let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("Content-Length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        let Some(content_length) = content_length else {
+            return true;
+        };
+        bytes.len() >= header_end + 4 + content_length
     }
 
     fn write_test_tokenizer(path: &Path) {

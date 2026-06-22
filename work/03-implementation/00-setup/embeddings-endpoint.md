@@ -67,29 +67,40 @@ Record `provider, base_url-class, model, dimension(1024), normalize(true), pooli
 
 The dense projection over the LEGI corpus is the next gate-blocking step after ingest (`--safe-mode` defers embeddings; the vectors table stays empty until `jurisearch ingest embed-chunks` runs). It is **build-time only** — query-time embeds one tiny query, so **retrieval stays on the single local endpoint**.
 
-Three **fingerprint-identical** bge-m3 nodes are available (all `gpustack/bge-m3-GGUF:FP16`, 1024-d / cls / normalized; cross-node cosine 0.99997): `127.0.0.1:8097`, `192.168.1.57:8097`, `192.168.1.27:8097`.
+Available bge-m3-compatible nodes are volatile. The LAN nodes (`127.0.0.1:8097`, `192.168.1.57:8097`, `192.168.1.27:8097`) share the locked local fingerprint (`gpustack/bge-m3-GGUF:FP16`, 1024-d / cls / normalized; cross-node cosine ~0.99997), but measured throughput changed materially between runs as machine load shifted. OpenRouter's hosted `baai/bge-m3` endpoint measured fingerprint-compatible as well (1024-d, normalized, cosine 0.999972 against local) and was stable.
 
-Measured batched throughput — real `contextualized_body` chunk payloads (avg ~30 tokens), batch 32, 4 concurrent:
+Measured batched throughput on real `contextualized_body` chunk payloads:
 
-| node | texts/s | note |
-|---|---|---|
-| localhost `:8097` | ~58 | slowest — weaker box + contended by the running ingest |
-| `192.168.1.57` | ~194 | |
-| `192.168.1.27` | ~146 | |
-| **3-node pooled** (least-busy queue) | **~288** | Python/GIL-limited client; sum-of-nodes ≈ 398 |
+| node | latest texts/s | earlier texts/s | note |
+|---|---:|---:|---|
+| localhost `:8097` | ~222 | ~58 | local load changed materially |
+| `192.168.1.57:8097` | ~6 | ~194 | currently contended |
+| `192.168.1.27:8097` | ~4 | ~146 | currently contended |
+| OpenRouter `baai/bge-m3`, C=16 | **~292** | n/a | stable; C=8 ~149, C=32 ~188 |
 
 Projected dense projection over the corpus (~1.85 M chunks at measurement):
 
 | strategy | wall-clock |
 |---|---|
-| localhost-only | **~8.9 h** |
-| 3-node pooled | **~1.8 h** (~5×; a Rust pooled client should beat this, ~1.3 h) |
+| localhost-only at old ~58 t/s | ~8.9 h |
+| OpenRouter-only at C=16 | ~1.8 h |
+| OpenRouter + any uncongested LAN node | faster, if the LAN node is actually free |
 
 **Build-time projection recommendation (W4/W5):**
-- **Pool the N endpoints with a least-outstanding-requests dispatcher** — NOT round-robin (localhost is ~3× slower and would gate every round); the queue auto-balanced (localhost took 7 batches vs 23/17 on the remotes).
-- **Deprioritize/exclude localhost for the bulk pass** (slow + ingest-contended); reserve it for query-time.
-- Batched + **resumable** via the projection-coverage accounting: completed batches are durable, failed batches abort the run, and a rerun skips chunks that already have matching embeddings. This extends the existing `jurisearch ingest embed-chunks` from one endpoint to a pool.
-- All nodes share the locked fingerprint → mixing them is safe for the index (vectors equivalent for retrieval; not bit-identical — irrelevant here).
+- Use OpenRouter as the reliable build-time backbone for LEGI dense projection: `https://openrouter.ai/api/v1`, request model `baai/bge-m3`, `Authorization: Bearer $OPENROUTER_API_KEY`, concurrency cap **16**.
+- Keep the canonical jurisearch model/fingerprint as `bge-m3:1024:normalize:true`. The OpenRouter slug is a request alias only; stored rows and query compatibility still use locked `bge-m3`.
+- Do **not** set `JURISEARCH_EMBED_MODEL=baai/bge-m3`; that would change the canonical storage fingerprint. Keep `model = "bge-m3"` and put `baai/bge-m3` only in the pool request-model slot.
+- Use the explicit pool spec when endpoints need different request models or secrets:
+
+```bash
+JURISEARCH_EMBED_BASE_URL="http://127.0.0.1:8097/v1" \
+JURISEARCH_EMBED_POOL="https://openrouter.ai/api/v1|baai/bge-m3|OPENROUTER_API_KEY" \
+jurisearch ingest embed-chunks --batch-size 32 --pool-concurrency 16
+```
+
+- `JURISEARCH_EMBED_BASE_URLS` remains suitable only for same-model/same-auth local pools. Use `JURISEARCH_EMBED_POOL` for mixed local/hosted pools so hosted secrets are not sent to LAN endpoints. When `JURISEARCH_EMBED_POOL` is set it supersedes `JURISEARCH_EMBED_BASE_URLS` for `ingest embed-chunks`; `status` reports this as `pool_overrides_base_urls: true`.
+- Batched + **resumable** via the projection-coverage accounting: completed batches are durable, failed batches abort the run, and a rerun skips chunks that already have matching embeddings.
+- LEGI is public official text, so OpenRouter egress is acceptable for Phase 1. Revisit this for Phase 2 Judilibre: even pseudonymized decisions may warrant local-only embedding.
 
 ## Why bge-m3 (and why not `nomic-embed-text-v1.5`)
 

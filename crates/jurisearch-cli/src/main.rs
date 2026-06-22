@@ -2080,12 +2080,14 @@ fn embed_chunks_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
-    let embedding_config = embedding_config_from_env();
+    let loaded_embedding = loaded_embedding_config();
+    let embedding_config = loaded_embedding.config;
     ensure_embedding_runtime_ready(&embedding_config, false)?;
     let expected_fingerprint = embedding_config.fingerprint();
     let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
     let endpoint_configs = embedding_endpoint_pool_configs(
         &embedding_config,
+        &loaded_embedding.pool_endpoints,
         &expected_fingerprint,
         embedding_fingerprint.as_str(),
     )?;
@@ -2161,6 +2163,8 @@ fn embed_chunks_payload(
             "normalize": embedding_config.normalize,
             "pooling": embedding_config.pooling,
             "base_urls": embedding_config.base_urls.clone(),
+            "pool": embedding_pool_endpoints_status_json(&loaded_embedding.pool_endpoints),
+            "pool_overrides_base_urls": !loaded_embedding.pool_endpoints.is_empty(),
             "max_input_chars": embedding_config.max_input_chars,
             "max_estimated_tokens": embedding_config.max_estimated_tokens,
             "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
@@ -2189,6 +2193,7 @@ fn embed_chunks_payload(
 #[derive(Debug, Clone)]
 struct EmbeddingEndpointPoolConfig {
     base_url: String,
+    request_model: Option<String>,
     config: EmbeddingConfig,
     expected_fingerprint: EmbeddingFingerprint,
 }
@@ -2196,6 +2201,7 @@ struct EmbeddingEndpointPoolConfig {
 #[derive(Debug, Clone)]
 struct EmbeddingEndpointState {
     base_url: String,
+    request_model: Option<String>,
     outstanding: usize,
     requests: usize,
     chunks: usize,
@@ -2232,6 +2238,7 @@ struct EmbeddingPoolRun {
 
 fn embedding_endpoint_pool_configs(
     config: &EmbeddingConfig,
+    pool_endpoints: &[EmbeddingPoolEndpoint],
     expected_fingerprint: &EmbeddingFingerprint,
     storage_embedding_fingerprint: &str,
 ) -> Result<Vec<EmbeddingEndpointPoolConfig>, ErrorObject> {
@@ -2243,37 +2250,35 @@ fn embedding_endpoint_pool_configs(
         ));
     }
 
-    let mut base_urls = config
-        .base_urls
-        .iter()
-        .filter_map(|base_url| nonempty_string(Some(base_url.clone())))
-        .collect::<Vec<_>>();
-    if base_urls.is_empty()
-        && let Some(base_url) = config
-            .base_url
-            .clone()
-            .and_then(|base_url| nonempty_string(Some(base_url)))
-    {
-        base_urls.push(base_url);
-    }
-    let mut deduped_base_urls = Vec::new();
-    for base_url in base_urls {
-        if !deduped_base_urls.contains(&base_url) {
-            deduped_base_urls.push(base_url);
-        }
-    }
-    if deduped_base_urls.is_empty() {
+    let endpoint_specs = if pool_endpoints.is_empty() {
+        legacy_embedding_pool_endpoints(config)
+    } else {
+        dedupe_embedding_pool_endpoints(pool_endpoints.to_vec())
+    };
+    if endpoint_specs.is_empty() {
         return Err(embedding_error_object(
             jurisearch_embed::EmbeddingError::MissingBaseUrl,
         ));
     }
 
-    deduped_base_urls
+    endpoint_specs
         .into_iter()
-        .map(|base_url| {
+        .map(|endpoint| {
             let mut endpoint_config = config.clone();
-            endpoint_config.base_url = Some(base_url.clone());
-            endpoint_config.base_urls = vec![base_url.clone()];
+            endpoint_config.base_url = Some(endpoint.base_url.clone());
+            endpoint_config.base_urls = vec![endpoint.base_url.clone()];
+            endpoint_config.request_model = endpoint.request_model.clone();
+            if pool_endpoints.is_empty() {
+                endpoint_config.api_key = config.api_key.clone();
+            } else if endpoint.api_key_env.is_some() && endpoint.api_key.is_none() {
+                let api_key_env = endpoint.api_key_env.as_deref().unwrap_or_default();
+                return Err(dependency_unavailable(format!(
+                    "embedding pool endpoint `{}` requires non-empty environment variable `{api_key_env}`",
+                    endpoint.base_url
+                )));
+            } else {
+                endpoint_config.api_key = endpoint.api_key.clone();
+            }
             let endpoint_fingerprint = endpoint_config.fingerprint();
             if endpoint_fingerprint.provider != expected_fingerprint.provider
                 || endpoint_fingerprint.model != expected_fingerprint.model
@@ -2284,16 +2289,62 @@ fn embedding_endpoint_pool_configs(
                     != storage_embedding_fingerprint
             {
                 return Err(dependency_unavailable(format!(
-                    "embedding endpoint `{base_url}` does not match the selected model fingerprint"
+                    "embedding endpoint `{}` does not match the selected model fingerprint",
+                    endpoint.base_url
                 )));
             }
             Ok(EmbeddingEndpointPoolConfig {
-                base_url,
+                base_url: endpoint.base_url,
+                request_model: endpoint.request_model,
                 config: endpoint_config,
                 expected_fingerprint: endpoint_fingerprint,
             })
         })
         .collect()
+}
+
+fn legacy_embedding_pool_endpoints(config: &EmbeddingConfig) -> Vec<EmbeddingPoolEndpoint> {
+    let mut endpoints = config
+        .base_urls
+        .iter()
+        .filter_map(|base_url| nonempty_string(Some(base_url.clone())))
+        .map(|base_url| EmbeddingPoolEndpoint {
+            base_url,
+            request_model: None,
+            api_key_env: None,
+            api_key: config.api_key.clone(),
+        })
+        .collect::<Vec<_>>();
+    if endpoints.is_empty()
+        && let Some(base_url) = config
+            .base_url
+            .clone()
+            .and_then(|base_url| nonempty_string(Some(base_url)))
+    {
+        endpoints.push(EmbeddingPoolEndpoint {
+            base_url,
+            request_model: None,
+            api_key_env: None,
+            api_key: config.api_key.clone(),
+        });
+    }
+    dedupe_embedding_pool_endpoints(endpoints)
+}
+
+fn dedupe_embedding_pool_endpoints(
+    endpoints: Vec<EmbeddingPoolEndpoint>,
+) -> Vec<EmbeddingPoolEndpoint> {
+    let mut deduped = Vec::new();
+    for endpoint in endpoints {
+        if !deduped.iter().any(|existing: &EmbeddingPoolEndpoint| {
+            existing.base_url.trim_end_matches('/') == endpoint.base_url.trim_end_matches('/')
+                && existing.request_model == endpoint.request_model
+                && existing.api_key_env == endpoint.api_key_env
+        }) {
+            deduped.push(endpoint);
+        }
+    }
+    deduped
 }
 
 fn embed_and_insert_chunks_with_pool(
@@ -2320,6 +2371,7 @@ fn embed_and_insert_chunks_with_pool(
             .iter()
             .map(|config| EmbeddingEndpointState {
                 base_url: config.base_url.clone(),
+                request_model: config.request_model.clone(),
                 outstanding: 0,
                 requests: 0,
                 chunks: 0,
@@ -2405,6 +2457,7 @@ fn embed_and_insert_chunks_with_pool(
         .map(|state| {
             json!({
                 "base_url": state.base_url.as_str(),
+                "request_model": state.request_model.as_deref(),
                 "requests": state.requests,
                 "chunks": state.chunks,
                 "failures": state.failures
@@ -2581,6 +2634,7 @@ fn open_index_for_bulk_ingest(index_dir: &Path) -> Result<ManagedPostgres, Error
 #[derive(Debug)]
 struct LoadedEmbeddingConfig {
     config: EmbeddingConfig,
+    pool_endpoints: Vec<EmbeddingPoolEndpoint>,
     config_path: Option<PathBuf>,
     config_loaded: bool,
     config_error: Option<String>,
@@ -2605,6 +2659,7 @@ struct EmbeddingConfigFile {
     provider: Option<EmbeddingProvider>,
     base_url: Option<String>,
     base_urls: Option<Vec<String>>,
+    pool: Option<Vec<EmbeddingPoolEndpointConfigFile>>,
     api_key: Option<String>,
     model: Option<String>,
     dimension: Option<usize>,
@@ -2617,6 +2672,22 @@ struct EmbeddingConfigFile {
     tokenizer_path: Option<PathBuf>,
     provisional: Option<bool>,
     reembeddable: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmbeddingPoolEndpointConfigFile {
+    base_url: String,
+    request_model: Option<String>,
+    api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmbeddingPoolEndpoint {
+    base_url: String,
+    request_model: Option<String>,
+    api_key_env: Option<String>,
+    api_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2651,6 +2722,7 @@ fn embedding_config_from_env() -> EmbeddingConfig {
 
 fn loaded_embedding_config() -> LoadedEmbeddingConfig {
     let mut embedding_config = EmbeddingConfig::phase0_bge_m3("http://127.0.0.1:8097/v1", None);
+    let mut pool_endpoints = Vec::new();
     let mut config_path = None;
     let mut config_loaded = false;
     let mut config_error = None;
@@ -2662,7 +2734,11 @@ fn loaded_embedding_config() -> LoadedEmbeddingConfig {
                 match toml::from_str::<RuntimeConfigFile>(&contents) {
                     Ok(runtime_config) => {
                         if let Some(embedding) = runtime_config.embedding {
-                            apply_embedding_file_config(&mut embedding_config, embedding);
+                            apply_embedding_file_config(
+                                &mut embedding_config,
+                                &mut pool_endpoints,
+                                embedding,
+                            );
                         }
                         config_loaded = true;
                     }
@@ -2685,10 +2761,11 @@ fn loaded_embedding_config() -> LoadedEmbeddingConfig {
         }
     }
 
-    apply_embedding_env_overrides(&mut embedding_config);
+    apply_embedding_env_overrides(&mut embedding_config, &mut pool_endpoints);
 
     LoadedEmbeddingConfig {
         config: embedding_config,
+        pool_endpoints,
         config_path,
         config_loaded,
         config_error,
@@ -2730,7 +2807,11 @@ fn runtime_config_location() -> Option<RuntimeConfigLocation> {
         })
 }
 
-fn apply_embedding_file_config(config: &mut EmbeddingConfig, file_config: EmbeddingConfigFile) {
+fn apply_embedding_file_config(
+    config: &mut EmbeddingConfig,
+    pool_endpoints: &mut Vec<EmbeddingPoolEndpoint>,
+    file_config: EmbeddingConfigFile,
+) {
     if let Some(provider) = file_config.provider {
         config.provider = provider;
         if matches!(provider, EmbeddingProvider::InProcess) {
@@ -2750,6 +2831,12 @@ fn apply_embedding_file_config(config: &mut EmbeddingConfig, file_config: Embedd
         if config.base_url.is_none() {
             config.base_url = config.base_urls.first().cloned();
         }
+    }
+    if let Some(pool) = parse_embedding_pool_file_config(file_config.pool) {
+        // A pool is an HTTP transport choice; it deliberately overrides local
+        // in-process mode in the same config layer.
+        config.provider = EmbeddingProvider::OpenAiCompatible;
+        *pool_endpoints = pool;
     }
     if let Some(api_key) = nonempty_string(file_config.api_key) {
         config.api_key = Some(api_key);
@@ -2790,9 +2877,15 @@ fn apply_embedding_file_config(config: &mut EmbeddingConfig, file_config: Embedd
         config.reembeddable = reembeddable;
     }
     clear_unused_in_process_secret_fields(config);
+    if matches!(config.provider, EmbeddingProvider::InProcess) {
+        pool_endpoints.clear();
+    }
 }
 
-fn apply_embedding_env_overrides(embedding_config: &mut EmbeddingConfig) {
+fn apply_embedding_env_overrides(
+    embedding_config: &mut EmbeddingConfig,
+    pool_endpoints: &mut Vec<EmbeddingPoolEndpoint>,
+) {
     if let Ok(provider) = std::env::var("JURISEARCH_EMBED_PROVIDER")
         && let Some(provider) = parse_embedding_provider(&provider)
     {
@@ -2818,6 +2911,14 @@ fn apply_embedding_env_overrides(embedding_config: &mut EmbeddingConfig) {
         if embedding_config.base_url.is_none() {
             embedding_config.base_url = embedding_config.base_urls.first().cloned();
         }
+    }
+    if let Ok(pool) = std::env::var("JURISEARCH_EMBED_POOL")
+        && let Some(pool) = parse_embedding_pool_env(&pool)
+    {
+        // A pool is an HTTP transport choice; it deliberately overrides local
+        // in-process mode in the same env layer.
+        embedding_config.provider = EmbeddingProvider::OpenAiCompatible;
+        *pool_endpoints = pool;
     }
     if let Ok(api_key) = std::env::var("JURISEARCH_EMBED_API_KEY")
         && let Some(api_key) = nonempty_string(Some(api_key))
@@ -2854,6 +2955,9 @@ fn apply_embedding_env_overrides(embedding_config: &mut EmbeddingConfig) {
         embedding_config.tokenizer_path = parse_optional_path_buf(&tokenizer_path);
     }
     clear_unused_in_process_secret_fields(embedding_config);
+    if matches!(embedding_config.provider, EmbeddingProvider::InProcess) {
+        pool_endpoints.clear();
+    }
 }
 
 fn parse_embedding_provider(value: &str) -> Option<EmbeddingProvider> {
@@ -2897,6 +3001,68 @@ fn parse_embedding_base_urls_env(value: &str) -> Option<Vec<String>> {
     }
 }
 
+fn parse_embedding_pool_file_config(
+    endpoints: Option<Vec<EmbeddingPoolEndpointConfigFile>>,
+) -> Option<Vec<EmbeddingPoolEndpoint>> {
+    let endpoints = endpoints?
+        .into_iter()
+        .filter_map(|endpoint| {
+            let base_url = nonempty_string(Some(endpoint.base_url))?;
+            let request_model = nonempty_string(endpoint.request_model);
+            let api_key_env = nonempty_string(endpoint.api_key_env);
+            Some(embedding_pool_endpoint(
+                base_url,
+                request_model,
+                api_key_env,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if endpoints.is_empty() {
+        None
+    } else {
+        Some(endpoints)
+    }
+}
+
+fn parse_embedding_pool_env(value: &str) -> Option<Vec<EmbeddingPoolEndpoint>> {
+    let endpoints = value
+        .split([';', '\n'])
+        .filter_map(|endpoint| {
+            let mut parts = endpoint.split('|');
+            let base_url = nonempty_string(parts.next().map(str::to_owned))?;
+            let request_model = nonempty_string(parts.next().map(str::to_owned));
+            let api_key_env = nonempty_string(parts.next().map(str::to_owned));
+            Some(embedding_pool_endpoint(
+                base_url,
+                request_model,
+                api_key_env,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if endpoints.is_empty() {
+        None
+    } else {
+        Some(endpoints)
+    }
+}
+
+fn embedding_pool_endpoint(
+    base_url: String,
+    request_model: Option<String>,
+    api_key_env: Option<String>,
+) -> EmbeddingPoolEndpoint {
+    let api_key = api_key_env
+        .as_deref()
+        .and_then(|env_name| std::env::var(env_name).ok())
+        .and_then(|api_key| nonempty_string(Some(api_key)));
+    EmbeddingPoolEndpoint {
+        base_url,
+        request_model,
+        api_key_env,
+        api_key,
+    }
+}
+
 fn deserialize_embedding_provider_option<'de, D>(
     deserializer: D,
 ) -> Result<Option<EmbeddingProvider>, D::Error>
@@ -2922,6 +3088,7 @@ fn clear_unused_in_process_secret_fields(config: &mut EmbeddingConfig) {
         config.base_url = None;
         config.base_urls.clear();
         config.api_key = None;
+        config.request_model = None;
     }
 }
 
@@ -2973,6 +3140,20 @@ fn model_cache_status_json(status: &ModelCacheStatus) -> Value {
         "required_files": status.required_files,
         "missing_files": status.missing_files,
     })
+}
+
+fn embedding_pool_endpoints_status_json(endpoints: &[EmbeddingPoolEndpoint]) -> Vec<Value> {
+    endpoints
+        .iter()
+        .map(|endpoint| {
+            json!({
+                "base_url": endpoint.base_url,
+                "request_model": endpoint.request_model,
+                "api_key_env": endpoint.api_key_env,
+                "api_key_configured": endpoint.api_key.is_some()
+            })
+        })
+        .collect()
 }
 
 fn model_cache_dir() -> PathBuf {
@@ -3290,6 +3471,8 @@ fn setup_payload() -> Value {
             "provider": embedding_config.provider,
             "model": embedding_config.model,
             "dimension": embedding_config.dimension,
+            "pool": embedding_pool_endpoints_status_json(&loaded_embedding.pool_endpoints),
+            "pool_overrides_base_urls": !loaded_embedding.pool_endpoints.is_empty(),
             "config_path": loaded_embedding.config_path.as_ref().map(|path| path.display().to_string()),
             "config_loaded": loaded_embedding.config_loaded,
             "config_error": loaded_embedding.config_error,
@@ -3329,6 +3512,8 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
             "base_urls": embedding_config.base_urls.clone(),
             "base_url_class": embedding_fingerprint.base_url_class,
             "model": embedding_fingerprint.model,
+            "request_model": embedding_config.request_model.clone(),
+            "pool_overrides_base_urls": !loaded_embedding.pool_endpoints.is_empty(),
             "dimension": embedding_fingerprint.dimension,
             "normalize": embedding_fingerprint.normalize,
             "pooling": embedding_fingerprint.pooling,
@@ -3337,6 +3522,7 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
             "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
             "token_count_method": embedding_config.configured_token_count_method(),
             "tokenizer_path": embedding_config.tokenizer_path.as_ref().map(|path| path.display().to_string()),
+            "pool": embedding_pool_endpoints_status_json(&loaded_embedding.pool_endpoints),
             "provisional": embedding_manifest.provisional,
             "reembeddable": embedding_manifest.reembeddable,
             "config_path": loaded_embedding.config_path.as_ref().map(|path| path.display().to_string()),
