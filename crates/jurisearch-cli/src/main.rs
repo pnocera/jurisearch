@@ -3688,6 +3688,8 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
     let query_ready = index["query_ready"].as_bool().unwrap_or(false);
     let locked_embedding_model = phase1_embedding_model_locked(ingest_health);
     let reranker_decision = phase1_reranker_decision_payload();
+    let external_benchmark = phase1_external_benchmark_payload();
+    let external_benchmark_status = phase1_external_benchmark_check_status(&external_benchmark);
     let replay_snapshot_status = ingest_health["replay_snapshot_status"]
         .as_str()
         .unwrap_or("unknown");
@@ -3748,13 +3750,9 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
             replay_snapshot_message,
         ),
         phase1_gate_check(
-            "release_gating_eval_fixtures",
-            if eval_summary.release_gating > 0 {
-                "pass"
-            } else {
-                "pending"
-            },
-            "release-gating fixtures require official-source verification and named human review",
+            "external_expert_annotated_eval",
+            external_benchmark_status,
+            "Phase 1 requires a passing external expert-annotated French legal retrieval benchmark; internal LEGI fixtures remain smoke/candidate evidence",
         ),
         phase1_gate_check(
             "final_embedding_model",
@@ -3785,8 +3783,87 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
         "scope": "phase1_legi_statutory_search",
         "checks": checks,
         "eval_fixtures": eval_summary,
+        "external_benchmark": external_benchmark,
         "reranker_decision": reranker_decision,
     })
+}
+
+fn phase1_external_benchmark_payload() -> Value {
+    json!({
+        "state": "pending",
+        "decision_date": "2026-06-22",
+        "primary_candidate": "maastrichtlawtech/bsard",
+        "claim_scope": "external expert-annotated French-language statutory retrieval benchmark, not France-LEGI human-reviewed gold",
+        "jurisdiction": "belgium",
+        "usage_scope": "eval_only",
+        "required_evidence": [
+            "dataset access and license recorded",
+            "dataset corpus/questions/qrels imported or adapted without training leakage; the runner may be an external Python harness",
+            "bm25, dense, and hybrid retrieval metrics recorded with top-k, recall, and nDCG",
+            "metrics artifact path recorded for status to consume before this gate can pass",
+            "Phase 1 adoption threshold documented before claim_allowed can become true"
+        ],
+        "evidence": [],
+        "candidate_datasets": [
+            {
+                "id": "maastrichtlawtech/bsard",
+                "role": "primary",
+                "task": "French statutory article retrieval",
+                "labels": "experienced jurists",
+                "license": "cc-by-nc-sa-4.0",
+                "limitation": "Belgian law, not French LEGI; still French-native statutory retrieval with expert qrels"
+            },
+            {
+                "id": "maastrichtlawtech/lleqa",
+                "role": "secondary",
+                "task": "French legal QA and retrieval",
+                "labels": "seasoned legal professionals",
+                "license": "cc-by-nc-sa-4.0 gated research access",
+                "limitation": "Belgian law and gated access; useful if access is granted"
+            },
+            {
+                "id": "mteb-private/FrenchLegal1Retrieval-sample",
+                "role": "supplemental",
+                "task": "French legal retrieval",
+                "labels": "sample is public; full task access unclear",
+                "license": "private/sample",
+                "limitation": "sample-only public dataset cannot be the sole release gate"
+            },
+            {
+                "id": "louisbrulenaudet/tax-retrieval-benchmark",
+                "role": "supplemental",
+                "task": "French tax retrieval",
+                "labels": "domain-specific benchmark labels",
+                "license": "gated",
+                "limitation": "tax-only scope and gated access"
+            }
+        ],
+        "non_gating_inputs": [
+            {
+                "id": "internal_legi_release_candidates",
+                "reason": "source-checked against DILA LEGI but not independently expert-annotated; remains smoke/regression coverage"
+            },
+            {
+                "id": "AgentPublic/legi",
+                "reason": "useful LEGI corpus context but no expert retrieval qrels"
+            }
+        ],
+        "reason": "local human legal-domain review is unavailable, so Phase 1 promotion must rely on a passing external expert-annotated legal retrieval benchmark plus internal LEGI smoke evidence"
+    })
+}
+
+fn phase1_external_benchmark_check_status(external_benchmark: &Value) -> &'static str {
+    match external_benchmark["state"].as_str() {
+        Some("passed")
+            if external_benchmark["evidence"]
+                .as_array()
+                .is_some_and(|evidence| !evidence.is_empty()) =>
+        {
+            "pass"
+        }
+        Some("passed" | "failed") => "fail",
+        _ => "pending",
+    }
 }
 
 fn phase1_reranker_decision_payload() -> Value {
@@ -3804,7 +3881,7 @@ fn phase1_reranker_decision_payload() -> Value {
             "work/03-implementation/02-evidence/2026-06-22-reranker-deferral-decision.md"
         ],
         "reason": "current Phase 1 release-candidate fixtures cannot measure a material rerank gain, no reranker provider is packaged, and cross-encoder latency/packaging remain unmeasured",
-        "future_adoption_gate": "hybrid+rerank must show material legal-retrieval quality gain on release-gating fixtures, with measured latency and graceful fallback to hybrid order"
+        "future_adoption_gate": "hybrid+rerank must show material legal-retrieval quality gain on the external expert benchmark or future project-owned release-gating fixtures, with measured latency and graceful fallback to hybrid order"
     })
 }
 
@@ -4818,8 +4895,19 @@ mod tests {
         assert_eq!(check_status(&payload, "replay_snapshot"), "pass");
         assert_eq!(check_status(&payload, "final_embedding_model"), "pass");
         assert_eq!(
-            check_status(&payload, "release_gating_eval_fixtures"),
+            check_status(&payload, "external_expert_annotated_eval"),
             "pending"
+        );
+        assert_eq!(payload["external_benchmark"]["state"], "pending");
+        assert_eq!(
+            payload["external_benchmark"]["primary_candidate"],
+            "maastrichtlawtech/bsard"
+        );
+        assert!(
+            payload["external_benchmark"]["evidence"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
         assert_eq!(check_status(&payload, "reranker_decision"), "pass");
         assert_eq!(payload["reranker_decision"]["state"], "deferred");
@@ -4889,6 +4977,38 @@ mod tests {
         assert_eq!(
             check_status(&missing_manifest_payload, "final_embedding_model"),
             "fail"
+        );
+    }
+
+    #[test]
+    fn external_benchmark_check_status_requires_evidence_for_pass() {
+        assert_eq!(
+            phase1_external_benchmark_check_status(&json!({
+                "state": "pending",
+                "evidence": []
+            })),
+            "pending"
+        );
+        assert_eq!(
+            phase1_external_benchmark_check_status(&json!({
+                "state": "failed",
+                "evidence": ["work/03-implementation/02-evidence/failed.json"]
+            })),
+            "fail"
+        );
+        assert_eq!(
+            phase1_external_benchmark_check_status(&json!({
+                "state": "passed",
+                "evidence": []
+            })),
+            "fail"
+        );
+        assert_eq!(
+            phase1_external_benchmark_check_status(&json!({
+                "state": "passed",
+                "evidence": ["work/03-implementation/02-evidence/external-benchmark.json"]
+            })),
+            "pass"
         );
     }
 }

@@ -169,11 +169,12 @@ Needed for `cite --online` (1.4), Judilibre ingestion (2.1), and `sync` (2.5). B
 
 ---
 
-## 9. Human / domain prerequisites  ⚠ long-lead (LLM-assisted, not LLM-replaced)
+## 9. Domain-review prerequisites
 
-Code is the fast part; legal credibility is the slow part. A frontier LLM (codex / GPT-5.5-xhigh, Claude, etc.) is a **force-multiplier** for the reviewer — **not a substitute** on release-gating labels.
+Code is the fast part; legal credibility is the slow part. A frontier LLM (codex / GPT-5.5-xhigh, Claude, etc.) is a **force-multiplier** for project-owned labels, not a substitute for legally credible ground truth.
 
-- **Legal-domain reviewer(s)** with named ownership for gold labels: expected article IDs / ECLIs, review status, rationale, held-out split (W2, 0.2; gate at 1.7/2.6). With the workflow below the human acts as **verifier/approver** rather than from-scratch author, but cannot be removed from gating labels without invalidating every "best-in-class" claim those gates defend.
+- **Phase 1 external benchmark gate:** because no local legal-domain reviewers are available, the LEGI/statutory Phase 1 claim uses an external expert-annotated French legal retrieval benchmark gate instead of promoting internal LEGI fixtures. BSARD is the primary candidate; LLeQA is a gated secondary candidate. The runner may live outside `jurisearch` and be written in Python, as long as it records durable metrics evidence for the status gate, including dataset revision, jurisdiction, eval-only usage scope, license implications, and the Belgian-law to French-LEGI applicability argument.
+- **Legal-domain reviewer(s), if/when available:** project-owned LEGI/Judilibre gold labels still require named ownership for expected article IDs / ECLIs, review status, rationale, and held-out split before they can become project-authored release-gating labels.
 - **Vocabulary seed lexicon sourcing/review** for `expand` (1.3) — legal-term synonyms need sourced, reviewed provenance, not invented lists.
 - **Minimum eval category coverage owner**: known-article lookup, conceptual statutory, historical `--as-of`, citation states, jurisprudence-by-facts, statute→jurisprudence.
 
@@ -188,9 +189,10 @@ Code is the fast part; legal credibility is the slow part. A frontier LLM (codex
 
 **Two tiers:**
 - **Dev / regression fixtures (non-gating):** LLM-drafted + official-source-checked — fine to author now; **unblocks 0.2 without waiting on a reviewer**.
-- **Release-gating gold set (1.7 / 2.6):** smaller, LLM-assisted but **human-verified**, with named-reviewer metadata. Scale the cheap tier wide; keep the gating tier authoritative.
+- **External expert benchmark gate (Phase 1):** BSARD/LLeQA-style expert-annotated retrieval evidence can gate the release claim when local reviewers are unavailable.
+- **Project-owned release-gating gold set (later / Phase 2):** smaller, LLM-assisted but **human-verified**, with named-reviewer metadata. Scale the cheap tier wide; keep the project-owned gating tier authoritative.
 
-Identify the reviewer **before** Phase 0 closes; the gating gold set is the largest expertise-bound effort. The LLM-assist shifts the human from author to verifier — materially reducing, not removing, that long-lead dependency.
+Identify a reviewer before project-owned gold labels become release-gating. Until then, do not promote internal labels by assertion; use the external benchmark gate for Phase 1.
 
 ---
 
@@ -246,7 +248,7 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 - A `bge-m3` embeddings endpoint (§3).
 - A representative LEGI XML subset + current DTDs (§5).
 - ~~PISTE creds / Judilibre subscription~~ **done** — prod Judilibre confirmed (KeyId auth); creds in `~/.zshrc`. Remaining: sandbox Judilibre subscription (currently 403) + confirm Légifrance auth method (§6).
-- **Identify** the legal-domain reviewer (§9) — long lead.
+- **Record** the external expert benchmark gate decision (§9) — done for Phase 1; reviewer identification remains useful before project-owned release-gating labels.
 
 **Deferrable to when its task starts:**
 - Full LEGI baseline + delta archives and their storage (1.1).
@@ -263,7 +265,7 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 2. **Phase 0 embeddings endpoint** — local `llama.cpp` vs hosted API for the spike. *(Drives 0.4/0.6.)*
 3. **Platform policy** — resolved for Phase 0: Linux x86_64 only; macOS/Windows need a separate packaging proof.
 4. **Offline-install scope** — resolved for Phase 0: online acquisition is acceptable for development; offline installs must pre-stage the runtime/extensions/models/corpora listed in [`storage-backend-policy.md`](./storage-backend-policy.md).
-5. **Legal reviewer engagement** — who, and on what cadence, for gold labels and vocabulary seeds. *(W2 gates.)*
+5. **Legal reviewer engagement / external benchmark gate** — Phase 1 uses external expert-annotated benchmark evidence; reviewer cadence remains needed before project-owned labels become release-gating.
 6. **DILA bulk jurisprudence (2.2a)** — accept or leave parked. *(Phase 2 scope; already deferable.)*
 
 ---
@@ -280,11 +282,12 @@ Identify the reviewer **before** Phase 0 closes; the gating gold set is the larg
 - [ ] Register on PISTE; request **sandbox** OAuth2 credentials + Judilibre subscription; queue the production request.
 - [ ] Wire secrets via env/OS keyring (`PISTE_*`, optional `JURISEARCH_EMBED_API_KEY`); never commit.
 - [ ] Confirm read access to `/home/pierre/Apps/juridocs` and bookmark the reusable modules.
-- [ ] Identify and brief the legal-domain reviewer for gold labels.
+- [x] Record the external expert benchmark gate for Phase 1.
+- [ ] Identify and brief the legal-domain reviewer before promoting project-owned gold labels.
 - [ ] Record platform policy, offline-install scope, and the AGPL release-checklist owner.
 
 ---
 
 ## 17. Bottom line
 
-The project is not gated by ordinary tooling. With the two in-house repos in hand, the former #1 risk — the `pg_search`-on-embedded-Postgres backend — drops to a **scoped ABI/drop-in spike**: `gciauto2` supplies the embedded-PG lifecycle harness and `paradedb` supplies a buildable `pg_search` that supports the selected PG18 target. The remaining real lead-time items are now **external/human**: PISTE credentials and a legal-domain reviewer — start both on day one — plus **one running service** (a `bge-m3` embeddings endpoint). Budget a focused 0.3 spike to ABI-match the fork's extension build to the selected runtime and prove `CREATE EXTENSION pg_search` in an embedded data dir, but it is no longer an open-ended unknown. (Earlier framing said `juridocs` doesn't de-risk the backend — still true; the de-risking comes from `gciauto2` + `paradedb`, which the first draft hadn't seen.)
+The project is not gated by ordinary tooling. With the two in-house repos in hand, the former #1 risk — the `pg_search`-on-embedded-Postgres backend — drops to a **scoped ABI/drop-in spike**: `gciauto2` supplies the embedded-PG lifecycle harness and `paradedb` supplies a buildable `pg_search` that supports the selected PG18 target. The remaining real lead-time items are now external evidence and services: benchmark dataset access/metrics evidence for the Phase 1 quality gate, PISTE follow-ups, and running `bge-m3` embeddings endpoints. A legal-domain reviewer is still needed before project-owned labels become release-gating, but is no longer the Phase 1 blocker. Budget a focused 0.3 spike to ABI-match the fork's extension build to the selected runtime and prove `CREATE EXTENSION pg_search` in an embedded data dir, but it is no longer an open-ended unknown. (Earlier framing said `juridocs` doesn't de-risk the backend — still true; the de-risking comes from `gciauto2` + `paradedb`, which the first draft hadn't seen.)

@@ -410,6 +410,7 @@ pub fn compiled_schema() -> Value {
                         "items": { "$ref": "#/schemas/Phase1GateCheck" }
                     },
                     "eval_fixtures": { "$ref": "#/schemas/EvalFixtureSummary" },
+                    "external_benchmark": { "$ref": "#/schemas/ExternalBenchmarkGate" },
                     "reranker_decision": { "$ref": "#/schemas/RerankerDecision" }
                 }
             },
@@ -418,6 +419,21 @@ pub fn compiled_schema() -> Value {
                     "name": { "type": "string" },
                     "status": { "enum": ["pass", "pending", "fail"] },
                     "message": { "type": "string" }
+                }
+            },
+            "ExternalBenchmarkGate": {
+                "properties": {
+                    "state": { "enum": ["pending", "passed", "failed"] },
+                    "decision_date": { "type": "string", "format": "date" },
+                    "primary_candidate": { "type": "string" },
+                    "claim_scope": { "type": "string" },
+                    "jurisdiction": { "type": "string" },
+                    "usage_scope": { "type": "string" },
+                    "required_evidence": { "type": "array", "items": { "type": "string" } },
+                    "evidence": { "type": "array", "items": { "type": "string" } },
+                    "candidate_datasets": { "type": "array", "items": { "type": "object" } },
+                    "non_gating_inputs": { "type": "array", "items": { "type": "object" } },
+                    "reason": { "type": "string" }
                 }
             },
             "RerankerDecision": {

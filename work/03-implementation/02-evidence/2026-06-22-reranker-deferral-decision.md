@@ -17,7 +17,7 @@ Evidence:
 Rationale:
 
 - The current release-candidate fixture set cannot measure a material rerank gain: BM25 and hybrid both pass 4/4 at top 20, while dense alone passes 2/4.
-- The current release-candidate fixtures are still candidates, not release-gating fixtures, because named legal-domain review is pending.
+- The current release-candidate fixtures are still candidates, not release-gating fixtures, because no local legal-domain review is available.
 - No reranker provider is packaged in `jurisearch` yet.
 - The feasibility spike identifies `bge-reranker-v2-m3` as the first candidate and TEI/HTTP as the first practical provider, but it also records unresolved latency, tokenizer/pair-contract, runtime packaging, and model-cache checks.
 - A cross-encoder reranker would add operational complexity and likely non-trivial latency; adopting it without measured legal-quality gain would weaken the Phase 1 claim rather than strengthen it.
@@ -25,11 +25,11 @@ Rationale:
 Gate implication:
 
 - The `reranker_decision` Phase 1 gate check may pass because the non-adoption decision is recorded.
-- This does not open the Phase 1 claim by itself. Release-gating fixture promotion still requires named human legal-domain review.
+- This does not open the Phase 1 claim by itself. The external expert-annotated benchmark gate must still pass.
 
 Future adoption criteria:
 
-- Hybrid+rerank must show a material legal-retrieval quality gain on release-gating fixtures.
+- Hybrid+rerank must show a material legal-retrieval quality gain on the external expert-annotated benchmark gate, or on future project-owned release-gating fixtures if legal-domain review becomes available.
 - Reranker latency and failure behavior must be measured for bounded candidate sets.
 - Reranker failures must degrade to the existing hybrid order.
 - Provider/model/config must be visible in status and reproducibility manifests before adoption.

@@ -176,6 +176,18 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "#/schemas/RerankerDecision"
     );
     assert_eq!(
+        json["schemas"]["Phase1GateResponse"]["properties"]["external_benchmark"]["$ref"],
+        "#/schemas/ExternalBenchmarkGate"
+    );
+    assert_eq!(
+        json["schemas"]["ExternalBenchmarkGate"]["properties"]["state"]["enum"][0],
+        "pending"
+    );
+    assert_eq!(
+        json["schemas"]["ExternalBenchmarkGate"]["properties"]["claim_scope"]["type"],
+        "string"
+    );
+    assert_eq!(
         json["schemas"]["RerankerDecision"]["properties"]["provider"]["enum"][0],
         "disabled"
     );
@@ -338,8 +350,24 @@ fn status_returns_json_without_index() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|check| check["name"] == "release_gating_eval_fixtures"
+            .any(|check| check["name"] == "external_expert_annotated_eval"
                 && check["status"] == "pending")
+    );
+    assert_eq!(
+        json["phase1_gate"]["external_benchmark"]["state"],
+        "pending"
+    );
+    assert_eq!(
+        json["phase1_gate"]["external_benchmark"]["primary_candidate"],
+        "maastrichtlawtech/bsard"
+    );
+    assert_eq!(
+        json["phase1_gate"]["external_benchmark"]["jurisdiction"],
+        "belgium"
+    );
+    assert_eq!(
+        json["phase1_gate"]["external_benchmark"]["usage_scope"],
+        "eval_only"
     );
 }
 

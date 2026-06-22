@@ -92,11 +92,11 @@ Relevant checks after the D21 gate fix:
 - `embedding_coverage`: pass
 - `replay_snapshot`: pass
 - `final_embedding_model`: pass from the stored `ingest_health.embedding_manifest`, not from transient runtime embedding config
-- `release_gating_eval_fixtures`: pending
+- `external_expert_annotated_eval`: pending
 - `reranker_decision`: pending
 
 Remaining blockers:
 
-- Release-gating fixtures still need named human legal-domain review before the Phase 1 claim can open.
+- The external expert-annotated benchmark gate still needs a durable metrics artifact before the Phase 1 claim can open.
 - Reranker adoption or deferral still needs a benchmark decision artifact.
 - The replay snapshot computation is correct but operationally slow on the full corpus because `status` recomputes ordered hashes over documents, chunks, embeddings, manifests, and about 12.9M publisher edges.

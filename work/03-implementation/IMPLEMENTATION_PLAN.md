@@ -54,7 +54,7 @@ Owns the quality-gate harness, reporting, and legally credible retrieval evals. 
 Deliverables:
 
 - Golden legal retrieval tasks.
-- Gold-label workflow with named legal-domain reviewers, review status, and held-out split.
+- Gold-label workflow with provenance, review status, and held-out split. Project-owned LEGI/Judilibre labels require named legal-domain reviewers before becoming project-authored release-gating labels; when reviewers are unavailable, Phase 1 promotion uses external expert-annotated legal retrieval benchmarks instead.
 - Minimum coverage categories: known-article lookup, conceptual statutory retrieval, historical `--as-of`, citation states, jurisprudence-by-facts, and statute→jurisprudence workflows.
 - CLI-contract tests.
 - Citation-state tests.
@@ -236,8 +236,11 @@ Acceptance:
 Tasks:
 
 - Define eval fixture format for queries, expected IDs/citations, allowed alternates, and temporal expectations.
-- Define gold-label ownership and provenance: each legal retrieval fixture records `drafted_by` (may be an LLM), `verified_against` (official Légifrance/Judilibre API), a named legal-domain `reviewer` + review status + rationale, and a `tier` (`dev` | `release_gating`).
-- Implement the gold-label workflow: **LLM-draft → verify against the official source (not model memory) → named-human sign-off**; only human-signed, source-verified labels are `release_gating`. Add an LLM adversarial/coverage pass that flags human↔model and label↔retrieval disagreements for re-review.
+- Define gold-label ownership and provenance: each legal retrieval fixture records `drafted_by` (may be an LLM), `verified_against` (official Légifrance/Judilibre API or external benchmark source), reviewer/source status + rationale, and a `tier` (`dev` | `release_gating`).
+- Implement the label workflow:
+  - Project-owned LEGI/Judilibre fixtures: **LLM-draft → verify against the official source (not model memory) → named-human sign-off** before they can become project-authored `release_gating` labels.
+  - Phase 1 without available reviewers: gate the claim on an external expert-annotated French legal retrieval benchmark, while keeping internal LEGI fixtures as source-checked smoke/regression candidates.
+  Add an LLM adversarial/coverage pass that flags model and label/retrieval disagreements for re-review or for new external-benchmark coverage.
 - Seed minimum fixture coverage: known-article lookup, conceptual statutory retrieval, historical `--as-of`, citation states, and one end-to-end `search → fetch → cite` loop.
 - Add CLI-contract tests for stdout/stderr discipline, exit codes, help completeness, and JSON schema validity.
 - Add citation-state fixture format for `exact`, `normalized`, `ambiguous`, `stale_version`, `not_found`, `source_unavailable`.
@@ -248,7 +251,7 @@ Tasks:
 Acceptance:
 
 - Eval harness can run without a full corpus using fixtures.
-- Gold labels carry provenance (`drafted_by`, `verified_against` the official API, named `reviewer`) and a `tier`; a label is `release_gating` only after **official-source verification AND human sign-off**. LLM-only labels are never release-gating; LLM-drafted + source-checked labels are allowed in the `dev` tier.
+- Gold labels carry provenance (`drafted_by`, `verified_against`, reviewer/source status) and a `tier`; project-owned labels are `release_gating` only after **official-source verification AND human sign-off**. LLM-only labels are never release-gating. If no reviewer is available, Phase 1 uses an external expert-annotated benchmark gate rather than promoting internal labels by assertion.
 - CI/local test command reports retrieval, citation, temporal, and CLI-contract categories separately.
 - Ingest-health reports can emit pending/empty categories before the full corpus exists, without treating unavailable W3/W4/W7 metrics as passed.
 - Failure output points to the broken contract or fixture.
@@ -718,18 +721,19 @@ Acceptance:
 
 Current status (2026-06-22):
 
-- Done: `jurisearch status` now includes a fail-closed `phase1_gate` object for the LEGI/statutory Phase 1 claim. It reports `claim_allowed=false` until index query readiness, latest completed ingest run, zero failed members, projection/embedding coverage, replay snapshot availability, release-gating eval fixtures, final embedding-model selection, and reranker adoption/deferral are all satisfied.
+- Done: `jurisearch status` now includes a fail-closed `phase1_gate` object for the LEGI/statutory Phase 1 claim. It reports `claim_allowed=false` until index query readiness, latest completed ingest run, zero failed members, projection/embedding coverage, replay snapshot availability, an external expert-annotated legal retrieval benchmark, final embedding-model selection, and reranker adoption/deferral are all satisfied.
 - Done: the built-in Phase 1 eval fixture summary is machine-readable in `phase1_gate.eval_fixtures`; the current built-in hierarchy fixtures are source-verified development fixtures, not release-gating fixtures, so the gate correctly remains pending.
 - Done: the first Phase 1 LEGI release-candidate fixture set is source-checked against the real DILA Freemium LEGI archive at `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz`. The candidates cover known-article lookup, conceptual statutory retrieval, temporal retrieval, and citation-rich statutory retrieval, carry structured `as_of` dates for future fixture execution, and `phase1_gate.eval_fixtures.release_candidates` reports them separately from `release_gating`.
 - Done: `jurisearch eval phase1` can list the built-in release candidates without an index and can execute selected fixtures through the existing search path, reporting per-fixture expected-ID ranks, pass/fail status, retrieval mode, and candidate diagnostics. Session JSONL supports `eval phase1` with the same payload contract. Current execution checks expected-ID rank; hierarchy assertions from dev fixtures remain a follow-up harness extension.
 - Done: the full LEGI dense projection completed against OpenRouter `baai/bge-m3` on 2026-06-22 with full coverage (`1,852,745` chunks and embeddings), rebuilt `chunk_embeddings_embedding_ivfflat_idx`, reported zero endpoint failures, and saved completion evidence in `work/03-implementation/02-evidence/2026-06-22-openrouter-dense-projection-run.log`.
 - Done: the completed index was backed up to `/mnt/models/jurisearch-backup/phase1-freemium-20250713-20260622T135908+0200` with a `phase1-freemium-20250713-latest` symlink.
 - Done: the D21 final embedding-model gate now passes from the stored dense embedding manifest when it matches the locked v1 fingerprint (`bge-m3:1024:normalize:true`, model `bge-m3`, 1024 dimensions, normalized embeddings) even while the manifest remains `provisional=true` / `reembeddable=true` for future migration capability.
-- Done: executable Phase 1 eval fixtures were run against the completed LEGI index at top 20. Release-gating fixture evidence: BM25 passed 4/4, dense passed 2/4, and hybrid passed 4/4. Hybrid plus dev fixtures passed 5/6; the failing dev-only case is `legi-hierarchy-temporal-sibling-2000`. Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-phase1-eval-benchmark-summary.md`.
-- Remaining: promote release-gating fixtures only after named human legal-domain review.
+- Done: executable Phase 1 eval fixtures were run against the completed LEGI index at top 20. Release-candidate fixture evidence: BM25 passed 4/4, dense passed 2/4, and hybrid passed 4/4. Hybrid plus dev fixtures passed 5/6; the failing dev-only case is `legi-hierarchy-temporal-sibling-2000`. Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-phase1-eval-benchmark-summary.md`.
+- Done: because no local legal-domain reviewers are available, the Phase 1 gate no longer waits on named-human promotion of internal LEGI fixtures. It now exposes `phase1_gate.external_benchmark` and requires `external_expert_annotated_eval` to pass before the claim can open. The primary candidate is BSARD (`maastrichtlawtech/bsard`), with LLeQA as a gated secondary candidate and the internal LEGI fixtures retained as smoke/regression evidence. The claim scope is explicitly limited to an external expert-annotated French-language statutory retrieval benchmark, not France-LEGI human-reviewed gold. Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-external-expert-benchmark-gate.md`.
+- Remaining: implement/import the external benchmark harness and run BM25, dense, and hybrid metrics against the selected expert-annotated dataset before setting `external_expert_annotated_eval` to pass. The harness may live outside the Rust CLI and be written in Python; the status gate only needs a durable, schema-checked metrics artifact to consume. The artifact must record dataset revision, jurisdiction, eval-only usage scope, license implications, thresholds, and the Belgian-law to French-LEGI applicability argument.
 - Done: `jurisearch status` is cheap by default for replay evidence. Default status now reads cached replay signatures from `index_manifest['replay_snapshot']`, while `status --deep` explicitly recomputes and refreshes full replay signatures on demand. Successful LEGI archive ingestion, hierarchy backfill, and dense embedding finalization refresh the cache at command boundaries. Full-index evidence on `/home/pierre/Work/jurisearch/index/phase1-freemium-20250713` showed uncached default status in 3.00s with `replay_snapshot_source=missing`, explicit deep refresh in 589.34s over 1,736,165 documents, 1,852,745 chunks, 12,949,444 publisher edges, and 1,852,745 embeddings, then cached default status in 2.87s with the same signature (`430af44453662d6107a46e7baedde246`). Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-status-cache-optimization-summary.md`.
 - Done: the Phase 1 reranker decision is explicitly deferred/disabled by default and wired into `status.phase1_gate.reranker_decision`. The decision is backed by the feasibility spike plus real-index eval evidence: the current candidate fixture set cannot measure a material rerank gain, no reranker provider is packaged, and cross-encoder latency/packaging remain unmeasured. Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-reranker-deferral-decision.md`.
-- Done: the current Phase 1 release-candidate fixture set was assessed and is not strong enough to prove hybrid over BM25 because BM25 and hybrid both pass 4/4 at top 20. It remains useful source-checked smoke coverage but needs named human review plus more discriminating legal-ranking cases before promotion. Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-phase1-fixture-strength-decision.md`.
+- Done: the current Phase 1 release-candidate fixture set was assessed and is not strong enough to prove hybrid over BM25 because BM25 and hybrid both pass 4/4 at top 20. It remains useful source-checked smoke coverage but is not the Phase 1 release gate while reviewers are unavailable. Evidence is recorded in `work/03-implementation/02-evidence/2026-06-22-phase1-fixture-strength-decision.md`.
 
 ---
 
@@ -978,7 +982,7 @@ Acceptance:
 | Full LEGI baseline volume/throughput exceeds the subset parser path | High | Streaming member reads, configurable member caps, and deterministic archive ordering from Phase 0. |
 | Resume/recovery after parser/schema changes preserves stale bad rows | High | Record parser/schema/code/source-payload compatibility metadata and require targeted reprocess on mismatch. |
 | Official API coverage-date drift or rate limits block verification/sync | High | Bulk dumps for full builds; APIs only for deltas/verification; backoff, sandbox/prod config, and freshness reporting. |
-| Eval set too small or generic | High | Build production-grade legal evals from Phase 0; legal-domain review, minimum category coverage, held-out split. |
+| Eval set too small or generic | High | Use external expert-annotated French legal retrieval benchmarks for Phase 1 gating, keep source-checked LEGI fixtures as internal smoke/regression coverage, and require minimum category coverage plus a held-out split before any project-owned labels become release-gating. |
 | Reranker local packaging lags | Medium | Keep HTTP rerank provider; quality gate decides adoption. |
 | Embedding/projection failure masks successful canonical ingestion | Medium | Separate canonical-ingestion states from embedding/index-projection states; retry/backfill derived work. |
 | Phase 1 ingestion omits publisher links and forces Phase 2 LEGI re-ingestion | Medium | Capture publisher links as canonical `GraphEdge` records during 1.1. |
