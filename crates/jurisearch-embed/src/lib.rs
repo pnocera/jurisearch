@@ -15,12 +15,13 @@ pub const PHASE0_EMBEDDING_DIMENSION: usize = 1024;
 pub const PHASE0_EMBEDDING_POOLING: &str = "cls";
 // Keep the default character ceiling below the rough bge-m3 token ceiling; a
 // configured tokenizer can apply the endpoint-specific token budget exactly.
-pub const PHASE0_EMBEDDING_MAX_INPUT_CHARS: usize = 24_000;
+pub const PHASE0_EMBEDDING_MAX_INPUT_CHARS: usize = 20_000;
 pub const PHASE0_EMBEDDING_MAX_ESTIMATED_TOKENS: usize = 8_192;
 pub const PHASE0_EMBEDDING_ESTIMATED_CHARS_PER_TOKEN: usize = 4;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const NORMALIZED_L2_TOLERANCE: f32 = 0.01;
+const INVALID_RESPONSE_BODY_LIMIT: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -423,15 +424,30 @@ impl OpenAiCompatibleClient {
             request = request.set("Authorization", &format!("Bearer {api_key}"));
         }
 
-        let response = request
+        let response_body = request
             .send_json(json!({
                 "model": self.config.request_model(),
                 "input": inputs,
             }))
-            .map_err(endpoint_error)?;
-        let response = response
-            .into_json::<OpenAiEmbeddingResponse>()
+            .map_err(endpoint_error)?
+            .into_string()
             .map_err(|error| EmbeddingError::InvalidResponse(error.to_string()))?;
+        if let Ok(error_response) =
+            serde_json::from_str::<OpenAiEmbeddingErrorResponse>(&response_body)
+            && !error_response.error.is_null()
+        {
+            return Err(EmbeddingError::Endpoint(format!(
+                "endpoint error response: {}",
+                truncate_response_body(&response_body)
+            )));
+        }
+        let response =
+            serde_json::from_str::<OpenAiEmbeddingResponse>(&response_body).map_err(|error| {
+                EmbeddingError::InvalidResponse(format!(
+                    "{error}: {}",
+                    truncate_response_body(&response_body)
+                ))
+            })?;
         if response.data.is_empty() {
             return Err(EmbeddingError::EmptyResponse);
         }
@@ -478,6 +494,11 @@ struct OpenAiEmbeddingResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct OpenAiEmbeddingErrorResponse {
+    error: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 struct OpenAiEmbeddingData {
     embedding: Vec<f32>,
 }
@@ -500,7 +521,7 @@ fn endpoint_error(error: ureq::Error) -> EmbeddingError {
     match error {
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
-            let body = body.trim();
+            let body = truncate_response_body(&body);
             if body.is_empty() {
                 EmbeddingError::Endpoint(format!("http status {code}"))
             } else {
@@ -509,6 +530,24 @@ fn endpoint_error(error: ureq::Error) -> EmbeddingError {
         }
         other => EmbeddingError::Endpoint(other.to_string()),
     }
+}
+
+fn truncate_response_body(body: &str) -> String {
+    let body = body.trim();
+    let mut end = body.len();
+    let mut chars = 0usize;
+    for (index, _) in body.char_indices() {
+        if chars == INVALID_RESPONSE_BODY_LIMIT {
+            end = index;
+            break;
+        }
+        chars += 1;
+    }
+    let mut truncated = body[..end].to_owned();
+    if chars == INVALID_RESPONSE_BODY_LIMIT && end < body.len() {
+        truncated.push_str("...");
+    }
+    truncated
 }
 
 #[derive(Debug, Error)]
@@ -872,6 +911,23 @@ mod tests {
             .embed_query("responsabilite civile", &expected)
             .unwrap_err();
         assert!(error.to_string().contains("model not found"));
+    }
+
+    #[test]
+    fn success_status_error_json_is_reported_as_endpoint_error() {
+        let base_url = spawn_embedding_server(
+            r#"{"error":{"message":"maximum context length is 8192 tokens","code":400}}"#,
+        );
+        let config = EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let error = client
+            .embed_query("responsabilite civile", &expected)
+            .unwrap_err();
+
+        assert!(matches!(error, EmbeddingError::Endpoint(_)));
+        assert!(error.to_string().contains("maximum context length"));
     }
 
     #[test]

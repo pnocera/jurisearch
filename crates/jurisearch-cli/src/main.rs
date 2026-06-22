@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::{self, BufRead, Write},
@@ -75,6 +76,7 @@ const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v4";
 const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v3";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
 const MODEL_CACHE_REQUIRED_FILES: &[&str] = &["model.onnx", "tokenizer.json"];
+const EMBEDDING_ENDPOINT_MAX_ATTEMPTS: usize = 3;
 const LOOPBACK_ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const LEGI_INGEST_TRANSACTION_BATCH_SIZE: usize = 128;
 const LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -2157,6 +2159,7 @@ fn embed_chunks_payload(
         "limit": limit,
         "chunks_considered": embedding_run.chunks_considered,
         "embeddings_inserted": embedding_run.embeddings_inserted,
+        "embedding_inputs_truncated": embedding_run.embedding_inputs_truncated,
         "embedding": {
             "model": embedding_config.model,
             "dimension": embedding_config.dimension,
@@ -2205,6 +2208,7 @@ struct EmbeddingEndpointState {
     outstanding: usize,
     requests: usize,
     chunks: usize,
+    truncated_inputs: usize,
     failures: usize,
 }
 
@@ -2222,6 +2226,7 @@ struct OwnedChunkEmbedding {
 #[derive(Debug, Clone)]
 struct EmbeddingBatchSuccess {
     embeddings: Vec<OwnedChunkEmbedding>,
+    truncated_inputs: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2233,6 +2238,7 @@ struct EmbeddingBatchFailure {
 struct EmbeddingPoolRun {
     chunks_considered: usize,
     embeddings_inserted: usize,
+    embedding_inputs_truncated: usize,
     endpoint_stats: Vec<Value>,
 }
 
@@ -2375,6 +2381,7 @@ fn embed_and_insert_chunks_with_pool(
                 outstanding: 0,
                 requests: 0,
                 chunks: 0,
+                truncated_inputs: 0,
                 failures: 0,
             })
             .collect::<Vec<_>>(),
@@ -2403,6 +2410,7 @@ fn embed_and_insert_chunks_with_pool(
     drop(sender);
 
     let mut embeddings_inserted = 0usize;
+    let mut embedding_inputs_truncated = 0usize;
     let mut first_error = None::<ErrorObject>;
     for message in receiver {
         match message {
@@ -2410,6 +2418,7 @@ fn embed_and_insert_chunks_with_pool(
                 if first_error.is_some() {
                     continue;
                 }
+                embedding_inputs_truncated += success.truncated_inputs;
                 let inserts = success
                     .embeddings
                     .iter()
@@ -2460,6 +2469,7 @@ fn embed_and_insert_chunks_with_pool(
                 "request_model": state.request_model.as_deref(),
                 "requests": state.requests,
                 "chunks": state.chunks,
+                "truncated_inputs": state.truncated_inputs,
                 "failures": state.failures
             })
         })
@@ -2468,6 +2478,7 @@ fn embed_and_insert_chunks_with_pool(
     Ok(EmbeddingPoolRun {
         chunks_considered,
         embeddings_inserted,
+        embedding_inputs_truncated,
         endpoint_stats,
     })
 }
@@ -2508,7 +2519,17 @@ fn embedding_pool_worker(
             &endpoint_configs[endpoint_index],
             &work,
         );
-        release_embedding_endpoint(&endpoint_states, endpoint_index, work.inputs.len(), &result);
+        let truncated_inputs = match &result {
+            Ok(success) => success.truncated_inputs,
+            Err(_) => 0,
+        };
+        release_embedding_endpoint(
+            &endpoint_states,
+            endpoint_index,
+            work.inputs.len(),
+            truncated_inputs,
+            &result,
+        );
         if sender.send(result).is_err() {
             return;
         }
@@ -2536,6 +2557,7 @@ fn release_embedding_endpoint(
     endpoint_states: &Arc<Mutex<Vec<EmbeddingEndpointState>>>,
     endpoint_index: usize,
     chunk_count: usize,
+    truncated_inputs: usize,
     result: &Result<EmbeddingBatchSuccess, EmbeddingBatchFailure>,
 ) {
     let mut states = endpoint_states
@@ -2544,7 +2566,10 @@ fn release_embedding_endpoint(
     let state = &mut states[endpoint_index];
     state.outstanding = state.outstanding.saturating_sub(1);
     match result {
-        Ok(_) => state.chunks += chunk_count,
+        Ok(_) => {
+            state.chunks += chunk_count;
+            state.truncated_inputs += truncated_inputs;
+        }
         Err(_) => state.failures += 1,
     }
 }
@@ -2554,26 +2579,41 @@ fn embed_batch_on_endpoint(
     endpoint_config: &EmbeddingEndpointPoolConfig,
     work: &EmbeddingBatchWork,
 ) -> Result<EmbeddingBatchSuccess, EmbeddingBatchFailure> {
+    let mut truncated_inputs = 0usize;
     let input_texts = work
         .inputs
         .iter()
-        .map(|input| input.embedding_text.as_str())
+        .map(|input| {
+            let (text, truncated) =
+                embedding_request_text(input.embedding_text.as_str(), &endpoint_config.config);
+            if truncated {
+                truncated_inputs += 1;
+            }
+            text
+        })
         .collect::<Vec<_>>();
-    let embeddings = client
-        .embed_batch(&input_texts, &endpoint_config.expected_fingerprint)
-        .map_err(|error| {
-            let chunk_id = work
-                .inputs
-                .first()
-                .map(|input| input.chunk_id.as_str())
-                .unwrap_or("<empty-batch>");
-            let mut object = embedding_error_object_with_context(error, chunk_id);
-            object.message = format!(
-                "embedding endpoint `{}` failed: {}",
-                endpoint_config.base_url, object.message
-            );
-            EmbeddingBatchFailure { error: object }
-        })?;
+    let input_text_refs = input_texts
+        .iter()
+        .map(|input| input.as_ref())
+        .collect::<Vec<_>>();
+    let embeddings = embed_batch_with_retries(
+        client,
+        &input_text_refs,
+        &endpoint_config.expected_fingerprint,
+    )
+    .map_err(|error| {
+        let chunk_id = work
+            .inputs
+            .first()
+            .map(|input| input.chunk_id.as_str())
+            .unwrap_or("<empty-batch>");
+        let mut object = embedding_error_object_with_context(error, chunk_id);
+        object.message = format!(
+            "embedding endpoint `{}` failed: {}",
+            endpoint_config.base_url, object.message
+        );
+        EmbeddingBatchFailure { error: object }
+    })?;
     let embeddings = work
         .inputs
         .iter()
@@ -2583,7 +2623,64 @@ fn embed_batch_on_endpoint(
             embedding_literal: pgvector_literal(&embedding.values),
         })
         .collect();
-    Ok(EmbeddingBatchSuccess { embeddings })
+    Ok(EmbeddingBatchSuccess {
+        embeddings,
+        truncated_inputs,
+    })
+}
+
+fn embed_batch_with_retries(
+    client: &OpenAiCompatibleClient,
+    input_texts: &[&str],
+    expected_fingerprint: &EmbeddingFingerprint,
+) -> Result<Vec<jurisearch_embed::EmbeddingVector>, jurisearch_embed::EmbeddingError> {
+    let attempts = EMBEDDING_ENDPOINT_MAX_ATTEMPTS.max(1);
+    let mut attempt = 1usize;
+    loop {
+        match client.embed_batch(input_texts, expected_fingerprint) {
+            Ok(embeddings) => return Ok(embeddings),
+            Err(error) if attempt < attempts && retryable_embedding_error(&error) => {
+                thread::sleep(Duration::from_millis(250 * attempt as u64));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn retryable_embedding_error(error: &jurisearch_embed::EmbeddingError) -> bool {
+    matches!(
+        error,
+        jurisearch_embed::EmbeddingError::Endpoint(_)
+            | jurisearch_embed::EmbeddingError::InvalidResponse(_)
+    )
+}
+
+fn embedding_request_text<'a>(input: &'a str, config: &EmbeddingConfig) -> (Cow<'a, str>, bool) {
+    let Some(max_input_chars) = embedding_request_char_budget(config) else {
+        return (Cow::Borrowed(input), false);
+    };
+    if max_input_chars == 0 {
+        return (Cow::Borrowed(input), false);
+    }
+    for (chars, (index, _)) in input.char_indices().enumerate() {
+        if chars == max_input_chars {
+            return (Cow::Owned(input[..index].to_owned()), true);
+        }
+    }
+    (Cow::Borrowed(input), false)
+}
+
+fn embedding_request_char_budget(config: &EmbeddingConfig) -> Option<usize> {
+    let token_char_budget = config
+        .max_estimated_tokens
+        .map(|tokens| tokens.saturating_mul(config.estimated_chars_per_token.max(1)));
+    match (config.max_input_chars, token_char_budget) {
+        (Some(chars), Some(token_chars)) => Some(chars.min(token_chars)),
+        (Some(chars), None) => Some(chars),
+        (None, Some(token_chars)) => Some(token_chars),
+        (None, None) => None,
+    }
 }
 
 fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {

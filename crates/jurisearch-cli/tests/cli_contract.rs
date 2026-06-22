@@ -297,7 +297,7 @@ fn status_returns_json_without_index() {
     assert_eq!(json["embedding"]["model"], "bge-m3");
     assert_eq!(json["embedding"]["dimension"], 1024);
     assert_eq!(json["embedding"]["pooling"], "cls");
-    assert_eq!(json["embedding"]["max_input_chars"], 24_000);
+    assert_eq!(json["embedding"]["max_input_chars"], 20_000);
     assert_eq!(json["embedding"]["max_estimated_tokens"], 8_192);
     assert_eq!(json["embedding"]["estimated_chars_per_token"], 4);
     assert_eq!(json["embedding"]["token_count_method"], "estimated_chars");
@@ -3265,8 +3265,8 @@ fn context_returns_hierarchy_and_siblings_from_existing_index() -> Result<(), St
 }
 
 #[test]
-fn ingest_embed_chunks_budget_error_names_offending_chunk() -> Result<(), StorageError> {
-    let Some(pg_config) = discover_pg_config("CLI embed chunk budget failure")? else {
+fn ingest_embed_chunks_truncates_over_budget_input_and_reports_count() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI embed chunk truncation")? else {
         return Ok(());
     };
     let root = tempfile::Builder::new()
@@ -3298,24 +3298,32 @@ fn ingest_embed_chunks_budget_error_names_offending_chunk() -> Result<(), Storag
         )?;
     }
 
-    let output = Command::cargo_bin("jurisearch")
-        .unwrap()
+    let endpoint = spawn_server(1, |request| {
+        assert!(request.starts_with("POST /v1/embeddings "));
+        assert!(request.contains(r#""input":["abcd"]"#));
+        assert!(!request.contains(r#""abcde""#));
+        ok_json(&embedding_response_json(0))
+    });
+
+    let output = jurisearch_command_without_embedding_env()
         .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_EMBED_BASE_URL", format!("{endpoint}/v1"))
         .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "4")
         .args(["ingest", "embed-chunks", "--index-lists", "1"])
         .assert()
-        .code(2)
+        .success()
         .stderr(predicate::str::is_empty())
         .get_output()
         .stdout
         .clone();
 
     let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "bad_input");
-    let message = json["error"]["message"].as_str().unwrap();
-    assert!(message.contains("chunk:1240:0"));
-    assert!(message.contains("embedding input is too long"));
+    assert_eq!(json["command"], "ingest embed-chunks");
+    assert_eq!(json["chunks_considered"], 1);
+    assert_eq!(json["embeddings_inserted"], 1);
+    assert_eq!(json["embedding_inputs_truncated"], 1);
+    assert_eq!(json["endpoint_pool"]["endpoints"][0]["truncated_inputs"], 1);
 
     Ok(())
 }
@@ -3355,19 +3363,28 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
     let local_endpoint = spawn_server(1, |request| {
         assert!(request.starts_with("POST /v1/embeddings "));
         assert!(request.contains(r#""model":"bge-m3""#));
+        assert!(request.contains(r#""input":["alph"]"#));
+        assert!(!request.contains(r#""alpha""#));
         assert!(!request.to_ascii_lowercase().contains("authorization:"));
         thread::sleep(Duration::from_millis(150));
         ok_json(&embedding_response_json(0))
     });
-    let openrouter_endpoint = spawn_server(1, |request| {
+    let mut openrouter_attempt = 0usize;
+    let openrouter_endpoint = spawn_server(2, move |request| {
+        openrouter_attempt += 1;
         assert!(request.starts_with("POST /api/v1/embeddings "));
         assert!(request.contains(r#""model":"baai/bge-m3""#));
+        assert!(request.contains(r#""input":["beta"]"#));
         assert!(
             request
                 .to_ascii_lowercase()
                 .contains("authorization: bearer openrouter-secret-token")
         );
-        ok_json(&embedding_response_json(1))
+        if openrouter_attempt == 1 {
+            ok_json(r#"{"error":{"message":"transient provider error","code":529}}"#)
+        } else {
+            ok_json(&embedding_response_json(1))
+        }
     });
     let pool =
         format!("{local_endpoint}/v1;{openrouter_endpoint}/api/v1|baai/bge-m3|OPENROUTER_API_KEY");
@@ -3378,6 +3395,7 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
         .env("JURISEARCH_CONFIG", "none")
         .env("JURISEARCH_EMBED_BASE_URL", primary_base_url)
         .env("JURISEARCH_EMBED_POOL", pool)
+        .env("JURISEARCH_EMBED_MAX_INPUT_CHARS", "4")
         .env("OPENROUTER_API_KEY", "openrouter-secret-token")
         .args([
             "ingest",
@@ -3400,6 +3418,7 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
     assert_eq!(json["command"], "ingest embed-chunks");
     assert_eq!(json["chunks_considered"], 2);
     assert_eq!(json["embeddings_inserted"], 2);
+    assert_eq!(json["embedding_inputs_truncated"], 1);
     assert_eq!(
         json["endpoint_pool"]["strategy"],
         "least_outstanding_requests"
@@ -3424,6 +3443,13 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
     assert!(endpoints.iter().all(|endpoint| {
         endpoint["requests"].as_u64().unwrap() == 1 && endpoint["chunks"].as_u64().unwrap() == 1
     }));
+    assert_eq!(
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint["truncated_inputs"].as_u64().unwrap())
+            .sum::<u64>(),
+        1
+    );
     assert_eq!(
         endpoints
             .iter()
