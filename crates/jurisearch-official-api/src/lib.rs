@@ -12,6 +12,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const LEGIFRANCE_TOKEN_SKEW: Duration = Duration::from_secs(30);
 const UPSTREAM_BODY_LIMIT: usize = 500;
+const DEFAULT_MAX_RETRIES: u32 = 3;
+const DEFAULT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const DEFAULT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const PROD_JUDILIBRE_CREDENTIALS: &[&str] = &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_API_KEY"];
 const SANDBOX_JUDILIBRE_CREDENTIALS: &[&str] =
     &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_SANDBOX_API_KEY"];
@@ -31,6 +34,53 @@ const SANDBOX_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
     "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
     "PISTE_SANDBOX_OAUTH_CLIENT_SECRET",
 ];
+
+/// Retry/backoff policy for transient upstream failures (HTTP 429 and 5xx). Only safe,
+/// read-style PISTE requests are issued through it; transport errors are not retried.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Maximum number of retries AFTER the initial attempt.
+    pub max_retries: u32,
+    /// Base delay for exponential backoff (`base * 2^attempt`).
+    pub base_delay: Duration,
+    /// Upper bound on any single backoff wait; also caps a `Retry-After` value.
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: DEFAULT_MAX_RETRIES,
+            base_delay: DEFAULT_RETRY_BASE_DELAY,
+            max_delay: DEFAULT_RETRY_MAX_DELAY,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// A policy that retries `max_retries` times without sleeping — for deterministic tests.
+    #[must_use]
+    pub fn immediate(max_retries: u32) -> Self {
+        Self {
+            max_retries,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        }
+    }
+
+    /// Default policy, with `max_retries` overridable via `JURISEARCH_PISTE_MAX_RETRIES`
+    /// (e.g. set to `0` to disable retries deterministically in tests/probes).
+    #[must_use]
+    pub fn from_env() -> Self {
+        let mut policy = Self::default();
+        if let Ok(value) = env::var("JURISEARCH_PISTE_MAX_RETRIES") {
+            if let Ok(max_retries) = value.trim().parse::<u32>() {
+                policy.max_retries = max_retries;
+            }
+        }
+        policy
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PisteEnvironment {
@@ -154,6 +204,7 @@ pub struct PisteClient {
     config: OfficialApiConfig,
     agent: ureq::Agent,
     legifrance_token: Option<CachedToken>,
+    retry: RetryPolicy,
 }
 
 impl PisteClient {
@@ -166,7 +217,15 @@ impl PisteClient {
             config,
             agent,
             legifrance_token: None,
+            retry: RetryPolicy::from_env(),
         }
+    }
+
+    /// Override the retry/backoff policy (e.g. `RetryPolicy::immediate(0)` to disable retries).
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
     }
 
     pub fn judilibre_search(&self) -> Result<Value, OfficialApiError> {
@@ -187,13 +246,15 @@ impl PisteClient {
                 names: judilibre_credential_names(self.config.environment),
             })?;
         let url = join_url(&self.config.api_base_url, path);
-        let response = self
-            .agent
-            .get(&url)
-            .set("Accept", "application/json")
-            .set("KeyId", key_id)
-            .call()
-            .map_err(official_api_error)?;
+        let policy = self.retry;
+        let response = send_with_retry(policy, || {
+            self.agent
+                .get(&url)
+                .set("Accept", "application/json")
+                .set("KeyId", key_id)
+                .call()
+        })
+        .map_err(official_api_error)?;
         response_json(response)
     }
 
@@ -203,14 +264,16 @@ impl PisteClient {
             &self.config.api_base_url,
             "/dila/legifrance/lf-engine-app/search",
         );
-        let response = self
-            .agent
-            .post(&url)
-            .set("Accept", "application/json")
-            .set("Content-Type", "application/json")
-            .set("Authorization", &format!("Bearer {token}"))
-            .send_json(body)
-            .map_err(official_api_error)?;
+        let policy = self.retry;
+        let response = send_with_retry(policy, || {
+            self.agent
+                .post(&url)
+                .set("Accept", "application/json")
+                .set("Content-Type", "application/json")
+                .set("Authorization", &format!("Bearer {token}"))
+                .send_json(body)
+        })
+        .map_err(official_api_error)?;
         response_json(response)
     }
 
@@ -240,16 +303,16 @@ impl PisteClient {
                 names: legifrance_client_secret_credential_names(self.config.environment),
             })?;
         let url = join_url(&self.config.oauth_base_url, "/api/oauth/token");
-        let response = self
-            .agent
-            .post(&url)
-            .send_form(&[
+        let policy = self.retry;
+        let response = send_with_retry(policy, || {
+            self.agent.post(&url).send_form(&[
                 ("grant_type", "client_credentials"),
                 ("scope", "openid"),
                 ("client_id", client_id),
                 ("client_secret", client_secret),
             ])
-            .map_err(official_api_error)?;
+        })
+        .map_err(official_api_error)?;
         let token_response = response
             .into_json::<TokenResponse>()
             .map_err(|error| OfficialApiError::InvalidResponse(error.to_string()))?;
@@ -434,6 +497,65 @@ fn truncated_body(body: String) -> String {
     truncated
 }
 
+/// Send a request, retrying transient upstream failures (HTTP 429 and 5xx) per `policy`.
+/// The `send` closure rebuilds and issues the request on each attempt (ureq builders are
+/// single-use). Transport errors and non-retryable statuses (e.g. 4xx) are returned immediately.
+fn send_with_retry<F>(policy: RetryPolicy, mut send: F) -> Result<ureq::Response, ureq::Error>
+where
+    F: FnMut() -> Result<ureq::Response, ureq::Error>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        match send() {
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                if attempt >= policy.max_retries || !is_retryable_status(&error) {
+                    return Err(error);
+                }
+                let delay = retry_delay(retry_after_from_error(&error), attempt, policy);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+                attempt += 1;
+            }
+        }
+    }
+}
+
+fn is_retryable_status(error: &ureq::Error) -> bool {
+    matches!(error, ureq::Error::Status(code, _) if *code == 429 || (500..=599).contains(code))
+}
+
+fn retry_after_from_error(error: &ureq::Error) -> Option<Duration> {
+    match error {
+        // `Retry-After` is upstream-directed for any retryable status (429 and 5xx both use it).
+        ureq::Error::Status(code, response) if *code == 429 || (500..=599).contains(code) => {
+            response
+                .header("Retry-After")
+                .and_then(parse_retry_after_seconds)
+        }
+        _ => None,
+    }
+}
+
+/// Backoff for a given attempt (0-based): a `Retry-After` value wins (capped by `max_delay`),
+/// otherwise exponential `base_delay * 2^attempt`, capped by `max_delay`.
+fn retry_delay(retry_after: Option<Duration>, attempt: u32, policy: RetryPolicy) -> Duration {
+    if let Some(after) = retry_after {
+        return after.min(policy.max_delay);
+    }
+    let factor = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
+    policy
+        .base_delay
+        .checked_mul(factor)
+        .unwrap_or(policy.max_delay)
+        .min(policy.max_delay)
+}
+
+fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -445,8 +567,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment};
+    use super::{OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment, RetryPolicy};
     use jurisearch_core::error::ErrorCode;
+    use std::time::Duration;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -570,7 +693,8 @@ mod tests {
         let mut config = OfficialApiConfig::production();
         config.api_base_url = base_url;
         config.judilibre_key_id = Some("test-key".to_owned());
-        let client = PisteClient::new(config);
+        // No-retry policy: this test asserts 429 error MAPPING against a single-request server.
+        let client = PisteClient::new(config).with_retry_policy(RetryPolicy::immediate(0));
 
         let error = client.judilibre_search().unwrap_err();
         assert!(matches!(
@@ -595,7 +719,8 @@ mod tests {
         let mut config = OfficialApiConfig::production();
         config.api_base_url = base_url;
         config.judilibre_key_id = Some("test-key".to_owned());
-        let client = PisteClient::new(config);
+        // No-retry policy: this test asserts 5xx error MAPPING/truncation against a single-request server.
+        let client = PisteClient::new(config).with_retry_policy(RetryPolicy::immediate(0));
 
         let error = client.judilibre_search().unwrap_err();
         assert!(matches!(
@@ -606,6 +731,161 @@ mod tests {
         assert_eq!(object.code, ErrorCode::Upstream);
         assert!(object.message.len() < 620);
         assert!(object.message.ends_with("..."));
+    }
+
+    #[test]
+    fn retries_429_then_succeeds() {
+        let mut call = 0;
+        let base_url = spawn_server(2, move |_request| {
+            call += 1;
+            if call == 1 {
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nConnection: close\r\nContent-Length: 7\r\n\r\nbackoff"
+                    .to_owned()
+            } else {
+                ok_json(r#"{"total":7}"#)
+            }
+        });
+        let mut config = OfficialApiConfig::production();
+        config.api_base_url = base_url;
+        config.judilibre_key_id = Some("test-key".to_owned());
+        let client = PisteClient::new(config).with_retry_policy(RetryPolicy::immediate(3));
+
+        let response = client.judilibre_search().unwrap();
+        assert_eq!(response["total"], 7);
+    }
+
+    #[test]
+    fn retries_5xx_then_succeeds() {
+        let mut call = 0;
+        let base_url = spawn_server(2, move |_request| {
+            call += 1;
+            if call == 1 {
+                "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 4\r\n\r\nbusy"
+                    .to_owned()
+            } else {
+                ok_json(r#"{"total":3}"#)
+            }
+        });
+        let mut config = OfficialApiConfig::production();
+        config.api_base_url = base_url;
+        config.judilibre_key_id = Some("test-key".to_owned());
+        let client = PisteClient::new(config).with_retry_policy(RetryPolicy::immediate(2));
+
+        let response = client.judilibre_search().unwrap();
+        assert_eq!(response["total"], 3);
+    }
+
+    #[test]
+    fn exhausts_retries_and_maps_rate_limit() {
+        // 1 initial attempt + 2 retries = 3 requests, all 429.
+        let base_url = spawn_server(3, |_request| {
+            "HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 7\r\n\r\nbackoff"
+                .to_owned()
+        });
+        let mut config = OfficialApiConfig::production();
+        config.api_base_url = base_url;
+        config.judilibre_key_id = Some("test-key".to_owned());
+        let client = PisteClient::new(config).with_retry_policy(RetryPolicy::immediate(2));
+
+        let error = client.judilibre_search().unwrap_err();
+        assert!(matches!(error, OfficialApiError::RateLimited { .. }));
+    }
+
+    #[test]
+    fn does_not_retry_non_retryable_status() {
+        // Single-request server: if the client retried a 404 it would hit a closed listener and
+        // surface a transport error instead of the mapped 404.
+        let base_url = spawn_server(1, |_request| {
+            "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 9\r\n\r\nnot found".to_owned()
+        });
+        let mut config = OfficialApiConfig::production();
+        config.api_base_url = base_url;
+        config.judilibre_key_id = Some("test-key".to_owned());
+        let client = PisteClient::new(config).with_retry_policy(RetryPolicy::immediate(3));
+
+        let error = client.judilibre_search().unwrap_err();
+        assert!(matches!(
+            error,
+            OfficialApiError::UpstreamStatus { status: 404, .. }
+        ));
+    }
+
+    #[test]
+    fn retry_delay_honors_retry_after_and_backs_off_exponentially() {
+        let policy = RetryPolicy {
+            max_retries: 5,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+        };
+        // Retry-After wins, capped by max_delay.
+        assert_eq!(
+            super::retry_delay(Some(Duration::from_secs(5)), 0, policy),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            super::retry_delay(Some(Duration::from_secs(100)), 0, policy),
+            Duration::from_secs(30)
+        );
+        // Exponential backoff base * 2^attempt, capped by max_delay.
+        assert_eq!(super::retry_delay(None, 0, policy), Duration::from_secs(1));
+        assert_eq!(super::retry_delay(None, 1, policy), Duration::from_secs(2));
+        assert_eq!(super::retry_delay(None, 2, policy), Duration::from_secs(4));
+        assert_eq!(super::retry_delay(None, 10, policy), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn retry_after_from_error_reads_header_for_429_and_5xx() {
+        let parse = |raw: &str| raw.parse::<ureq::Response>().unwrap();
+
+        // Both 429 and 5xx carry Retry-After; both must be honored.
+        let r429 = parse("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 12\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            super::retry_after_from_error(&ureq::Error::Status(429, r429)),
+            Some(Duration::from_secs(12))
+        );
+        let r503 = parse("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            super::retry_after_from_error(&ureq::Error::Status(503, r503)),
+            Some(Duration::from_secs(30))
+        );
+
+        // Retryable status without the header → fall back to exponential (None here).
+        let r500 = parse("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            super::retry_after_from_error(&ureq::Error::Status(500, r500)),
+            None
+        );
+
+        // Non-retryable status → ignore any Retry-After.
+        let r404 = parse("HTTP/1.1 404 Not Found\r\nRetry-After: 5\r\nContent-Length: 0\r\n\r\n");
+        assert_eq!(
+            super::retry_after_from_error(&ureq::Error::Status(404, r404)),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_policy_from_env_reads_max_retries() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var("JURISEARCH_PISTE_MAX_RETRIES").ok();
+
+        set_env_var("JURISEARCH_PISTE_MAX_RETRIES", Some("0"));
+        assert_eq!(RetryPolicy::from_env().max_retries, 0);
+        set_env_var("JURISEARCH_PISTE_MAX_RETRIES", Some("7"));
+        assert_eq!(RetryPolicy::from_env().max_retries, 7);
+        // Garbage falls back to the default.
+        set_env_var("JURISEARCH_PISTE_MAX_RETRIES", Some("not-a-number"));
+        assert_eq!(
+            RetryPolicy::from_env().max_retries,
+            super::DEFAULT_MAX_RETRIES
+        );
+        set_env_var("JURISEARCH_PISTE_MAX_RETRIES", None);
+        assert_eq!(
+            RetryPolicy::from_env().max_retries,
+            super::DEFAULT_MAX_RETRIES
+        );
+
+        set_env_var("JURISEARCH_PISTE_MAX_RETRIES", previous.as_deref());
     }
 
     #[test]
@@ -776,8 +1056,10 @@ mod tests {
     }
 
     fn ok_json(body: &str) -> String {
+        // `Connection: close` keeps the hand-rolled one-request-per-accept server deterministic:
+        // ureq never pools a connection the server is about to close (avoids broken-pipe reuse).
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         )
