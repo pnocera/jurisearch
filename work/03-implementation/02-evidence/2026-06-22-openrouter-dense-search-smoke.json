@@ -1,0 +1,211 @@
+{
+  "as_of": "2026-06-22",
+  "candidates": [
+    {
+      "chunk_id": "chunk:legi:LEGIARTI000006905589@2004-10-26:0",
+      "citation": "Code de l'action sociale et des familles Article R227-27",
+      "cursor": "0.01639344:chunk:legi:LEGIARTI000006905589@2004-10-26:0",
+      "document_id": "legi:LEGIARTI000006905589@2004-10-26",
+      "kind": "article",
+      "scores": {
+        "dense_rank": 1,
+        "lexical_rank": null,
+        "rrf": 0.01639344
+      },
+      "snippet": "Les contrats d'assurance garantissent, en application de l'article L. 227-5, les conséquences dommageables de la responsabilité civile encourue par : 1° Les personnes organisant l'accueil de mineurs prévu à l'article L. 227-4 et les exploitants des locaux recevant ces mineurs ; 2",
+      "source": "legi",
+      "source_url": "article/LEGI/ARTI/00/00/06/90/55/LEGIARTI000006905589.xml",
+      "title": "Article R227-27",
+      "validity": {
+        "from": "2004-10-26",
+        "to": null,
+        "to_exclusive": true
+      }
+    },
+    {
+      "chunk_id": "chunk:legi:LEGIARTI000027572682@2015-03-22:0",
+      "citation": "Code de l'action sociale et des familles Article L443-4",
+      "cursor": "0.01612903:chunk:legi:LEGIARTI000027572682@2015-03-22:0",
+      "document_id": "legi:LEGIARTI000027572682@2015-03-22",
+      "kind": "article",
+      "scores": {
+        "dense_rank": 2,
+        "lexical_rank": null,
+        "rrf": 0.01612903
+      },
+      "snippet": "Le bénéficiaire de l'agrément ou, le cas échéant, la personne morale employeur est tenu de souscrire un contrat d'assurance garantissant les conséquences pécuniaires de sa responsabilité civile en raison des dommages subis par les personnes accueillies et d'en justifier auprès du",
+      "source": "legi",
+      "source_url": "article/LEGI/ARTI/00/00/27/57/26/LEGIARTI000027572682.xml",
+      "title": "Article L443-4",
+      "validity": {
+        "from": "2015-03-22",
+        "to": null,
+        "to_exclusive": true
+      }
+    },
+    {
+      "chunk_id": "chunk:legi:LEGIARTI000048433125@2023-11-22:0",
+      "citation": "Code de la justice pénale des mineurs Article L512-1-1",
+      "cursor": "0.01587302:chunk:legi:LEGIARTI000048433125@2023-11-22:0",
+      "document_id": "legi:LEGIARTI000048433125@2023-11-22",
+      "kind": "article",
+      "scores": {
+        "dense_rank": 3,
+        "lexical_rank": null,
+        "rrf": 0.01587302
+      },
+      "snippet": "La personne dont la responsabilité civile est susceptible d'être engagée à l'occasion d'une infraction qui a entraîné pour autrui un dommage quelconque pouvant être garanti par un assureur doit préciser le nom et l'adresse de celui-ci ainsi que le numéro de sa police d'assurance.",
+      "source": "legi",
+      "source_url": "article/LEGI/ARTI/00/00/48/43/31/LEGIARTI000048433125.xml",
+      "title": "Article L512-1-1",
+      "validity": {
+        "from": "2023-11-22",
+        "to": null,
+        "to_exclusive": true
+      }
+    },
+    {
+      "chunk_id": "chunk:legi:LEGIARTI000048523830@2023-12-08:0",
+      "citation": "Code des assurances Article L451-2",
+      "cursor": "0.01562500:chunk:legi:LEGIARTI000048523830@2023-12-08:0",
+      "document_id": "legi:LEGIARTI000048523830@2023-12-08",
+      "kind": "article",
+      "scores": {
+        "dense_rank": 4,
+        "lexical_rank": null,
+        "rrf": 0.015625
+      },
+      "snippet": "I. - Toute entreprise d'assurance couvrant sur le territoire de la République française les risques de responsabilité civile résultant de l'emploi de véhicules terrestres à moteur, à l'exclusion de la responsabilité du transporteur, adhère à l'organisme d'information visé à l'art",
+      "source": "legi",
+      "source_url": "article/LEGI/ARTI/00/00/48/52/38/LEGIARTI000048523830.xml",
+      "title": "Article L451-2",
+      "validity": {
+        "from": "2023-12-08",
+        "to": null,
+        "to_exclusive": true
+      }
+    },
+    {
+      "chunk_id": "chunk:legi:LEGIARTI000038312567@2019-06-01:0",
+      "citation": "Code de procédure pénale Article 388-1",
+      "cursor": "0.01538462:chunk:legi:LEGIARTI000038312567@2019-06-01:0",
+      "document_id": "legi:LEGIARTI000038312567@2019-06-01",
+      "kind": "article",
+      "scores": {
+        "dense_rank": 5,
+        "lexical_rank": null,
+        "rrf": 0.01538462
+      },
+      "snippet": "La personne dont la responsabilité civile est susceptible d'être engagée à l'occasion d'une infraction d'homicide ou de blessures involontaires qui a entraîné pour autrui un dommage quelconque pouvant être garanti par un assureur doit préciser le nom et l'adresse de celui-ci, ain",
+      "source": "legi",
+      "source_url": "article/LEGI/ARTI/00/00/38/31/25/LEGIARTI000038312567.xml",
+      "title": "Article 388-1",
+      "validity": {
+        "from": "2019-06-01",
+        "to": null,
+        "to_exclusive": true
+      }
+    }
+  ],
+  "expanded_terms": [
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "fait quelconque"
+    },
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "faute"
+    },
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "dommage"
+    },
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "prejudice"
+    },
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "reparation du dommage"
+    },
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "article 1240"
+    },
+    {
+      "matched_terms": [
+        "responsabilite"
+      ],
+      "rationale": "Common statutory vocabulary for fault, damage, and civil-liability queries.",
+      "review_status": "dev_seed_pending_legal_review",
+      "reviewer": "pending_legal_domain_review",
+      "source_citation": "Code civil, articles 1240 et 1241",
+      "source_label": "Responsabilite civile delictuelle",
+      "source_seed_id": "civil-liability-fault-damage",
+      "term": "article 1241"
+    }
+  ],
+  "expansion_seed_version": "legal-vocabulary-seed:v1",
+  "format": "concise",
+  "limit": 5,
+  "pagination": {
+    "after_cursor": null,
+    "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+    "cursor_supported": true,
+    "guidance": "Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.",
+    "next_cursor": "0.01538462:chunk:legi:LEGIARTI000038312567@2019-06-01:0",
+    "possibly_truncated": true,
+    "requested_top_k": 5,
+    "returned": 5
+  },
+  "query": "responsabilité civile",
+  "retrieval_mode": "dense"
+}

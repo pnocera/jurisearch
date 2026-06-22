@@ -1,0 +1,61 @@
+started_at=2026-06-22T12:45:04+02:00
+commit=e3cbaa8
+index_dir=/home/pierre/Work/jurisearch/index/phase1-freemium-20250713
+embedding_pool=https://openrouter.ai/api/v1|baai/bge-m3|OPENROUTER_API_KEY
+{
+  "chunks_considered": 1778025,
+  "command": "ingest embed-chunks",
+  "dense_rebuild": {
+    "chunks": 1852745,
+    "embedding_fingerprint": "bge-m3:1024:normalize:true",
+    "embeddings": 1852745,
+    "index_lists": 32,
+    "index_name": "chunk_embeddings_embedding_ivfflat_idx"
+  },
+  "embedding": {
+    "base_urls": [
+      "http://127.0.0.1:8097/v1"
+    ],
+    "dimension": 1024,
+    "estimated_chars_per_token": 4,
+    "fingerprint": "bge-m3:1024:normalize:true",
+    "max_estimated_tokens": 8192,
+    "max_input_chars": 20000,
+    "model": "bge-m3",
+    "normalize": true,
+    "pool": [
+      {
+        "api_key_configured": true,
+        "api_key_env": "OPENROUTER_API_KEY",
+        "base_url": "https://openrouter.ai/api/v1",
+        "request_model": "baai/bge-m3"
+      }
+    ],
+    "pool_overrides_base_urls": true,
+    "pooling": "cls",
+    "provisional": true,
+    "reembeddable": true,
+    "token_count_method": "estimated_chars",
+    "tokenizer_path": null
+  },
+  "embedding_inputs_truncated": 32,
+  "embeddings_inserted": 1778025,
+  "endpoint_pool": {
+    "batch_size": 32,
+    "endpoints": [
+      {
+        "base_url": "https://openrouter.ai/api/v1",
+        "chunks": 1778025,
+        "failures": 0,
+        "request_model": "baai/bge-m3",
+        "requests": 55564,
+        "truncated_inputs": 32
+      }
+    ],
+    "pool_concurrency": 16,
+    "strategy": "least_outstanding_requests"
+  },
+  "index_dir": "/home/pierre/Work/jurisearch/index/phase1-freemium-20250713",
+  "limit": null,
+  "schema_version": "1"
+}
