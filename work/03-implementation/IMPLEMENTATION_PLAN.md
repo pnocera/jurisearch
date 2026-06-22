@@ -116,8 +116,8 @@ Deliverables:
 - Dense vector storage/search through `pgvector`.
 - Embeddings endpoint client and fingerprint checks.
 - Embedding input preflight against tokenizer or endpoint-specific token budget before document embeddings are written.
-- `bge-m3` as provisional benchmark-default until Phase 1 chooses the final embedding model.
-- Re-embedding and index migration coordination if the final embedding model differs from the provisional model.
+- `bge-m3` as the **locked v1 embedding model** (DECISIONS D21; validated vs CamemBERT/Solon 2026-06-22 — `work/03-implementation/02-evidence/2026-06-22-bge-m3-vs-french-embeddings.md`).
+- Re-embedding / vector-index migration **capability retained** for any future model change (Phase 3); not exercised in Phase 1.
 - Custom Rust RRF.
 - Authority weighting as ranking prior, not hard filter.
 - Vocabulary expansion applied to lexical leg.
@@ -296,17 +296,17 @@ Tasks:
 
 - Implement OpenAI-compatible `/v1/embeddings` client.
 - Support hosted and local loopback base URLs.
-- Use `bge-m3` as the provisional benchmark-default for Phase 0 dense work.
+- Use `bge-m3` as the locked dense embedding model (DECISIONS D21) for Phase 0 and beyond.
 - Require provider/model/dimension/normalization/pooling fingerprint.
 - Fail hard on dimension/fingerprint mismatch.
 - Add local `llama.cpp` profile documentation and checks.
 - Add in-process backend placeholder behind explicit config.
-- Mark all Phase 0 dense vectors as re-embeddable if Phase 1 selects a different model.
+- Keep Phase 0 dense vectors re-embeddable in principle (migration capability), though no Phase 1 model change is planned (`bge-m3` locked, D21).
 
 Acceptance:
 
 - Query embeddings work against a compatible endpoint.
-- Phase 0 indexes record that `bge-m3` is provisional unless the Phase 1 eval confirms it.
+- Phase 0 indexes record `bge-m3` as the locked model (D21); the manifest provisional flag is set accordingly.
 - A wrong dimension fails with an actionable error.
 - `127.0.0.1` endpoint is treated as configured endpoint, not as an in-process shortcut.
 - In-process mode refuses missing local models unless `model fetch` or explicit download permission is used.
@@ -700,9 +700,8 @@ Tasks:
 
 - Complete LEGI eval set with realistic statutory research tasks.
 - Run ingest-health gates: latest completed LEGI run, failed-member/error thresholds, projection/embedding coverage, and replay snapshot diffs over canonical records, chunks, publisher graph edges, embeddings, and manifest fields.
-- Benchmark embedding candidates: `bge-m3`, French specialists, and at least one strong hosted multilingual model.
-- Decide final embedding model by post-fusion legal metrics.
-- If the winner differs from provisional `bge-m3`, run the explicit embedding migration: manifest fingerprint change, chunk target fingerprint bump before re-embedding so coverage gates close until vectors are refreshed, full-corpus re-embed, vector index rebuild, and schema/version bump.
+- Embedding model is **locked to `bge-m3`** (DECISIONS D21) — the comparative French-specialist bake-off is skipped (bge-m3 validated as statistically indistinguishable from CamemBERT and Solon on French-legal retrieval, 2026-06-22 evidence note). Still measure absolute retrieval quality on bge-m3 via the ablations / temporal / citation evals below.
+- No Phase 1 re-embed/migration is planned; the migration path (manifest fingerprint change, chunk target-fingerprint bump, full re-embed, vector-index rebuild) remains available if a future model change is ever decided.
 - Evaluate reranker adoption before release.
 - Use the Phase 0 reranker feasibility spike to decide local vs HTTP vs disabled provider before the Phase 1 claim.
 - Measure token/tool-call budget for `search → fetch → cite`.
@@ -711,7 +710,7 @@ Acceptance:
 
 - Phase 1 may claim best-in-class LEGI/statutory search only if eval gates pass.
 - Phase 1 may be queried as complete only if ingest-health and projection gates pass.
-- The index fingerprint matches the selected final embedding model before release.
+- The index fingerprint matches the locked `bge-m3` model before release.
 - Any re-embedding migration is reproducible from canonical records and recorded in the manifest.
 - If reranker is not adopted, the eval result is recorded.
 - Docs and `status` do not claim full French juridic coverage before Phase 2.
@@ -722,7 +721,7 @@ Current status (2026-06-21):
 - Done: the built-in Phase 1 eval fixture summary is machine-readable in `phase1_gate.eval_fixtures`; the current built-in hierarchy fixtures are source-verified development fixtures, not release-gating fixtures, so the gate correctly remains pending.
 - Done: the first Phase 1 LEGI release-candidate fixture set is source-checked against the real DILA Freemium LEGI archive at `/home/pierre/Apps/juridocs/opendata/LEGI/Freemium_legi_global_20250713-140000.tar.gz`. The candidates cover known-article lookup, conceptual statutory retrieval, temporal retrieval, and citation-rich statutory retrieval, carry structured `as_of` dates for future fixture execution, and `phase1_gate.eval_fixtures.release_candidates` reports them separately from `release_gating`.
 - Done: `jurisearch eval phase1` can list the built-in release candidates without an index and can execute selected fixtures through the existing search path, reporting per-fixture expected-ID ranks, pass/fail status, retrieval mode, and candidate diagnostics. Session JSONL supports `eval phase1` with the same payload contract. Current execution checks expected-ID rank; hierarchy assertions from dev fixtures remain a follow-up harness extension.
-- Remaining: promote release candidates only after named human legal-domain review, run the executable fixtures against a real completed LEGI index, store retrieval/embedding/reranker benchmark evidence, decide the final embedding model, and record any required re-embed/index migration.
+- Remaining: promote release candidates only after named human legal-domain review, run the executable fixtures against a real completed LEGI index, and store retrieval/reranker benchmark evidence. (Embedding model is locked to `bge-m3` — D21; no model-selection step remains.)
 
 ---
 
@@ -941,7 +940,7 @@ Acceptance:
 - Temporal correctness eval passes.
 - Citation verification eval passes.
 - Hybrid retrieval beats BM25-only and dense-only baselines on legal tasks.
-- Final embedding model is selected; if it differs from provisional `bge-m3`, re-embedding/index migration is complete.
+- Embedding model is locked to `bge-m3` (D21); no Phase 1 re-embedding/migration required.
 - Reranker adoption/deferral is backed by the feasibility spike and eval result.
 - CLI contract eval passes.
 - `status` accurately reports coverage and freshness.
@@ -966,7 +965,7 @@ Acceptance:
 | `pg_search` packaging fails with embedded Postgres | High | Use locked fallback: native Postgres FTS first; do not jump to Qdrant. |
 | Embedded Postgres process management is too heavy | High | Trigger no-Postgres fallback only after lifecycle/packaging hard failure. |
 | Embedding endpoint model mismatch | High | Hard fingerprint/dimension checks; actionable errors. |
-| Embedding-model winner differs from provisional `bge-m3` | High | Budget full re-embed + manifest/index migration into Phase 1. |
+| Embedding-model choice (resolved) | Low | `bge-m3` locked as v1 (D21) after CamemBERT/Solon validation; re-embed/migration capability retained for any future change. |
 | Official XML edge cases are more complex than fixtures | High | Phase 0 parser spike on real representative XML; canonical validation. |
 | Full LEGI baseline volume/throughput exceeds the subset parser path | High | Streaming member reads, configurable member caps, and deterministic archive ordering from Phase 0. |
 | Resume/recovery after parser/schema changes preserves stale bad rows | High | Record parser/schema/code/source-payload compatibility metadata and require targeted reprocess on mismatch. |
@@ -996,7 +995,7 @@ Recommended first execution batch:
 6. Spike embedded Postgres + `pgvector` + `pg_search` against the concrete packaging and latency checklist.
 7. Spike official LEGI XML → canonical record → Rust validation.
 8. Add ingest run/member/error accounting, resume, and quarantine before full-corpus ingestion.
-9. Implement endpoint embeddings fingerprint checks with provisional `bge-m3`, token preflight, and migration metadata.
+9. Implement endpoint embeddings fingerprint checks with locked `bge-m3` (D21), token preflight, and migration metadata.
 10. Implement the shared official API client foundation.
 11. Run the reranker feasibility spike.
 12. Build the minimal LEGI subset search path: BM25 + dense + RRF + `search`/`fetch`.

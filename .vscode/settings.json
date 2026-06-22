@@ -1,10 +1,24 @@
 {
   "search.exclude": {
     "**/target": true,
-    "**/target/**": true
+    "**/target/**": true,
+    "index": true,
+    "index/**": true,
+    "**/.venv": true,
+    "**/.venv/**": true,
+    ".codegraph": true,
+    ".codegraph/**": true,
+    "**/__pycache__": true
   },
   "files.watcherExclude": {
     "**/target": true,
-    "**/target/**": true
+    "**/target/**": true,
+    "index": true,
+    "index/**": true,
+    "**/.venv": true,
+    "**/.venv/**": true,
+    ".codegraph": true,
+    ".codegraph/**": true,
+    "**/__pycache__": true
   }
 }

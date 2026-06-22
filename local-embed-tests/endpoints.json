@@ -1,0 +1,8 @@
+{
+  "endpoints": [
+    { "name": "bge-m3 (llama.cpp)",            "base_url": "http://127.0.0.1:8097/v1", "model": "bge-m3" },
+    { "name": "camembert (sentence-transf.)",  "base_url": "http://127.0.0.1:8098/v1", "model": "sentence-camembert-large" },
+    { "name": "solon",                         "base_url": "http://127.0.0.1:8099/v1", "model": "solon", "query_prefix": "query : " }
+  ],
+  "_note": "Add more to compare, e.g. Solon on :8099. The harness embeds the same corpus+queries through each OpenAI-compatible /v1/embeddings endpoint; each model must be served with ITS correct pooling (bge-m3=cls via llama.cpp, sentence-transformers models apply their own pooling automatically)."
+}

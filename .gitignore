@@ -17,3 +17,8 @@ index/
 # Rust
 /target
 **/*.rs.bk
+
+# Python (uv / venv — e.g. local-embed-tests)
+.venv/
+__pycache__/
+*.pyc

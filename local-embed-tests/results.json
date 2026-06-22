@@ -1,0 +1,787 @@
+[
+  {
+    "endpoint": {
+      "name": "bge-m3 (llama.cpp)",
+      "base_url": "http://127.0.0.1:8097/v1",
+      "model": "bge-m3"
+    },
+    "aggregate": {
+      "dim": 1024,
+      "MRR@10": 0.9318181818181818,
+      "Recall@1": 0.8636363636363636,
+      "Recall@5": 1.0,
+      "Recall@10": 1.0,
+      "nDCG@10": 0.9496722391233806
+    },
+    "per_query": [
+      {
+        "id": "q-produits-defectueux",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "resp-produits-defectueux-1245",
+          "resp-choses-1242",
+          "resp-commettant-prepose",
+          "penal-legitime-defense",
+          "resp-faute-1240"
+        ]
+      },
+      {
+        "id": "q-vices-caches",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "garantie-vices-caches-1641",
+          "conso-garantie-conformite",
+          "resp-produits-defectueux-1245",
+          "garantie-eviction",
+          "bail-commercial"
+        ]
+      },
+      {
+        "id": "q-fait-des-choses",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "resp-choses-1242",
+          "resp-faute-1240",
+          "resp-commettant-prepose",
+          "penal-legitime-defense",
+          "resp-produits-defectueux-1245"
+        ]
+      },
+      {
+        "id": "q-responsabilite-employeur",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "resp-commettant-prepose",
+          "resp-choses-1242",
+          "resp-produits-defectueux-1245",
+          "travail-faute-grave",
+          "travail-rupture-conventionnelle"
+        ]
+      },
+      {
+        "id": "q-erreur-consentement",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "vice-erreur",
+          "garantie-vices-caches-1641",
+          "garantie-eviction",
+          "famille-divorce-faute",
+          "conso-clause-abusive"
+        ]
+      },
+      {
+        "id": "q-dol",
+        "category": "contrats",
+        "gold_rank": 2,
+        "rr": 0.5,
+        "hit@1": 0,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 0.6309297535714575,
+        "top": [
+          "garantie-vices-caches-1641",
+          "vice-dol",
+          "vice-erreur",
+          "garantie-eviction",
+          "conso-clause-abusive"
+        ]
+      },
+      {
+        "id": "q-imprevision",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "contrat-imprevision-1195",
+          "conso-clause-abusive",
+          "travail-rupture-conventionnelle",
+          "contrat-bonne-foi-1104",
+          "famille-divorce-faute"
+        ]
+      },
+      {
+        "id": "q-bonne-foi",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "contrat-bonne-foi-1104",
+          "contrat-imprevision-1195",
+          "contrat-pourparlers-1112",
+          "conso-garantie-conformite",
+          "bail-commercial"
+        ]
+      },
+      {
+        "id": "q-licenciement",
+        "category": "travail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "travail-licenciement-cause",
+          "travail-rupture-conventionnelle",
+          "travail-periode-essai",
+          "travail-faute-grave",
+          "vice-erreur"
+        ]
+      },
+      {
+        "id": "q-rupture-conv",
+        "category": "travail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "travail-rupture-conventionnelle",
+          "travail-licenciement-cause",
+          "travail-periode-essai",
+          "contrat-bonne-foi-1104",
+          "contrat-imprevision-1195"
+        ]
+      },
+      {
+        "id": "q-35h",
+        "category": "travail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "travail-duree-legale",
+          "travail-rupture-conventionnelle",
+          "travail-periode-essai",
+          "travail-licenciement-cause",
+          "procedure-astreinte"
+        ]
+      },
+      {
+        "id": "q-retractation",
+        "category": "consommation",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "conso-retractation",
+          "prescription-droit-commun-2224",
+          "resp-produits-defectueux-1245",
+          "garantie-vices-caches-1641",
+          "contrat-pourparlers-1112"
+        ]
+      },
+      {
+        "id": "q-conformite",
+        "category": "consommation",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "conso-garantie-conformite",
+          "garantie-vices-caches-1641",
+          "resp-produits-defectueux-1245",
+          "garantie-eviction",
+          "conso-clause-abusive"
+        ]
+      },
+      {
+        "id": "q-legitime-defense",
+        "category": "penal",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "penal-legitime-defense",
+          "resp-choses-1242",
+          "penal-intention",
+          "procedure-charge-preuve",
+          "admin-responsabilite-faute"
+        ]
+      },
+      {
+        "id": "q-prescription-civile",
+        "category": "procedure",
+        "gold_rank": 2,
+        "rr": 0.5,
+        "hit@1": 0,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 0.6309297535714575,
+        "top": [
+          "penal-prescription-action",
+          "prescription-droit-commun-2224",
+          "famille-divorce-faute",
+          "mise-en-demeure",
+          "conso-retractation"
+        ]
+      },
+      {
+        "id": "q-rep",
+        "category": "administratif",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "admin-rep",
+          "admin-refere-suspension",
+          "famille-divorce-faute",
+          "procedure-charge-preuve",
+          "contrat-imprevision-1195"
+        ]
+      },
+      {
+        "id": "q-refere-suspension",
+        "category": "administratif",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "admin-refere-suspension",
+          "admin-rep",
+          "penal-prescription-action",
+          "procedure-astreinte",
+          "procedure-charge-preuve"
+        ]
+      },
+      {
+        "id": "q-depot-garantie",
+        "category": "bail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "bail-depot-garantie",
+          "garantie-vices-caches-1641",
+          "garantie-eviction",
+          "bail-commercial",
+          "bail-conge-bailleur"
+        ]
+      },
+      {
+        "id": "q-autorite-parentale",
+        "category": "famille",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "famille-autorite-parentale",
+          "famille-pension-alimentaire",
+          "garantie-eviction",
+          "resp-commettant-prepose",
+          "penal-intention"
+        ]
+      },
+      {
+        "id": "q-pension",
+        "category": "famille",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "famille-pension-alimentaire",
+          "famille-autorite-parentale",
+          "famille-divorce-faute",
+          "bail-depot-garantie",
+          "travail-rupture-conventionnelle"
+        ]
+      },
+      {
+        "id": "q-mise-en-demeure",
+        "category": "procedure",
+        "gold_rank": 2,
+        "rr": 0.5,
+        "hit@1": 0,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 0.6309297535714575,
+        "top": [
+          "procedure-astreinte",
+          "mise-en-demeure",
+          "travail-licenciement-cause",
+          "procedure-charge-preuve",
+          "travail-faute-grave"
+        ]
+      },
+      {
+        "id": "q-astreinte",
+        "category": "procedure",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "procedure-astreinte",
+          "mise-en-demeure",
+          "admin-refere-suspension",
+          "travail-duree-legale",
+          "procedure-charge-preuve"
+        ]
+      }
+    ],
+    "seconds": 0.3
+  },
+  {
+    "endpoint": {
+      "name": "solon",
+      "base_url": "http://127.0.0.1:8099/v1",
+      "model": "solon",
+      "query_prefix": "query : "
+    },
+    "aggregate": {
+      "dim": 1024,
+      "MRR@10": 0.9318181818181818,
+      "Recall@1": 0.8636363636363636,
+      "Recall@5": 1.0,
+      "Recall@10": 1.0,
+      "nDCG@10": 0.9496722391233806
+    },
+    "per_query": [
+      {
+        "id": "q-produits-defectueux",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "resp-produits-defectueux-1245",
+          "resp-choses-1242",
+          "resp-commettant-prepose",
+          "contrat-pourparlers-1112",
+          "conso-clause-abusive"
+        ]
+      },
+      {
+        "id": "q-vices-caches",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "garantie-vices-caches-1641",
+          "resp-produits-defectueux-1245",
+          "conso-garantie-conformite",
+          "garantie-eviction",
+          "conso-clause-abusive"
+        ]
+      },
+      {
+        "id": "q-fait-des-choses",
+        "category": "responsabilite",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "resp-choses-1242",
+          "resp-faute-1240",
+          "admin-responsabilite-faute",
+          "resp-produits-defectueux-1245",
+          "penal-legitime-defense"
+        ]
+      },
+      {
+        "id": "q-responsabilite-employeur",
+        "category": "responsabilite",
+        "gold_rank": 2,
+        "rr": 0.5,
+        "hit@1": 0,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 0.6309297535714575,
+        "top": [
+          "resp-produits-defectueux-1245",
+          "resp-commettant-prepose",
+          "resp-choses-1242",
+          "travail-faute-grave",
+          "conso-garantie-conformite"
+        ]
+      },
+      {
+        "id": "q-erreur-consentement",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "vice-erreur",
+          "garantie-vices-caches-1641",
+          "conso-retractation",
+          "admin-refere-suspension",
+          "contrat-force-obligatoire-1103"
+        ]
+      },
+      {
+        "id": "q-dol",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "vice-dol",
+          "vice-erreur",
+          "contrat-force-obligatoire-1103",
+          "conso-clause-abusive",
+          "garantie-vices-caches-1641"
+        ]
+      },
+      {
+        "id": "q-imprevision",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "contrat-imprevision-1195",
+          "contrat-force-obligatoire-1103",
+          "conso-clause-abusive",
+          "contrat-pourparlers-1112",
+          "vice-erreur"
+        ]
+      },
+      {
+        "id": "q-bonne-foi",
+        "category": "contrats",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "contrat-bonne-foi-1104",
+          "conso-garantie-conformite",
+          "vice-erreur",
+          "contrat-imprevision-1195",
+          "contrat-force-obligatoire-1103"
+        ]
+      },
+      {
+        "id": "q-licenciement",
+        "category": "travail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "travail-licenciement-cause",
+          "travail-faute-grave",
+          "penal-legitime-defense",
+          "bail-conge-bailleur",
+          "admin-refere-suspension"
+        ]
+      },
+      {
+        "id": "q-rupture-conv",
+        "category": "travail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "travail-rupture-conventionnelle",
+          "vice-dol",
+          "contrat-force-obligatoire-1103",
+          "contrat-pourparlers-1112",
+          "travail-periode-essai"
+        ]
+      },
+      {
+        "id": "q-35h",
+        "category": "travail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "travail-duree-legale",
+          "travail-periode-essai",
+          "prescription-droit-commun-2224",
+          "travail-licenciement-cause",
+          "travail-rupture-conventionnelle"
+        ]
+      },
+      {
+        "id": "q-retractation",
+        "category": "consommation",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "conso-retractation",
+          "contrat-force-obligatoire-1103",
+          "resp-produits-defectueux-1245",
+          "bail-conge-bailleur",
+          "garantie-vices-caches-1641"
+        ]
+      },
+      {
+        "id": "q-conformite",
+        "category": "consommation",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "conso-garantie-conformite",
+          "garantie-vices-caches-1641",
+          "resp-produits-defectueux-1245",
+          "conso-clause-abusive",
+          "garantie-eviction"
+        ]
+      },
+      {
+        "id": "q-legitime-defense",
+        "category": "penal",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "penal-legitime-defense",
+          "resp-choses-1242",
+          "vice-violence",
+          "resp-faute-1240",
+          "penal-prescription-action"
+        ]
+      },
+      {
+        "id": "q-prescription-civile",
+        "category": "procedure",
+        "gold_rank": 2,
+        "rr": 0.5,
+        "hit@1": 0,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 0.6309297535714575,
+        "top": [
+          "penal-prescription-action",
+          "prescription-droit-commun-2224",
+          "penal-legitime-defense",
+          "mise-en-demeure",
+          "admin-refere-suspension"
+        ]
+      },
+      {
+        "id": "q-rep",
+        "category": "administratif",
+        "gold_rank": 2,
+        "rr": 0.5,
+        "hit@1": 0,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 0.6309297535714575,
+        "top": [
+          "admin-refere-suspension",
+          "admin-rep",
+          "procedure-astreinte",
+          "penal-prescription-action",
+          "penal-legitime-defense"
+        ]
+      },
+      {
+        "id": "q-refere-suspension",
+        "category": "administratif",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "admin-refere-suspension",
+          "admin-rep",
+          "procedure-astreinte",
+          "penal-legitime-defense",
+          "mise-en-demeure"
+        ]
+      },
+      {
+        "id": "q-depot-garantie",
+        "category": "bail",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "bail-depot-garantie",
+          "bail-conge-bailleur",
+          "resp-choses-1242",
+          "garantie-eviction",
+          "contrat-force-obligatoire-1103"
+        ]
+      },
+      {
+        "id": "q-autorite-parentale",
+        "category": "famille",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "famille-autorite-parentale",
+          "famille-pension-alimentaire",
+          "penal-legitime-defense",
+          "prescription-droit-commun-2224",
+          "resp-choses-1242"
+        ]
+      },
+      {
+        "id": "q-pension",
+        "category": "famille",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "famille-pension-alimentaire",
+          "famille-autorite-parentale",
+          "famille-divorce-faute",
+          "prescription-droit-commun-2224",
+          "travail-duree-legale"
+        ]
+      },
+      {
+        "id": "q-mise-en-demeure",
+        "category": "procedure",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "mise-en-demeure",
+          "procedure-astreinte",
+          "procedure-charge-preuve",
+          "prescription-droit-commun-2224",
+          "admin-refere-suspension"
+        ]
+      },
+      {
+        "id": "q-astreinte",
+        "category": "procedure",
+        "gold_rank": 1,
+        "rr": 1.0,
+        "hit@1": 1,
+        "hit@5": 1,
+        "hit@10": 1,
+        "ndcg@10": 1.0,
+        "top": [
+          "procedure-astreinte",
+          "admin-refere-suspension",
+          "mise-en-demeure",
+          "procedure-charge-preuve",
+          "conso-retractation"
+        ]
+      }
+    ],
+    "seconds": 2.6
+  }
+]

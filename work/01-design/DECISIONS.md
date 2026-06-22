@@ -27,11 +27,11 @@ ADR-lite: each decision has a decision/recommendation + rationale + alternatives
 - The **Rust spike now *validates*** this stack against hard packaging + quality criteria (DESIGN §13.3) on ~50k LEGI versions + 10k decisions, target stable JSON < 500 ms warm — it does **not** pick among peers, and must not reopen the decision unless a hard criterion fails.
 - **Fallbacks only on a hard failure, in precedence:** (1) native Postgres FTS **if `pg_search` packaging fails**; (2) Tantivy + local Rust vector index + SQLite/Arrow **if embedded Postgres itself fails**; (3) LanceDB (Rust SDK) **only if the Postgres route fails both packaging *and* quality** gates. **Qdrant stays out of scope** — a separate service conflicts with the embedded CLI shape.
 
-## D4. Embedding & rerank models — recommend (eval-gated)
+## D4. Embedding & rerank models — **embedding DECIDED (see D21)**, rerank eval-gated (D11)
 - **Dense:** `BAAI/bge-m3` (multilingual, FR-strong, 8k ctx, dense+sparse from one model) — the **benchmark-default**, not an assumption; validated on the legal eval set before lock-in. Served via the configured **embeddings endpoint** (D5; in-process `fastembed-rs` optional). Same model for docs + queries (fingerprint in the manifest).
 - **Rerank:** `BAAI/bge-reranker-v2-m3` (or alt) — **benchmark-gated** (see D11); ships in Phase 1 if it clears the latency/quality gate, else Phase 3.
 - **French-specialist alts to benchmark:** `Lajavaness/sentence-camembert-large`, Solon. Decide via the eval set (§15 of DESIGN), not by guessing.
-- **Model gate (recommended answer):** benchmark `bge-m3`, `sentence-camembert-large`, Solon, **and ≥1 strong hosted multilingual model** through the endpoint; pick the winner on **legal retrieval metrics after hybrid fusion**, not standalone dense recall; on a near-tie prefer `bge-m3` (it preserves the learned-sparse / ColBERT path).
+- **Model gate — superseded by D21 (embedding locked to `bge-m3`).** The original plan was to benchmark `bge-m3`, `sentence-camembert-large`, Solon, and ≥1 hosted multilingual model and pick the post-fusion winner, preferring `bge-m3` on a near-tie. A local validation (2026-06-22) found bge-m3 statistically indistinguishable from CamemBERT and Solon on French-legal retrieval, so the bake-off is not run and bge-m3 is locked — see **D21**.
 - **Endpoint caveat:** a local `llama.cpp` endpoint is acceptable **only** if it serves a *dedicated* embedding model with stable pooling + dimension; the provider fingerprint + dimension check are mandatory — not every model is easy or equivalent under `llama.cpp`.
 
 ## D5. Embeddings provider — **DECIDED: OpenAI-compatible endpoint default**
@@ -99,15 +99,20 @@ ADR-lite: each decision has a decision/recommendation + rationale + alternatives
 - **Temporal sentinels:** normalize open-ended validity (missing `dateFin`, `2999-01-01`) to `valid_to: null`, preserve `valid_to_raw`; as-of semantics `valid_from <= as_of && (valid_to is null || as_of < valid_to)`.
 - **`help schema --json` works without an index:** schemas compiled into the binary; index `schemas/` is a provenance copy. (DESIGN §5.1, §10.2, §10.4, §12)
 
+## D21. Embedding model — **DECIDED: `bge-m3` locked as v1 (French-specialist bake-off skipped)**
+- **Decision:** `BAAI/bge-m3` is the **locked v1 embedding model** (fingerprint `bge-m3 / 1024-d / pooling=cls / normalize=true`). The Phase-1 comparative embedding-model bake-off is **not run**: bge-m3 was validated locally (2026-06-22) as **statistically indistinguishable** from the two strongest French specialists — `Lajavaness/sentence-camembert-large` and `OrdalieTech/Solon-embeddings-large-0.1` — on a curated French-legal retrieval set (identical MRR@10 = 0.932; per-query sign test p = 1.000 against each). Evidence: `work/03-implementation/02-evidence/2026-06-22-bge-m3-vs-french-embeddings.md`; harness: `local-embed-tests/`.
+- **Rationale:** no measurable French-legal retrieval gain from a specialist, and bge-m3 keeps multilingual reach + the learned-sparse / ColBERT upgrade path (the design's pre-stated near-tie preference, DESIGN §15). Supersedes the **embedding** portion of D4; D4's **rerank** model stays benchmark-gated (D11).
+- **Caveat / retained capability:** the validation set is small and synthetic (directional, not release-gating). The re-embed + vector-index migration mechanism (W3) is **retained** for any future model change (e.g. Phase 3) — it is simply not exercised in Phase 1.
+
 ---
 
 ## Remaining validation gates (all product decisions are made)
 
 No open *product/architecture* questions remain — only outcomes to validate against the spike (§13.3) and the eval set (§15). The **recommended answers** are recorded (open-questions review):
 1. **Backend spike (D3/D18):** proceed with embedded Postgres + `pgvector` + `pg_search` — *validate, don't reselect*; it must clear every §13.3 criterion (packaging + quality), and fallbacks engage only on a hard failure (precedence in D3).
-2. **Embedding model (D4):** start from `bge-m3` as the default benchmark candidate; pick the final model on **post-fusion legal metrics**, served over the configured endpoint (D5).
+2. **Embedding model — DECIDED (D21):** `bge-m3` is locked as v1; the French-specialist bake-off is skipped after local validation (CamemBERT/Solon both tie). Re-embed/migration capability retained for any future change.
 3. **Reranker (D11):** benchmark before Phase 1; ship it if the gain is material within budget, via a pluggable local/HTTP provider — else defer to Phase 3 with a recorded result.
 
 (The **phase claim** is resolved, not open: Phase 1 = best-in-class LEGI, full juridic at Phase 2 — D8.)
 
-All decisions settled across the 2026-06-20 reviews: **D1** (`jurisearch`), **D2** (Rust / Python-offline), **D3** (embedded Postgres + `pgvector` + `pg_search`), **D5** (endpoint embeddings incl. local `llama.cpp`), **D6** (CLI-only + JSONL), **D7** (official XML from day 1), **D11–D20**, plus the recommendations **D4/D8/D9/D10**.
+All decisions settled across the 2026-06-20 reviews: **D1** (`jurisearch`), **D2** (Rust / Python-offline), **D3** (embedded Postgres + `pgvector` + `pg_search`), **D5** (endpoint embeddings incl. local `llama.cpp`), **D6** (CLI-only + JSONL), **D7** (official XML from day 1), **D11–D20**, plus the recommendations **D8/D9/D10**. The embedding model (D4) was later locked to `bge-m3` by **D21** (2026-06-22).
