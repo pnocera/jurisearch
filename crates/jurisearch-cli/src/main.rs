@@ -31,6 +31,7 @@ use jurisearch_core::{
 };
 use jurisearch_embed::{
     EmbeddingConfig, EmbeddingFingerprint, EmbeddingProvider, OpenAiCompatibleClient,
+    PHASE0_EMBEDDING_DIMENSION, PHASE0_EMBEDDING_MODEL,
 };
 use jurisearch_ingest::{
     archive::{
@@ -3598,7 +3599,7 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint.clone();
     let (index, ingest_health) = status_index_and_ingest_health(index_dir);
-    let phase1_gate = phase1_gate_payload(&index, &ingest_health, &embedding_manifest);
+    let phase1_gate = phase1_gate_payload(&index, &ingest_health);
 
     json!({
         "schema_version": SCHEMA_VERSION,
@@ -3633,14 +3634,11 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
     })
 }
 
-fn phase1_gate_payload(
-    index: &Value,
-    ingest_health: &Value,
-    embedding_manifest: &jurisearch_embed::EmbeddingManifest,
-) -> Value {
+fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
     let eval_summary = phase1_eval_fixture_summary();
     let ingest_available = ingest_health["state"] == "available";
     let query_ready = index["query_ready"].as_bool().unwrap_or(false);
+    let locked_embedding_model = phase1_embedding_model_locked(ingest_health);
 
     let checks = vec![
         phase1_gate_check(
@@ -3702,12 +3700,16 @@ fn phase1_gate_payload(
         ),
         phase1_gate_check(
             "final_embedding_model",
-            if embedding_manifest.provisional {
-                "pending"
-            } else {
+            if locked_embedding_model {
                 "pass"
+            } else {
+                "fail"
             },
-            "final embedding model must be selected by Phase 1 legal retrieval metrics",
+            if locked_embedding_model {
+                "stored embedding manifest matches the locked D21 bge-m3 v1 model"
+            } else {
+                "stored embedding manifest must match D21: bge-m3, 1024 dimensions, normalized embeddings"
+            },
         ),
         phase1_gate_check(
             "reranker_decision",
@@ -3728,6 +3730,15 @@ fn phase1_gate_payload(
         "checks": checks,
         "eval_fixtures": eval_summary,
     })
+}
+
+fn phase1_embedding_model_locked(ingest_health: &Value) -> bool {
+    const LOCKED_PHASE1_EMBEDDING_FINGERPRINT: &str = "bge-m3:1024:normalize:true";
+    let manifest = &ingest_health["embedding_manifest"];
+    manifest["embedding_fingerprint"].as_str() == Some(LOCKED_PHASE1_EMBEDDING_FINGERPRINT)
+        && manifest["model"].as_str() == Some(PHASE0_EMBEDDING_MODEL)
+        && manifest["dimension"].as_u64() == Some(PHASE0_EMBEDDING_DIMENSION as u64)
+        && manifest["normalize"].as_bool() == Some(true)
 }
 
 fn phase1_gate_check(name: &str, status: impl Into<Phase1GateStatus>, message: &str) -> Value {
@@ -4590,19 +4601,15 @@ mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
 
-    fn test_embedding_manifest(provisional: bool) -> jurisearch_embed::EmbeddingManifest {
-        jurisearch_embed::EmbeddingManifest {
-            fingerprint: jurisearch_embed::EmbeddingFingerprint {
-                provider: jurisearch_embed::EmbeddingProvider::OpenAiCompatible,
-                base_url_class: jurisearch_embed::BaseUrlClass::LocalLoopback,
-                model: "bge-m3".to_string(),
-                dimension: 1024,
-                normalize: true,
-                pooling: "cls".to_string(),
-            },
-            provisional,
-            reembeddable: true,
-        }
+    fn locked_embedding_manifest_json() -> Value {
+        json!({
+            "embedding_fingerprint": "bge-m3:1024:normalize:true",
+            "model": "bge-m3",
+            "dimension": 1024,
+            "normalize": true,
+            "provisional": true,
+            "reembeddable": true
+        })
     }
 
     fn check_status<'a>(payload: &'a Value, name: &str) -> &'a str {
@@ -4707,11 +4714,11 @@ mod tests {
             "failed_members": 0,
             "projection_coverage": { "covered": 2, "total": 2 },
             "embedding_coverage": { "covered": 2, "total": 2 },
+            "embedding_manifest": locked_embedding_manifest_json(),
             "replay_snapshot_status": "available"
         });
-        let manifest = test_embedding_manifest(false);
 
-        let payload = phase1_gate_payload(&index, &ingest_health, &manifest);
+        let payload = phase1_gate_payload(&index, &ingest_health);
 
         assert_eq!(check_status(&payload, "index_query_ready"), "pass");
         assert_eq!(
@@ -4733,10 +4740,59 @@ mod tests {
 
         let mut failed_ingest_health = ingest_health.clone();
         failed_ingest_health["failed_members"] = json!(2);
-        let failed_payload = phase1_gate_payload(&index, &failed_ingest_health, &manifest);
+        let failed_payload = phase1_gate_payload(&index, &failed_ingest_health);
 
         assert_eq!(check_status(&failed_payload, "failed_members"), "fail");
         assert_eq!(failed_payload["state"], "not_ready");
         assert_eq!(failed_payload["claim_allowed"], false);
+
+        let provisional_payload = phase1_gate_payload(&index, &ingest_health);
+        assert_eq!(
+            check_status(&provisional_payload, "final_embedding_model"),
+            "pass"
+        );
+
+        let mut wrong_model_ingest_health = ingest_health.clone();
+        wrong_model_ingest_health["embedding_manifest"]["model"] = json!("other-model");
+        let wrong_model_payload = phase1_gate_payload(&index, &wrong_model_ingest_health);
+        assert_eq!(
+            check_status(&wrong_model_payload, "final_embedding_model"),
+            "fail"
+        );
+        assert_eq!(wrong_model_payload["claim_allowed"], false);
+
+        let mut wrong_dimension_ingest_health = ingest_health.clone();
+        wrong_dimension_ingest_health["embedding_manifest"]["dimension"] = json!(768);
+        let wrong_dimension_payload = phase1_gate_payload(&index, &wrong_dimension_ingest_health);
+        assert_eq!(
+            check_status(&wrong_dimension_payload, "final_embedding_model"),
+            "fail"
+        );
+
+        let mut wrong_normalize_ingest_health = ingest_health.clone();
+        wrong_normalize_ingest_health["embedding_manifest"]["normalize"] = json!(false);
+        let wrong_normalize_payload = phase1_gate_payload(&index, &wrong_normalize_ingest_health);
+        assert_eq!(
+            check_status(&wrong_normalize_payload, "final_embedding_model"),
+            "fail"
+        );
+
+        let mut wrong_fingerprint_ingest_health = ingest_health.clone();
+        wrong_fingerprint_ingest_health["embedding_manifest"]["embedding_fingerprint"] =
+            json!("bge-m3:768:normalize:true");
+        let wrong_fingerprint_payload =
+            phase1_gate_payload(&index, &wrong_fingerprint_ingest_health);
+        assert_eq!(
+            check_status(&wrong_fingerprint_payload, "final_embedding_model"),
+            "fail"
+        );
+
+        let mut missing_manifest_ingest_health = ingest_health.clone();
+        missing_manifest_ingest_health["embedding_manifest"] = json!({});
+        let missing_manifest_payload = phase1_gate_payload(&index, &missing_manifest_ingest_health);
+        assert_eq!(
+            check_status(&missing_manifest_payload, "final_embedding_model"),
+            "fail"
+        );
     }
 }

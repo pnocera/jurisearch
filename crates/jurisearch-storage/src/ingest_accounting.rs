@@ -135,6 +135,7 @@ pub struct IngestHealthReport {
     pub latest_run_status: Option<String>,
     pub latest_completed_run_id: Option<String>,
     pub latest_manifest: serde_json::Value,
+    pub embedding_manifest: serde_json::Value,
     pub total_members: i64,
     pub inserted_members: i64,
     pub skipped_members: i64,
@@ -587,6 +588,18 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         )
         .map_err(StorageError::PostgresClient)?
         .map(|row| row.get::<_, String>(0));
+    let embedding_manifest = client
+        .query_opt(
+            "SELECT value::text \
+             FROM index_manifest \
+             WHERE key = 'embedding';",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .map(|row| row.get::<_, String>(0))
+        .map(|manifest| serde_json::from_str(&manifest))
+        .transpose()?
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let counts = client
         .query_one(
@@ -651,6 +664,7 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         latest_run_status,
         latest_completed_run_id,
         latest_manifest,
+        embedding_manifest,
         total_members,
         inserted_members,
         skipped_members,

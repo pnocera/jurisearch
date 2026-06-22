@@ -1,0 +1,282 @@
+{
+  "action": "run",
+  "command": "eval phase1",
+  "eval_fixtures": {
+    "categories": {
+      "citation_state_statutory": 1,
+      "conceptual_statutory": 1,
+      "hierarchy_sensitive_statutory": 2,
+      "known_article_statutory": 1,
+      "temporal_statutory": 1
+    },
+    "hierarchy_sensitive": 2,
+    "release_candidates": 4,
+    "release_gating": 0,
+    "source_verified": 6,
+    "total": 6
+  },
+  "include_dev": false,
+  "results": [
+    {
+      "allowed_alternates": [],
+      "as_of": "1990-01-01",
+      "best_allowed_alternate_rank": null,
+      "best_expected_rank": 1,
+      "candidate_count": 20,
+      "category": "known_article_statutory",
+      "expected_ids": [
+        "legi:LEGIARTI000006590697@1989-11-04"
+      ],
+      "id": "legi-release-candidate-code-rural-r242-40-1989",
+      "matched_document_id": "legi:LEGIARTI000006590697@1989-11-04",
+      "passed": true,
+      "query": "Retrouver l'article R*242-40 du code rural applicable avant le 7 aout 2003 sur les contraventions dans une reserve naturelle.",
+      "search": {
+        "diagnostics": {
+          "after_cursor": null,
+          "dense_limit": 80,
+          "embedding_fingerprint": null,
+          "kind_filter": "article",
+          "lexical_limit": 80,
+          "mode": "bm25",
+          "query_limit": 21,
+          "uses_dense": false,
+          "uses_lexical": true
+        },
+        "pagination": {
+          "after_cursor": null,
+          "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+          "cursor_supported": true,
+          "guidance": "Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.",
+          "next_cursor": "0.01250000:chunk:legi:LEGIARTI000006590618@1989-11-04:0",
+          "possibly_truncated": true,
+          "requested_top_k": 20,
+          "returned": 20
+        },
+        "retrieval_mode": "bm25"
+      },
+      "status": "pass",
+      "tier": "release_gating",
+      "top_document_ids": [
+        "legi:LEGIARTI000006590697@1989-11-04",
+        "legi:LEGIARTI000006590700@1989-11-04",
+        "legi:LEGIARTI000006590712@1989-11-04",
+        "legi:LEGIARTI000006590706@1989-11-04",
+        "legi:LEGIARTI000006590709@1989-11-04",
+        "legi:LEGIARTI000006590662@1989-11-04",
+        "legi:LEGIARTI000006590691@1989-11-04",
+        "legi:LEGIARTI000006590610@1989-11-04",
+        "legi:LEGIARTI000006590654@1989-11-04",
+        "legi:LEGIARTI000006590694@1989-11-04",
+        "legi:LEGIARTI000006590719@1989-11-04",
+        "legi:LEGIARTI000006590678@1989-11-04",
+        "legi:LEGIARTI000006590669@1989-11-04",
+        "legi:LEGIARTI000006590650@1989-11-04",
+        "legi:LEGIARTI000006590675@1989-11-04",
+        "legi:LEGIARTI000006590648@1989-11-04",
+        "legi:LEGIARTI000006590703@1989-11-04",
+        "legi:LEGIARTI000006590716@1989-11-04",
+        "legi:LEGIARTI000006590667@1989-11-04",
+        "legi:LEGIARTI000006590618@1989-11-04"
+      ]
+    },
+    {
+      "allowed_alternates": [],
+      "as_of": "2003-09-01",
+      "best_allowed_alternate_rank": null,
+      "best_expected_rank": 1,
+      "candidate_count": 20,
+      "category": "conceptual_statutory",
+      "expected_ids": [
+        "legi:LEGIARTI000006590698@2003-08-07"
+      ],
+      "id": "legi-release-candidate-veterinaire-deontologie-2003",
+      "matched_document_id": "legi:LEGIARTI000006590698@2003-08-07",
+      "passed": true,
+      "query": "Au 1er septembre 2003, quelle disposition interdisait a un veterinaire ayant une responsabilite administrative ou politique de s'en prevaloir a des fins personnelles ?",
+      "search": {
+        "diagnostics": {
+          "after_cursor": null,
+          "dense_limit": 80,
+          "embedding_fingerprint": null,
+          "kind_filter": "article",
+          "lexical_limit": 80,
+          "mode": "bm25",
+          "query_limit": 21,
+          "uses_dense": false,
+          "uses_lexical": true
+        },
+        "pagination": {
+          "after_cursor": null,
+          "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+          "cursor_supported": true,
+          "guidance": "Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.",
+          "next_cursor": "0.01250000:chunk:legi:LEGIARTI000006725716@2003-07-19:0",
+          "possibly_truncated": true,
+          "requested_top_k": 20,
+          "returned": 20
+        },
+        "retrieval_mode": "bm25"
+      },
+      "status": "pass",
+      "tier": "release_gating",
+      "top_document_ids": [
+        "legi:LEGIARTI000006590698@2003-08-07",
+        "legi:LEGIARTI000006323974@2000-04-16",
+        "legi:LEGIARTI000006323971@2000-04-16",
+        "legi:LEGIARTI000006323966@2000-04-16",
+        "legi:LEGIARTI000006323976@2000-04-16",
+        "legi:LEGIARTI000006323981@2000-04-16",
+        "legi:LEGIARTI000006323969@2000-04-16",
+        "legi:LEGIARTI000006323978@2000-04-16",
+        "legi:LEGIARTI000006725796@2003-08-06",
+        "legi:LEGIARTI000006564568@2003-06-13",
+        "legi:LEGIARTI000006564346@2003-03-14",
+        "legi:LEGIARTI000019649386@2001-10-01",
+        "legi:LEGIARTI000006219545@2003-06-04",
+        "legi:LEGIARTI000006569282@2001-09-01",
+        "legi:LEGIARTI000006323983@2000-04-16",
+        "legi:LEGIARTI000006220152@2003-06-25",
+        "legi:LEGIARTI000006223761@2003-09-01",
+        "legi:LEGIARTI000006222505@2003-08-15",
+        "legi:LEGIARTI000006219546@2003-06-04",
+        "legi:LEGIARTI000006725716@2003-07-19"
+      ]
+    },
+    {
+      "allowed_alternates": [],
+      "as_of": "1990-01-01",
+      "best_allowed_alternate_rank": null,
+      "best_expected_rank": 1,
+      "candidate_count": 20,
+      "category": "temporal_statutory",
+      "expected_ids": [
+        "legi:LEGIARTI000006590700@1989-11-04"
+      ],
+      "id": "legi-release-candidate-reserve-naturelle-r242-41-1990",
+      "matched_document_id": "legi:LEGIARTI000006590700@1989-11-04",
+      "passed": true,
+      "query": "Au 1er janvier 1990, quelle disposition sanctionnait la violation d'une decision de classement d'une reserve naturelle concernant les activites agricoles, pastorales, forestieres ou sportives ?",
+      "search": {
+        "diagnostics": {
+          "after_cursor": null,
+          "dense_limit": 80,
+          "embedding_fingerprint": null,
+          "kind_filter": "article",
+          "lexical_limit": 80,
+          "mode": "bm25",
+          "query_limit": 21,
+          "uses_dense": false,
+          "uses_lexical": true
+        },
+        "pagination": {
+          "after_cursor": null,
+          "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+          "cursor_supported": true,
+          "guidance": "Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.",
+          "next_cursor": "0.01250000:chunk:legi:LEGIARTI000006858044@1988-02-03:0",
+          "possibly_truncated": true,
+          "requested_top_k": 20,
+          "returned": 20
+        },
+        "retrieval_mode": "bm25"
+      },
+      "status": "pass",
+      "tier": "release_gating",
+      "top_document_ids": [
+        "legi:LEGIARTI000006590700@1989-11-04",
+        "legi:LEGIARTI000006857175@1988-03-02",
+        "legi:LEGIARTI000006857216@1988-03-02",
+        "legi:LEGIARTI000006858065@1988-03-02",
+        "legi:LEGIARTI000006855721@1979-09-07",
+        "legi:LEGIARTI000006601189@1986-01-03",
+        "legi:LEGIARTI000006582897@1989-11-04",
+        "legi:LEGIARTI000006857474@1988-03-02",
+        "legi:LEGIARTI000024244532@1974-05-26",
+        "legi:LEGIARTI000006774741@1990-01-01",
+        "legi:LEGIARTI000006863396@1973-09-13",
+        "legi:LEGIARTI000006272854@1986-01-03",
+        "legi:LEGIARTI000006601179@1986-01-03",
+        "legi:LEGIARTI000006855743@1980-09-16",
+        "legi:LEGIARTI000006855715@1979-09-07",
+        "legi:LEGIARTI000006857454@1988-03-02",
+        "legi:LEGIARTI000006590703@1989-11-04",
+        "legi:LEGIARTI000006857195@1988-03-02",
+        "legi:LEGIARTI000006855781@1982-06-16",
+        "legi:LEGIARTI000006858044@1988-02-03"
+      ]
+    },
+    {
+      "allowed_alternates": [],
+      "as_of": "2024-01-01",
+      "best_allowed_alternate_rank": null,
+      "best_expected_rank": 1,
+      "candidate_count": 20,
+      "category": "citation_state_statutory",
+      "expected_ids": [
+        "legi:LEGIARTI000006756700@2000-12-23"
+      ],
+      "id": "legi-release-candidate-loi-1990-long-sejour",
+      "matched_document_id": "legi:LEGIARTI000006756700@2000-12-23",
+      "passed": true,
+      "query": "Identifier la disposition de la loi du 23 janvier 1990 validant les forfaits journaliers de soins en unites de long sejour malgre l'absence des decrets d'application des lois de 1975 et 1978.",
+      "search": {
+        "diagnostics": {
+          "after_cursor": null,
+          "dense_limit": 80,
+          "embedding_fingerprint": null,
+          "kind_filter": "article",
+          "lexical_limit": 80,
+          "mode": "bm25",
+          "query_limit": 21,
+          "uses_dense": false,
+          "uses_lexical": true
+        },
+        "pagination": {
+          "after_cursor": null,
+          "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+          "cursor_supported": true,
+          "guidance": "Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.",
+          "next_cursor": "0.01250000:chunk:legi:LEGIARTI000006408320@1999-10-01:0",
+          "possibly_truncated": true,
+          "requested_top_k": 20,
+          "returned": 20
+        },
+        "retrieval_mode": "bm25"
+      },
+      "status": "pass",
+      "tier": "release_gating",
+      "top_document_ids": [
+        "legi:LEGIARTI000006756700@2000-12-23",
+        "legi:LEGIARTI000045635580@2022-04-23",
+        "legi:LEGIARTI000048517061@2023-12-07",
+        "legi:LEGIARTI000047251216@2023-03-01",
+        "legi:LEGIARTI000048928050@2024-01-01",
+        "legi:LEGIARTI000045354700@2022-03-01",
+        "legi:LEGIARTI000036538785@2018-01-26",
+        "legi:LEGIARTI000006774999@1990-07-01",
+        "legi:LEGIARTI000036538787@2018-01-26",
+        "legi:LEGIARTI000006721647@1981-01-18",
+        "legi:LEGIARTI000006219333@2003-05-27",
+        "legi:LEGIARTI000048600731@2024-01-01",
+        "legi:LEGIARTI000006718964@1990-01-03",
+        "legi:LEGIARTI000006502985@1961-01-01",
+        "legi:LEGIARTI000048516263@2023-12-07",
+        "legi:LEGIARTI000006673672@1978-01-24",
+        "legi:LEGIARTI000046885794@2023-01-01",
+        "legi:LEGIARTI000048516267@2023-12-07",
+        "legi:LEGIARTI000048516275@2023-12-07",
+        "legi:LEGIARTI000006408320@1999-10-01"
+      ]
+    }
+  ],
+  "retrieval_mode": "bm25",
+  "schema_version": "1",
+  "summary": {
+    "all_passed": true,
+    "failed": 0,
+    "fixture_count": 4,
+    "passed": 4
+  },
+  "top_k": 20
+}

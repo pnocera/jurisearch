@@ -1,0 +1,95 @@
+{
+  "action": "list",
+  "command": "eval phase1",
+  "eval_fixtures": {
+    "categories": {
+      "citation_state_statutory": 1,
+      "conceptual_statutory": 1,
+      "hierarchy_sensitive_statutory": 2,
+      "known_article_statutory": 1,
+      "temporal_statutory": 1
+    },
+    "hierarchy_sensitive": 2,
+    "release_candidates": 4,
+    "release_gating": 0,
+    "source_verified": 6,
+    "total": 6
+  },
+  "fixture_count": 4,
+  "fixtures": [
+    {
+      "allowed_alternates": [],
+      "as_of": "1990-01-01",
+      "category": "known_article_statutory",
+      "drafted_by": "codex",
+      "expected_ids": [
+        "legi:LEGIARTI000006590697@1989-11-04"
+      ],
+      "hierarchy": null,
+      "id": "legi-release-candidate-code-rural-r242-40-1989",
+      "query": "Retrouver l'article R*242-40 du code rural applicable avant le 7 aout 2003 sur les contraventions dans une reserve naturelle.",
+      "rationale": "Known-article lookup with an explicit historical as-of constraint and successor-version exclusion.",
+      "review_status": "official_source_checked",
+      "reviewer": null,
+      "temporal_expectation": "1990-01-01 selects LEGIARTI000006590697 and excludes later R242-40 versions LEGIARTI000006590698/699/030361159.",
+      "tier": "release_gating",
+      "verified_against": "DILA LEGI Freemium_legi_global_20250713-140000.tar.gz: legi/global/code_et_TNC_en_vigueur/code_en_vigueur/LEGI/TEXT/00/00/06/07/13/LEGITEXT000006071367/article/LEGI/ARTI/00/00/06/59/06/LEGIARTI000006590697.xml; META_ARTICLE NUM R*242-40, ETAT ABROGE, DATE_DEBUT 1989-11-04, DATE_FIN 2003-08-07; VERSIONS lists successor R*242-40/R242-40 article IDs; body sanctions contraventions in natural reserves."
+    },
+    {
+      "allowed_alternates": [],
+      "as_of": "2003-09-01",
+      "category": "conceptual_statutory",
+      "drafted_by": "codex",
+      "expected_ids": [
+        "legi:LEGIARTI000006590698@2003-08-07"
+      ],
+      "hierarchy": null,
+      "id": "legi-release-candidate-veterinaire-deontologie-2003",
+      "query": "Au 1er septembre 2003, quelle disposition interdisait a un veterinaire ayant une responsabilite administrative ou politique de s'en prevaloir a des fins personnelles ?",
+      "rationale": "Conceptual statutory retrieval where the query names the legal duty, not the article identifier.",
+      "review_status": "official_source_checked",
+      "reviewer": null,
+      "temporal_expectation": "2003-09-01 selects the short-lived 2003-08-07 version and excludes the 1989 reserve-nature predecessor plus later R242-40 versions.",
+      "tier": "release_gating",
+      "verified_against": "DILA LEGI Freemium_legi_global_20250713-140000.tar.gz: legi/global/code_et_TNC_en_vigueur/code_en_vigueur/LEGI/TEXT/00/00/06/07/13/LEGITEXT000006071367/article/LEGI/ARTI/00/00/06/59/06/LEGIARTI000006590698.xml; META_ARTICLE NUM R*242-40, ETAT MODIFIE, DATE_DEBUT 2003-08-07, DATE_FIN 2003-10-11; CONTEXTE is Code rural, code de deontologie veterinaire; body contains the administrative/political responsibility prohibition."
+    },
+    {
+      "allowed_alternates": [],
+      "as_of": "1990-01-01",
+      "category": "temporal_statutory",
+      "drafted_by": "codex",
+      "expected_ids": [
+        "legi:LEGIARTI000006590700@1989-11-04"
+      ],
+      "hierarchy": null,
+      "id": "legi-release-candidate-reserve-naturelle-r242-41-1990",
+      "query": "Au 1er janvier 1990, quelle disposition sanctionnait la violation d'une decision de classement d'une reserve naturelle concernant les activites agricoles, pastorales, forestieres ou sportives ?",
+      "rationale": "Temporal statutory research task that should fail if the index ignores validity windows or successor versions.",
+      "review_status": "official_source_checked",
+      "reviewer": null,
+      "temporal_expectation": "1990-01-01 selects LEGIARTI000006590700; 2003-08-07 and later R242-41 versions are out of scope.",
+      "tier": "release_gating",
+      "verified_against": "DILA LEGI Freemium_legi_global_20250713-140000.tar.gz: legi/global/code_et_TNC_en_vigueur/code_en_vigueur/LEGI/TEXT/00/00/06/07/13/LEGITEXT000006071367/article/LEGI/ARTI/00/00/06/59/07/LEGIARTI000006590700.xml; META_ARTICLE NUM R*242-41, ETAT ABROGE, DATE_DEBUT 1989-11-04, DATE_FIN 2003-08-07; body sanctions violations of reserve-natural classification decisions regulating agricultural, pastoral, forestry, games, or sports activities."
+    },
+    {
+      "allowed_alternates": [],
+      "as_of": "2024-01-01",
+      "category": "citation_state_statutory",
+      "drafted_by": "codex",
+      "expected_ids": [
+        "legi:LEGIARTI000006756700@2000-12-23"
+      ],
+      "hierarchy": null,
+      "id": "legi-release-candidate-loi-1990-long-sejour",
+      "query": "Identifier la disposition de la loi du 23 janvier 1990 validant les forfaits journaliers de soins en unites de long sejour malgre l'absence des decrets d'application des lois de 1975 et 1978.",
+      "rationale": "Citation-rich statutory retrieval task covering source links, sentinel end-date normalization, and a non-code law article.",
+      "review_status": "official_source_checked",
+      "reviewer": null,
+      "temporal_expectation": "DATE_FIN 2999-01-01 is an open-ended sentinel normalized to the current version for Phase 1 queries.",
+      "tier": "release_gating",
+      "verified_against": "DILA LEGI Freemium_legi_global_20250713-140000.tar.gz: legi/global/code_et_TNC_en_vigueur/TNC_en_vigueur/JORF/TEXT/00/00/00/70/72/JORFTEXT000000707200/article/LEGI/ARTI/00/00/06/75/67/LEGIARTI000006756700.xml; META_ARTICLE NUM 27, ETAT VIGUEUR, DATE_DEBUT 2000-12-23, DATE_FIN 2999-01-01; body validates long-stay daily-care forfait and price decisions despite missing decrees; LIENS cite the 1970, 1978, and action-sociale-family code provisions."
+    }
+  ],
+  "include_dev": false,
+  "schema_version": "1"
+}
