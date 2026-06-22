@@ -116,6 +116,7 @@ Deliverables:
 - Dense vector storage/search through `pgvector`.
 - Embeddings endpoint client and fingerprint checks.
 - Embedding input preflight against tokenizer or endpoint-specific token budget before document embeddings are written.
+- Build-time dense-projection **endpoint pool**: least-outstanding-requests dispatch across N fingerprint-identical bge-m3 endpoints (extends `jurisearch ingest embed-chunks`), batched, resumable via projection-coverage. Measured 2026-06-22: pooling 3 nodes cut the ~1.85 M-chunk projection from ~8.9 h (localhost-only) to ~1.8 h (~5×); localhost is the slowest/most-contended node, so deprioritize it for the bulk pass. Query-time uses a single endpoint. See `work/03-implementation/00-setup/embeddings-endpoint.md`.
 - `bge-m3` as the **locked v1 embedding model** (DECISIONS D21; validated vs CamemBERT/Solon 2026-06-22 — `work/03-implementation/02-evidence/2026-06-22-bge-m3-vs-french-embeddings.md`).
 - Re-embedding / vector-index migration **capability retained** for any future model change (Phase 3); not exercised in Phase 1.
 - Custom Rust RRF.

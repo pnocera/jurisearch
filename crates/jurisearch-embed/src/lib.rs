@@ -66,6 +66,7 @@ pub struct EmbeddingManifest {
 pub struct EmbeddingConfig {
     pub provider: EmbeddingProvider,
     pub base_url: Option<String>,
+    pub base_urls: Vec<String>,
     pub api_key: Option<String>,
     pub model: String,
     pub dimension: usize,
@@ -88,9 +89,11 @@ impl EmbeddingConfig {
         normalize: bool,
         pooling: impl Into<String>,
     ) -> Self {
+        let base_url = base_url.into();
         Self {
             provider: EmbeddingProvider::OpenAiCompatible,
-            base_url: Some(base_url.into()),
+            base_url: Some(base_url.clone()),
+            base_urls: vec![base_url],
             api_key,
             model: model.into(),
             dimension,
@@ -106,9 +109,11 @@ impl EmbeddingConfig {
     }
 
     pub fn phase0_bge_m3(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        let base_url = base_url.into();
         Self {
             provider: EmbeddingProvider::OpenAiCompatible,
-            base_url: Some(base_url.into()),
+            base_url: Some(base_url.clone()),
+            base_urls: vec![base_url],
             api_key,
             model: PHASE0_EMBEDDING_MODEL.to_owned(),
             dimension: PHASE0_EMBEDDING_DIMENSION,
@@ -127,6 +132,7 @@ impl EmbeddingConfig {
         Self {
             provider: EmbeddingProvider::InProcess,
             base_url: None,
+            base_urls: Vec::new(),
             api_key: None,
             model: model.into(),
             dimension,
@@ -367,9 +373,23 @@ impl OpenAiCompatibleClient {
         input: &str,
         expected: &EmbeddingFingerprint,
     ) -> Result<EmbeddingVector, EmbeddingError> {
+        let mut embeddings = self.embed_batch(&[input], expected)?;
+        embeddings.pop().ok_or(EmbeddingError::EmptyResponse)
+    }
+
+    pub fn embed_batch(
+        &self,
+        inputs: &[&str],
+        expected: &EmbeddingFingerprint,
+    ) -> Result<Vec<EmbeddingVector>, EmbeddingError> {
+        if inputs.is_empty() {
+            return Ok(Vec::new());
+        }
         self.config.ensure_matches_index(expected)?;
-        self.config
-            .preflight_input_with_tokenizer(input, self.tokenizer.as_ref())?;
+        for input in inputs {
+            self.config
+                .preflight_input_with_tokenizer(input, self.tokenizer.as_ref())?;
+        }
         let url = format!(
             "{}/embeddings",
             self.config
@@ -393,40 +413,50 @@ impl OpenAiCompatibleClient {
 
         let response = request
             .send_json(json!({
-                "model": self.config.model,
-                "input": input,
+                "model": &self.config.model,
+                "input": inputs,
             }))
             .map_err(endpoint_error)?;
         let response = response
             .into_json::<OpenAiEmbeddingResponse>()
             .map_err(|error| EmbeddingError::InvalidResponse(error.to_string()))?;
-        let embedding = response
+        if response.data.is_empty() {
+            return Err(EmbeddingError::EmptyResponse);
+        }
+        if response.data.len() != inputs.len() {
+            return Err(EmbeddingError::BatchSizeMismatch {
+                expected: inputs.len(),
+                actual: response.data.len(),
+            });
+        }
+
+        let fingerprint = self.config.fingerprint();
+        response
             .data
             .into_iter()
-            .next()
-            .ok_or(EmbeddingError::EmptyResponse)?
-            .embedding;
+            .map(|data| {
+                if data.embedding.len() != expected.dimension {
+                    return Err(EmbeddingError::DimensionMismatch {
+                        model: self.config.model.clone(),
+                        expected: expected.dimension,
+                        actual: data.embedding.len(),
+                    });
+                }
 
-        if embedding.len() != expected.dimension {
-            return Err(EmbeddingError::DimensionMismatch {
-                model: self.config.model.clone(),
-                expected: expected.dimension,
-                actual: embedding.len(),
-            });
-        }
+                let vector = EmbeddingVector {
+                    values: data.embedding,
+                    fingerprint: fingerprint.clone(),
+                };
+                if expected.normalize && (vector.l2_norm() - 1.0).abs() > NORMALIZED_L2_TOLERANCE {
+                    return Err(EmbeddingError::NormalizationMismatch {
+                        model: self.config.model.clone(),
+                        norm: vector.l2_norm(),
+                    });
+                }
 
-        let vector = EmbeddingVector {
-            values: embedding,
-            fingerprint: self.config.fingerprint(),
-        };
-        if expected.normalize && (vector.l2_norm() - 1.0).abs() > NORMALIZED_L2_TOLERANCE {
-            return Err(EmbeddingError::NormalizationMismatch {
-                model: self.config.model.clone(),
-                norm: vector.l2_norm(),
-            });
-        }
-
-        Ok(vector)
+                Ok(vector)
+            })
+            .collect()
     }
 }
 
@@ -481,6 +511,8 @@ pub enum EmbeddingError {
     InvalidResponse(String),
     #[error("embedding endpoint returned no embeddings")]
     EmptyResponse,
+    #[error("embedding endpoint returned {actual} embeddings for a batch of {expected} inputs")]
+    BatchSizeMismatch { expected: usize, actual: usize },
     #[error(
         "embedding input is too long: {0}; split the document chunk or adjust JURISEARCH_EMBED_MAX_INPUT_CHARS/JURISEARCH_EMBED_MAX_ESTIMATED_TOKENS for this endpoint"
     )]
@@ -582,6 +614,23 @@ mod tests {
             .unwrap();
         assert_eq!(embedding.values, vec![0.6, 0.8, 0.0]);
         assert!((embedding.l2_norm() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn openai_compatible_client_embeds_batches_in_response_order() {
+        let base_url = spawn_embedding_server(
+            r#"{"data":[{"embedding":[1.0,0.0,0.0]},{"embedding":[0.0,1.0,0.0]}]}"#,
+        );
+        let config = EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
+        let expected = config.fingerprint();
+        let client = OpenAiCompatibleClient::new(config).unwrap();
+
+        let embeddings = client
+            .embed_batch(&["article", "decision"], &expected)
+            .unwrap();
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0].values, vec![1.0, 0.0, 0.0]);
+        assert_eq!(embeddings[1].values, vec![0.0, 1.0, 0.0]);
     }
 
     #[test]

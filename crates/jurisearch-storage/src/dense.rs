@@ -33,6 +33,9 @@ pub struct ChunkEmbeddingInput {
 
 pub fn load_chunk_embedding_inputs(
     postgres: &ManagedPostgres,
+    embedding_fingerprint: &str,
+    model: &str,
+    dimension: i32,
     limit: Option<u32>,
 ) -> Result<Vec<ChunkEmbeddingInput>, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
@@ -43,9 +46,14 @@ pub fn load_chunk_embedding_inputs(
             .query(
                 "SELECT c.chunk_id, c.body, c.contextualized_body \
                  FROM chunks c \
+                 LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id \
+                 WHERE ce.chunk_id IS NULL \
+                    OR ce.embedding_fingerprint <> $1 \
+                    OR ce.model <> $2 \
+                    OR ce.dimension <> $3 \
                  ORDER BY c.document_id, c.chunk_index, c.chunk_id \
-                 LIMIT $1;",
-                &[&limit],
+                 LIMIT $4;",
+                &[&embedding_fingerprint, &model, &dimension, &limit],
             )
             .map_err(StorageError::PostgresClient)?
     } else {
@@ -53,8 +61,13 @@ pub fn load_chunk_embedding_inputs(
             .query(
                 "SELECT c.chunk_id, c.body, c.contextualized_body \
                  FROM chunks c \
+                 LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id \
+                 WHERE ce.chunk_id IS NULL \
+                    OR ce.embedding_fingerprint <> $1 \
+                    OR ce.model <> $2 \
+                    OR ce.dimension <> $3 \
                  ORDER BY c.document_id, c.chunk_index, c.chunk_id;",
-                &[],
+                &[&embedding_fingerprint, &model, &dimension],
             )
             .map_err(StorageError::PostgresClient)?
     };

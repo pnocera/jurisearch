@@ -70,17 +70,17 @@ This is locked (D3). It *was* the highest-risk prerequisite; with the two in-hou
 
 ---
 
-## 3. Embeddings infrastructure  — ✅ provisional endpoint verified
+## 3. Embeddings infrastructure  — ✅ endpoint verified; bge-m3 locked
 
-Locked: OpenAI-compatible `/v1/embeddings` endpoint, hosted or local loopback (D5). Document and query embeddings must share one fingerprint; mismatch is a hard error (DESIGN §11.2). **Verified working: `bge-m3` via local `llama.cpp` — full launch command, test results, and config fingerprint in [`embeddings-endpoint.md`](./embeddings-endpoint.md).** Model choice stays eval-gated at 1.7.
+Locked: OpenAI-compatible `/v1/embeddings` endpoint, hosted or local loopback (D5). Document and query embeddings must share one fingerprint; mismatch is a hard error (DESIGN §11.2). **Verified: `bge-m3` via local `llama.cpp`, now LOCKED as v1 (D21) after CamemBERT/Solon validation — launch command, test results, fingerprint, and the measured 3-node build-time throughput pool in [`embeddings-endpoint.md`](./embeddings-endpoint.md).**
 
 | Prerequisite | Target | Notes |
 |---|---|---|
 | **An embeddings endpoint** | `llama.cpp` server on `127.0.0.1` **or** a hosted OpenAI-compatible API | Required for 0.4 and 0.6. A local endpoint is still treated as a "remote provider." |
-| **`bge-m3` model** | provisional benchmark-default (1024-dim, CLS pooling, normalize) | RESEARCH §2; config block in DESIGN §14. `llama.cpp` requires pooling ≠ `none` and a dedicated embedding model (not a chat model). |
-| **Phase 1 candidate models** | `sentence-camembert-large`, Solon, ≥1 strong hosted multilingual | For the 1.7 embedding-model gate; served through the same endpoint. |
+| **`bge-m3` model** | **locked v1** (D21) — 1024-dim, CLS pooling, normalize | RESEARCH §2; config in DESIGN §14. `llama.cpp` requires pooling ≠ `none` and a dedicated embedding model (not a chat model). |
+| ~~Phase 1 candidate models~~ — done | `sentence-camembert-large`, `Solon` validated 2026-06-22 | Both statistically tied bge-m3 → bge-m3 locked (D21); bake-off retired. |
 | **Model cache (in-process mode only)** | `JURISEARCH_MODEL_DIR` (default `~/.cache/jurisearch/models`) | Only if `provider = in_process` (`fastembed-rs`); downloads off by default, `model fetch` to populate. |
-| **GPU/CPU** | CPU sufficient for query-time (query is tiny); doc embedding at ingestion benefits from throughput | Plan embedding throughput for full-LEGI ingestion (1.1). |
+| **GPU/CPU + build-time pool** | 3 fingerprint-identical bge-m3 nodes (localhost + `192.168.1.57` + `.27`) | Measured 2026-06-22: localhost ~58 t/s (slow/contended), remotes ~146–194 t/s, pooled ~288 t/s → the ~1.85 M-chunk dense projection drops ~8.9 h → ~1.8 h (~5×). Build-time only; retrieval uses localhost. See `embeddings-endpoint.md`. |
 
 **Fingerprint contract to fix up front:** provider, base-url class, model, dimension, normalization, pooling — pinned in the manifest. Decide the Phase 0 endpoint (local vs hosted) before 0.4.
 

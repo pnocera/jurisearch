@@ -156,7 +156,8 @@ fn chunk_embedding_inputs_prefer_contextualized_body_and_honor_limit() -> Result
             'sha256:article-2', 'chunker:v0', NULL);",
     )?;
 
-    let limited = load_chunk_embedding_inputs(&postgres, Some(1))?;
+    let limited =
+        load_chunk_embedding_inputs(&postgres, EMBEDDING_FINGERPRINT, "bge-m3", 1024, Some(1))?;
     assert_eq!(limited.len(), 1);
     assert_eq!(limited[0].chunk_id, "chunk:article-1:0");
     assert_eq!(
@@ -164,10 +165,29 @@ fn chunk_embedding_inputs_prefer_contextualized_body_and_honor_limit() -> Result
         "Code civil > Article 1\nDisposition generale contextualisee."
     );
 
-    let all = load_chunk_embedding_inputs(&postgres, None)?;
+    let all = load_chunk_embedding_inputs(&postgres, EMBEDDING_FINGERPRINT, "bge-m3", 1024, None)?;
     assert_eq!(all.len(), 2);
     assert_eq!(all[1].chunk_id, "chunk:article-2:0");
     assert_eq!(all[1].embedding_text, "fallback body should be embedded");
+
+    postgres.execute_sql(&format!(
+        "INSERT INTO chunk_embeddings \
+           (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES \
+           ('chunk:article-1:0', '{embedding_fingerprint}', '{matching_vector}', 'bge-m3', 1024), \
+           ('chunk:article-2:0', 'stale-fingerprint', '{stale_vector}', 'bge-m3', 1024);",
+        embedding_fingerprint = EMBEDDING_FINGERPRINT,
+        matching_vector = vector_literal(0),
+        stale_vector = vector_literal(1),
+    ))?;
+    let pending =
+        load_chunk_embedding_inputs(&postgres, EMBEDDING_FINGERPRINT, "bge-m3", 1024, None)?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].chunk_id, "chunk:article-2:0");
+    assert_eq!(
+        pending[0].embedding_text,
+        "fallback body should be embedded"
+    );
 
     Ok(())
 }

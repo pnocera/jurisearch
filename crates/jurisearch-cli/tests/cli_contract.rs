@@ -4,6 +4,7 @@ use std::{
     net::TcpListener,
     path::Path,
     thread,
+    time::Duration,
 };
 
 use assert_cmd::Command;
@@ -27,6 +28,7 @@ fn jurisearch_command_without_embedding_env() -> Command {
         "XDG_CONFIG_HOME",
         "JURISEARCH_EMBED_PROVIDER",
         "JURISEARCH_EMBED_BASE_URL",
+        "JURISEARCH_EMBED_BASE_URLS",
         "JURISEARCH_EMBED_API_KEY",
         "JURISEARCH_EMBED_MODEL",
         "JURISEARCH_EMBED_DIMENSION",
@@ -437,6 +439,7 @@ fn status_loads_embedding_config_file_and_redacts_secrets() {
 [embedding]
 provider = "openai_compatible"
 base_url = "https://embeddings.example.test/v1"
+base_urls = ["https://embeddings-1.example.test/v1", "https://embeddings-2.example.test/v1"]
 api_key = "file-secret-token"
 model = "custom-embed"
 dimension = 768
@@ -470,6 +473,13 @@ reembeddable = false
     assert_eq!(
         json["embedding"]["base_url"],
         "https://embeddings.example.test/v1"
+    );
+    assert_eq!(
+        json["embedding"]["base_urls"],
+        serde_json::json!([
+            "https://embeddings-1.example.test/v1",
+            "https://embeddings-2.example.test/v1"
+        ])
     );
     assert_eq!(json["embedding"]["base_url_class"], "hosted");
     assert_eq!(json["embedding"]["model"], "custom-embed");
@@ -519,6 +529,10 @@ dimension = 768
         .env_remove("JURISEARCH_INDEX_DIR")
         .env("XDG_CONFIG_HOME", config_home.path())
         .env("JURISEARCH_EMBED_BASE_URL", "http://127.0.0.1:9/v1")
+        .env(
+            "JURISEARCH_EMBED_BASE_URLS",
+            "http://127.0.0.1:9/v1, http://127.0.0.1:10/v1",
+        )
         .env("JURISEARCH_EMBED_API_KEY", "env-secret-token")
         .env("JURISEARCH_EMBED_MODEL", "env-model")
         .env("JURISEARCH_EMBED_DIMENSION", "1024")
@@ -535,6 +549,10 @@ dimension = 768
     assert!(!stdout.contains("env-secret-token"));
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["embedding"]["base_url"], "http://127.0.0.1:9/v1");
+    assert_eq!(
+        json["embedding"]["base_urls"],
+        serde_json::json!(["http://127.0.0.1:9/v1", "http://127.0.0.1:10/v1"])
+    );
     assert_eq!(json["embedding"]["base_url_class"], "local_loopback");
     assert_eq!(json["embedding"]["model"], "env-model");
     assert_eq!(json["embedding"]["dimension"], 1024);
@@ -1630,6 +1648,29 @@ fn ingest_embed_chunks_rejects_zero_index_lists_before_opening_index() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "bad_input");
+}
+
+#[test]
+fn ingest_embed_chunks_rejects_zero_pool_knobs_before_opening_index() {
+    for args in [
+        ["ingest", "embed-chunks", "--batch-size", "0"],
+        ["ingest", "embed-chunks", "--pool-concurrency", "0"],
+    ] {
+        let output = Command::cargo_bin("jurisearch")
+            .unwrap()
+            .env_remove("JURISEARCH_INDEX_DIR")
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::is_empty())
+            .get_output()
+            .stdout
+            .clone();
+
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["error"]["code"], "bad_input");
+    }
 }
 
 #[test]
@@ -3230,6 +3271,119 @@ fn ingest_embed_chunks_budget_error_names_offending_chunk() -> Result<(), Storag
 }
 
 #[test]
+fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI embed chunk endpoint pool")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-embed-pool.")
+        .tempdir()?;
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config.clone(), root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', \
+                 'Article 1240', 'Texte pour la projection dense.', \
+                 '1804-02-21', 'sha256:article-1240', '{\"chunks\":[]}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:pool:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'alpha', 'alpha', 'sha256:article-1240', 'chunker:v0', NULL), \
+                ('chunk:pool:1', 'legi:LEGIARTI000006419320@1804-02-21', 1, \
+                 'beta', 'beta', 'sha256:article-1240', 'chunker:v0', NULL);",
+        )?;
+    }
+
+    let slow_endpoint = spawn_server(1, |request| {
+        assert!(request.starts_with("POST /v1/embeddings "));
+        thread::sleep(Duration::from_millis(150));
+        ok_json(&embedding_response_json(0))
+    });
+    let fast_endpoint = spawn_server(1, |request| {
+        assert!(request.starts_with("POST /v1/embeddings "));
+        ok_json(&embedding_response_json(1))
+    });
+    let base_urls = format!("{slow_endpoint}/v1,{fast_endpoint}/v1");
+    let primary_base_url = "http://127.0.0.1:1/v1";
+
+    let output = jurisearch_command_without_embedding_env()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_CONFIG", "none")
+        .env("JURISEARCH_EMBED_BASE_URL", primary_base_url)
+        .env("JURISEARCH_EMBED_BASE_URLS", base_urls)
+        .args([
+            "ingest",
+            "embed-chunks",
+            "--batch-size",
+            "1",
+            "--pool-concurrency",
+            "2",
+            "--index-lists",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "ingest embed-chunks");
+    assert_eq!(json["chunks_considered"], 2);
+    assert_eq!(json["embeddings_inserted"], 2);
+    assert_eq!(
+        json["endpoint_pool"]["strategy"],
+        "least_outstanding_requests"
+    );
+    assert_eq!(json["endpoint_pool"]["batch_size"], 1);
+    assert_eq!(json["endpoint_pool"]["pool_concurrency"], 2);
+    let endpoints = json["endpoint_pool"]["endpoints"].as_array().unwrap();
+    assert_eq!(endpoints.len(), 2);
+    assert!(
+        endpoints
+            .iter()
+            .all(|endpoint| endpoint["base_url"].as_str().unwrap() != primary_base_url)
+    );
+    assert!(endpoints.iter().all(|endpoint| {
+        endpoint["requests"].as_u64().unwrap() == 1 && endpoint["chunks"].as_u64().unwrap() == 1
+    }));
+    assert_eq!(
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint["chunks"].as_u64().unwrap())
+            .sum::<u64>(),
+        2
+    );
+    assert_eq!(json["dense_rebuild"]["chunks"], 2);
+    assert_eq!(json["dense_rebuild"]["embeddings"], 2);
+
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    assert_eq!(
+        postgres.execute_sql("SELECT count(*)::text FROM chunk_embeddings;")?,
+        "2"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM chunks \
+             WHERE embedding_fingerprint = 'bge-m3:1024:normalize:true';",
+        )?,
+        "2"
+    );
+
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires a running OpenAI-compatible bge-m3 embeddings endpoint"]
 fn ingest_embed_chunks_uses_live_endpoint_and_finalizes_dense_index()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -3697,6 +3851,20 @@ fn unit_vector_literal(active_index: usize) -> String {
         .map(|index| if index == active_index { 1.0 } else { 0.0 })
         .collect::<Vec<_>>();
     pgvector_literal(&values)
+}
+
+fn embedding_response_json(active_index: usize) -> String {
+    let values = (0..1024)
+        .map(|index| {
+            if index == active_index {
+                "1.0".to_owned()
+            } else {
+                "0.0".to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"{{"data":[{{"embedding":[{values}]}}]}}"#)
 }
 
 fn spawn_server(

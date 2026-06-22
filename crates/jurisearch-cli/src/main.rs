@@ -1,10 +1,16 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     io::{self, BufRead, Write},
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,7 +28,9 @@ use jurisearch_core::{
     schema::compiled_schema,
     session::{SessionRequest, SessionResponse},
 };
-use jurisearch_embed::{EmbeddingConfig, EmbeddingProvider, OpenAiCompatibleClient};
+use jurisearch_embed::{
+    EmbeddingConfig, EmbeddingFingerprint, EmbeddingProvider, OpenAiCompatibleClient,
+};
 use jurisearch_ingest::{
     archive::{
         ArchiveMember, ArchivePlan, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
@@ -31,6 +39,7 @@ use jurisearch_ingest::{
     legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
 use jurisearch_official_api::{OfficialApiConfig, PisteClient};
+use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
     citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
     dense::{
@@ -69,6 +78,8 @@ const MODEL_CACHE_REQUIRED_FILES: &[&str] = &["model.onnx", "tokenizer.json"];
 const LOOPBACK_ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const LEGI_INGEST_TRANSACTION_BATCH_SIZE: usize = 128;
 const LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT: usize = 64 * 1024 * 1024;
+const EMBED_CHUNKS_DEFAULT_BATCH_SIZE: usize = 32;
+const EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -344,6 +355,12 @@ enum IngestSubcommand {
         /// Number of ivfflat lists to use when rebuilding the dense vector index.
         #[arg(long, default_value_t = 32)]
         index_lists: u32,
+        /// Number of chunk texts sent per embeddings request.
+        #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_BATCH_SIZE)]
+        batch_size: usize,
+        /// Maximum concurrent embedding requests across the endpoint pool.
+        #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY)]
+        pool_concurrency: usize,
     },
     /// Rebuild LEGI article hierarchy from persisted metadata across the full index.
     BackfillLegiHierarchy,
@@ -1181,7 +1198,12 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 Err(error) => emit_error(error),
             }
         }
-        Some(IngestSubcommand::EmbedChunks { limit, index_lists }) => {
+        Some(IngestSubcommand::EmbedChunks {
+            limit,
+            index_lists,
+            batch_size,
+            pool_concurrency,
+        }) => {
             if limit == Some(0) {
                 return emit_error(ErrorObject::bad_input(
                     "ingest embed-chunks --limit must be at least 1 when provided",
@@ -1192,7 +1214,18 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                     "ingest embed-chunks --index-lists must be at least 1",
                 ));
             }
-            match embed_chunks_payload(index_dir, limit, index_lists) {
+            if batch_size == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-chunks --batch-size must be at least 1",
+                ));
+            }
+            if pool_concurrency == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-chunks --pool-concurrency must be at least 1",
+                ));
+            }
+            match embed_chunks_payload(index_dir, limit, index_lists, batch_size, pool_concurrency)
+            {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
             }
@@ -2042,6 +2075,8 @@ fn embed_chunks_payload(
     index_dir: Option<&Path>,
     limit: Option<u32>,
     index_lists: u32,
+    batch_size: usize,
+    pool_concurrency: usize,
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
@@ -2049,6 +2084,11 @@ fn embed_chunks_payload(
     ensure_embedding_runtime_ready(&embedding_config, false)?;
     let expected_fingerprint = embedding_config.fingerprint();
     let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
+    let endpoint_configs = embedding_endpoint_pool_configs(
+        &embedding_config,
+        &expected_fingerprint,
+        embedding_fingerprint.as_str(),
+    )?;
     let dimension = i32::try_from(embedding_config.dimension).map_err(|_| {
         dependency_unavailable(format!(
             "embedding dimension {} is too large for dense rebuild metadata",
@@ -2063,8 +2103,14 @@ fn embed_chunks_payload(
     }
 
     let load_limit = limit.map(|value| value.saturating_add(1));
-    let inputs =
-        load_chunk_embedding_inputs(&postgres, load_limit).map_err(storage_error_object)?;
+    let inputs = load_chunk_embedding_inputs(
+        &postgres,
+        embedding_fingerprint.as_str(),
+        embedding_config.model.as_str(),
+        dimension,
+        load_limit,
+    )
+    .map_err(storage_error_object)?;
     if let Some(limit) = limit {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         if inputs.len() > limit {
@@ -2077,29 +2123,17 @@ fn embed_chunks_payload(
         return Err(no_results("no chunks are available to embed"));
     }
 
-    let client =
-        OpenAiCompatibleClient::new(embedding_config.clone()).map_err(embedding_error_object)?;
-    let mut owned_embeddings = Vec::with_capacity(inputs.len());
-    for input in &inputs {
-        let embedding = client
-            .embed_query(input.embedding_text.as_str(), &expected_fingerprint)
-            .map_err(|error| embedding_error_object_with_context(error, &input.chunk_id))?;
-        owned_embeddings.push((input.chunk_id.clone(), pgvector_literal(&embedding.values)));
-    }
-    let embeddings = owned_embeddings
-        .iter()
-        .map(|(chunk_id, embedding_literal)| ChunkEmbeddingInsert {
-            chunk_id: chunk_id.as_str(),
-            embedding_fingerprint: embedding_fingerprint.as_str(),
-            embedding_literal: embedding_literal.as_str(),
-            model: embedding_config.model.as_str(),
-            dimension: embedding_config.dimension,
-        })
-        .collect::<Vec<_>>();
     // Embedding upserts and dense finalization are separate recoverable steps:
     // re-running the command converges before the manifest/index is advertised.
-    let embeddings_inserted =
-        insert_chunk_embeddings(&postgres, &embeddings).map_err(storage_error_object)?;
+    let embedding_run = embed_and_insert_chunks_with_pool(
+        &postgres,
+        inputs,
+        &endpoint_configs,
+        embedding_fingerprint.as_str(),
+        &embedding_config,
+        batch_size,
+        pool_concurrency,
+    )?;
     let rebuild = finalize_dense_rebuild(
         &postgres,
         &DenseRebuildSpec {
@@ -2119,13 +2153,14 @@ fn embed_chunks_payload(
         "command": "ingest embed-chunks",
         "index_dir": index_dir,
         "limit": limit,
-        "chunks_considered": inputs.len(),
-        "embeddings_inserted": embeddings_inserted,
+        "chunks_considered": embedding_run.chunks_considered,
+        "embeddings_inserted": embedding_run.embeddings_inserted,
         "embedding": {
             "model": embedding_config.model,
             "dimension": embedding_config.dimension,
             "normalize": embedding_config.normalize,
             "pooling": embedding_config.pooling,
+            "base_urls": embedding_config.base_urls.clone(),
             "max_input_chars": embedding_config.max_input_chars,
             "max_estimated_tokens": embedding_config.max_estimated_tokens,
             "estimated_chars_per_token": embedding_config.estimated_chars_per_token,
@@ -2135,6 +2170,12 @@ fn embed_chunks_payload(
             "provisional": embedding_config.provisional,
             "reembeddable": embedding_config.reembeddable
         },
+        "endpoint_pool": {
+            "strategy": "least_outstanding_requests",
+            "batch_size": batch_size,
+            "pool_concurrency": pool_concurrency,
+            "endpoints": embedding_run.endpoint_stats
+        },
         "dense_rebuild": {
             "chunks": rebuild.chunks,
             "embeddings": rebuild.embeddings,
@@ -2143,6 +2184,353 @@ fn embed_chunks_payload(
             "index_lists": rebuild.index_lists
         }
     }))
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingEndpointPoolConfig {
+    base_url: String,
+    config: EmbeddingConfig,
+    expected_fingerprint: EmbeddingFingerprint,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingEndpointState {
+    base_url: String,
+    outstanding: usize,
+    requests: usize,
+    chunks: usize,
+    failures: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingBatchWork {
+    inputs: Vec<ChunkEmbeddingInput>,
+}
+
+#[derive(Debug, Clone)]
+struct OwnedChunkEmbedding {
+    chunk_id: String,
+    embedding_literal: String,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingBatchSuccess {
+    embeddings: Vec<OwnedChunkEmbedding>,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingBatchFailure {
+    error: ErrorObject,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingPoolRun {
+    chunks_considered: usize,
+    embeddings_inserted: usize,
+    endpoint_stats: Vec<Value>,
+}
+
+fn embedding_endpoint_pool_configs(
+    config: &EmbeddingConfig,
+    expected_fingerprint: &EmbeddingFingerprint,
+    storage_embedding_fingerprint: &str,
+) -> Result<Vec<EmbeddingEndpointPoolConfig>, ErrorObject> {
+    if !matches!(config.provider, EmbeddingProvider::OpenAiCompatible) {
+        return Err(embedding_error_object(
+            jurisearch_embed::EmbeddingError::UnsupportedProvider {
+                provider: config.provider,
+            },
+        ));
+    }
+
+    let mut base_urls = config
+        .base_urls
+        .iter()
+        .filter_map(|base_url| nonempty_string(Some(base_url.clone())))
+        .collect::<Vec<_>>();
+    if base_urls.is_empty()
+        && let Some(base_url) = config
+            .base_url
+            .clone()
+            .and_then(|base_url| nonempty_string(Some(base_url)))
+    {
+        base_urls.push(base_url);
+    }
+    let mut deduped_base_urls = Vec::new();
+    for base_url in base_urls {
+        if !deduped_base_urls.contains(&base_url) {
+            deduped_base_urls.push(base_url);
+        }
+    }
+    if deduped_base_urls.is_empty() {
+        return Err(embedding_error_object(
+            jurisearch_embed::EmbeddingError::MissingBaseUrl,
+        ));
+    }
+
+    deduped_base_urls
+        .into_iter()
+        .map(|base_url| {
+            let mut endpoint_config = config.clone();
+            endpoint_config.base_url = Some(base_url.clone());
+            endpoint_config.base_urls = vec![base_url.clone()];
+            let endpoint_fingerprint = endpoint_config.fingerprint();
+            if endpoint_fingerprint.provider != expected_fingerprint.provider
+                || endpoint_fingerprint.model != expected_fingerprint.model
+                || endpoint_fingerprint.dimension != expected_fingerprint.dimension
+                || endpoint_fingerprint.normalize != expected_fingerprint.normalize
+                || endpoint_fingerprint.pooling != expected_fingerprint.pooling
+                || endpoint_fingerprint.storage_embedding_fingerprint()
+                    != storage_embedding_fingerprint
+            {
+                return Err(dependency_unavailable(format!(
+                    "embedding endpoint `{base_url}` does not match the selected model fingerprint"
+                )));
+            }
+            Ok(EmbeddingEndpointPoolConfig {
+                base_url,
+                config: endpoint_config,
+                expected_fingerprint: endpoint_fingerprint,
+            })
+        })
+        .collect()
+}
+
+fn embed_and_insert_chunks_with_pool(
+    postgres: &ManagedPostgres,
+    inputs: Vec<ChunkEmbeddingInput>,
+    endpoint_configs: &[EmbeddingEndpointPoolConfig],
+    embedding_fingerprint: &str,
+    embedding_config: &EmbeddingConfig,
+    batch_size: usize,
+    pool_concurrency: usize,
+) -> Result<EmbeddingPoolRun, ErrorObject> {
+    let chunks_considered = inputs.len();
+    let work_queue = inputs
+        .chunks(batch_size)
+        .map(|inputs| EmbeddingBatchWork {
+            inputs: inputs.to_vec(),
+        })
+        .collect::<VecDeque<_>>();
+    let worker_count = pool_concurrency.min(work_queue.len().max(1));
+    let work_queue = Arc::new(Mutex::new(work_queue));
+    let endpoint_configs = Arc::new(endpoint_configs.to_vec());
+    let endpoint_states = Arc::new(Mutex::new(
+        endpoint_configs
+            .iter()
+            .map(|config| EmbeddingEndpointState {
+                base_url: config.base_url.clone(),
+                outstanding: 0,
+                requests: 0,
+                chunks: 0,
+                failures: 0,
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let (sender, receiver) =
+        mpsc::channel::<Result<EmbeddingBatchSuccess, EmbeddingBatchFailure>>();
+    let mut handles = Vec::with_capacity(worker_count);
+
+    for _ in 0..worker_count {
+        let work_queue = Arc::clone(&work_queue);
+        let endpoint_configs = Arc::clone(&endpoint_configs);
+        let endpoint_states = Arc::clone(&endpoint_states);
+        let stop_requested = Arc::clone(&stop_requested);
+        let sender = sender.clone();
+        handles.push(thread::spawn(move || {
+            embedding_pool_worker(
+                work_queue,
+                endpoint_configs,
+                endpoint_states,
+                stop_requested,
+                sender,
+            );
+        }));
+    }
+    drop(sender);
+
+    let mut embeddings_inserted = 0usize;
+    let mut first_error = None::<ErrorObject>;
+    for message in receiver {
+        match message {
+            Ok(success) => {
+                if first_error.is_some() {
+                    continue;
+                }
+                let inserts = success
+                    .embeddings
+                    .iter()
+                    .map(|embedding| ChunkEmbeddingInsert {
+                        chunk_id: embedding.chunk_id.as_str(),
+                        embedding_fingerprint,
+                        embedding_literal: embedding.embedding_literal.as_str(),
+                        model: embedding_config.model.as_str(),
+                        dimension: embedding_config.dimension,
+                    })
+                    .collect::<Vec<_>>();
+                match insert_chunk_embeddings(postgres, &inserts).map_err(storage_error_object) {
+                    Ok(inserted) => {
+                        embeddings_inserted += inserted;
+                    }
+                    Err(error) => {
+                        stop_requested.store(true, Ordering::SeqCst);
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+            Err(failure) => {
+                stop_requested.store(true, Ordering::SeqCst);
+                first_error.get_or_insert(failure.error);
+            }
+        }
+    }
+
+    for handle in handles {
+        if handle.join().is_err() && first_error.is_none() {
+            first_error = Some(dependency_unavailable(
+                "embedding endpoint pool worker panicked".to_owned(),
+            ));
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
+    let endpoint_stats = endpoint_states
+        .lock()
+        .expect("embedding endpoint state lock")
+        .iter()
+        .map(|state| {
+            json!({
+                "base_url": state.base_url.as_str(),
+                "requests": state.requests,
+                "chunks": state.chunks,
+                "failures": state.failures
+            })
+        })
+        .collect();
+
+    Ok(EmbeddingPoolRun {
+        chunks_considered,
+        embeddings_inserted,
+        endpoint_stats,
+    })
+}
+
+fn embedding_pool_worker(
+    work_queue: Arc<Mutex<VecDeque<EmbeddingBatchWork>>>,
+    endpoint_configs: Arc<Vec<EmbeddingEndpointPoolConfig>>,
+    endpoint_states: Arc<Mutex<Vec<EmbeddingEndpointState>>>,
+    stop_requested: Arc<AtomicBool>,
+    sender: mpsc::Sender<Result<EmbeddingBatchSuccess, EmbeddingBatchFailure>>,
+) {
+    let clients = match endpoint_configs
+        .iter()
+        .map(|config| OpenAiCompatibleClient::new(config.config.clone()))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(clients) => clients,
+        Err(error) => {
+            stop_requested.store(true, Ordering::SeqCst);
+            let _ = sender.send(Err(EmbeddingBatchFailure {
+                error: embedding_error_object(error),
+            }));
+            return;
+        }
+    };
+
+    while !stop_requested.load(Ordering::SeqCst) {
+        let Some(work) = work_queue
+            .lock()
+            .expect("embedding work queue lock")
+            .pop_front()
+        else {
+            return;
+        };
+        let endpoint_index = acquire_least_outstanding_endpoint(&endpoint_states);
+        let result = embed_batch_on_endpoint(
+            &clients[endpoint_index],
+            &endpoint_configs[endpoint_index],
+            &work,
+        );
+        release_embedding_endpoint(&endpoint_states, endpoint_index, work.inputs.len(), &result);
+        if sender.send(result).is_err() {
+            return;
+        }
+    }
+}
+
+fn acquire_least_outstanding_endpoint(
+    endpoint_states: &Arc<Mutex<Vec<EmbeddingEndpointState>>>,
+) -> usize {
+    let mut states = endpoint_states
+        .lock()
+        .expect("embedding endpoint state lock");
+    let endpoint_index = states
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, state)| (state.outstanding, state.requests))
+        .map(|(index, _)| index)
+        .expect("at least one embedding endpoint");
+    states[endpoint_index].outstanding += 1;
+    states[endpoint_index].requests += 1;
+    endpoint_index
+}
+
+fn release_embedding_endpoint(
+    endpoint_states: &Arc<Mutex<Vec<EmbeddingEndpointState>>>,
+    endpoint_index: usize,
+    chunk_count: usize,
+    result: &Result<EmbeddingBatchSuccess, EmbeddingBatchFailure>,
+) {
+    let mut states = endpoint_states
+        .lock()
+        .expect("embedding endpoint state lock");
+    let state = &mut states[endpoint_index];
+    state.outstanding = state.outstanding.saturating_sub(1);
+    match result {
+        Ok(_) => state.chunks += chunk_count,
+        Err(_) => state.failures += 1,
+    }
+}
+
+fn embed_batch_on_endpoint(
+    client: &OpenAiCompatibleClient,
+    endpoint_config: &EmbeddingEndpointPoolConfig,
+    work: &EmbeddingBatchWork,
+) -> Result<EmbeddingBatchSuccess, EmbeddingBatchFailure> {
+    let input_texts = work
+        .inputs
+        .iter()
+        .map(|input| input.embedding_text.as_str())
+        .collect::<Vec<_>>();
+    let embeddings = client
+        .embed_batch(&input_texts, &endpoint_config.expected_fingerprint)
+        .map_err(|error| {
+            let chunk_id = work
+                .inputs
+                .first()
+                .map(|input| input.chunk_id.as_str())
+                .unwrap_or("<empty-batch>");
+            let mut object = embedding_error_object_with_context(error, chunk_id);
+            object.message = format!(
+                "embedding endpoint `{}` failed: {}",
+                endpoint_config.base_url, object.message
+            );
+            EmbeddingBatchFailure { error: object }
+        })?;
+    let embeddings = work
+        .inputs
+        .iter()
+        .zip(embeddings)
+        .map(|(input, embedding)| OwnedChunkEmbedding {
+            chunk_id: input.chunk_id.clone(),
+            embedding_literal: pgvector_literal(&embedding.values),
+        })
+        .collect();
+    Ok(EmbeddingBatchSuccess { embeddings })
 }
 
 fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {
@@ -2216,6 +2604,7 @@ struct EmbeddingConfigFile {
     #[serde(default, deserialize_with = "deserialize_embedding_provider_option")]
     provider: Option<EmbeddingProvider>,
     base_url: Option<String>,
+    base_urls: Option<Vec<String>>,
     api_key: Option<String>,
     model: Option<String>,
     dimension: Option<usize>,
@@ -2346,12 +2735,21 @@ fn apply_embedding_file_config(config: &mut EmbeddingConfig, file_config: Embedd
         config.provider = provider;
         if matches!(provider, EmbeddingProvider::InProcess) {
             config.base_url = None;
+            config.base_urls.clear();
             config.api_key = None;
         }
     }
     if let Some(base_url) = nonempty_string(file_config.base_url) {
         config.provider = EmbeddingProvider::OpenAiCompatible;
-        config.base_url = Some(base_url);
+        config.base_url = Some(base_url.clone());
+        config.base_urls = vec![base_url];
+    }
+    if let Some(base_urls) = nonempty_string_list(file_config.base_urls) {
+        config.provider = EmbeddingProvider::OpenAiCompatible;
+        config.base_urls = base_urls;
+        if config.base_url.is_none() {
+            config.base_url = config.base_urls.first().cloned();
+        }
     }
     if let Some(api_key) = nonempty_string(file_config.api_key) {
         config.api_key = Some(api_key);
@@ -2401,6 +2799,7 @@ fn apply_embedding_env_overrides(embedding_config: &mut EmbeddingConfig) {
         embedding_config.provider = provider;
         if matches!(provider, EmbeddingProvider::InProcess) {
             embedding_config.base_url = None;
+            embedding_config.base_urls.clear();
             embedding_config.api_key = None;
         }
     }
@@ -2408,7 +2807,17 @@ fn apply_embedding_env_overrides(embedding_config: &mut EmbeddingConfig) {
         && let Some(base_url) = nonempty_string(Some(base_url))
     {
         embedding_config.provider = EmbeddingProvider::OpenAiCompatible;
-        embedding_config.base_url = Some(base_url);
+        embedding_config.base_url = Some(base_url.clone());
+        embedding_config.base_urls = vec![base_url];
+    }
+    if let Ok(base_urls) = std::env::var("JURISEARCH_EMBED_BASE_URLS")
+        && let Some(base_urls) = parse_embedding_base_urls_env(&base_urls)
+    {
+        embedding_config.provider = EmbeddingProvider::OpenAiCompatible;
+        embedding_config.base_urls = base_urls;
+        if embedding_config.base_url.is_none() {
+            embedding_config.base_url = embedding_config.base_urls.first().cloned();
+        }
     }
     if let Ok(api_key) = std::env::var("JURISEARCH_EMBED_API_KEY")
         && let Some(api_key) = nonempty_string(Some(api_key))
@@ -2464,6 +2873,30 @@ fn nonempty_string(value: Option<String>) -> Option<String> {
     })
 }
 
+fn nonempty_string_list(values: Option<Vec<String>>) -> Option<Vec<String>> {
+    let values = values?
+        .into_iter()
+        .filter_map(|value| nonempty_string(Some(value)))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
+fn parse_embedding_base_urls_env(value: &str) -> Option<Vec<String>> {
+    let values = value
+        .split(|character: char| character == ',' || character == ';' || character.is_whitespace())
+        .filter_map(|value| nonempty_string(Some(value.to_owned())))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
 fn deserialize_embedding_provider_option<'de, D>(
     deserializer: D,
 ) -> Result<Option<EmbeddingProvider>, D::Error>
@@ -2487,6 +2920,7 @@ fn nonzero_usize(value: usize) -> Option<usize> {
 fn clear_unused_in_process_secret_fields(config: &mut EmbeddingConfig) {
     if matches!(config.provider, EmbeddingProvider::InProcess) {
         config.base_url = None;
+        config.base_urls.clear();
         config.api_key = None;
     }
 }
@@ -2892,6 +3326,7 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
         "embedding": {
             "provider": embedding_fingerprint.provider,
             "base_url": embedding_base_url,
+            "base_urls": embedding_config.base_urls.clone(),
             "base_url_class": embedding_fingerprint.base_url_class,
             "model": embedding_fingerprint.model,
             "dimension": embedding_fingerprint.dimension,
@@ -3743,7 +4178,10 @@ fn embedding_error_object(error: jurisearch_embed::EmbeddingError) -> ErrorObjec
         jurisearch_embed::EmbeddingError::InputTooLong(_) => ErrorObject::bad_input(message),
         jurisearch_embed::EmbeddingError::Endpoint(_)
         | jurisearch_embed::EmbeddingError::InvalidResponse(_)
-        | jurisearch_embed::EmbeddingError::EmptyResponse => upstream_unavailable(message),
+        | jurisearch_embed::EmbeddingError::EmptyResponse
+        | jurisearch_embed::EmbeddingError::BatchSizeMismatch { .. } => {
+            upstream_unavailable(message)
+        }
         _ => dependency_unavailable(message),
     }
 }
