@@ -1905,6 +1905,13 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         )?,
         "validation_missing_required_field"
     );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text FROM pg_class \
+             WHERE relkind = 'i' AND relname = 'chunks_bm25_idx';"
+        )?,
+        "1"
+    );
     drop(postgres);
 
     let output = Command::cargo_bin("jurisearch")
@@ -1934,6 +1941,19 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         3
     );
 
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config.clone(), index.path())?;
+        postgres.execute_sql(
+            "UPDATE documents \
+             SET canonical_json = jsonb_set(canonical_json, '{hierarchy_path}', '[\"Code civil\"]'::jsonb), \
+                 hierarchy_path = '[\"Code civil\"]'::jsonb \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21'; \
+             UPDATE chunks \
+             SET contextualized_body = body, hierarchy_path = '[]'::jsonb \
+             WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+        )?;
+    }
+
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
         .arg("--index-dir")
@@ -1954,6 +1974,36 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
     assert_eq!(json["inserted_documents"], 0);
     assert_eq!(json["skipped_members"], 1);
     assert_eq!(json["skipped_compatible_members"], 1);
+    assert_eq!(json["hierarchy_backfill_scoped_documents"], 0);
+    assert_eq!(json["hierarchy_backfilled_documents"], 1);
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config.clone(), index.path())?;
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT canonical_json->'hierarchy_path'->>3 \
+                 FROM documents \
+                 WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+            )?,
+            "Titre preliminaire"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT contextualized_body LIKE '%Titre preliminaire%Article 1240%', \
+                        hierarchy_path->>3 \
+                 FROM chunks \
+                 WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
+            )?,
+            "t|Titre preliminaire"
+        );
+        assert_eq!(
+            postgres.execute_sql(
+                "SELECT count(*)::text FROM pg_class \
+                 WHERE relkind = 'i' AND relname = 'chunks_bm25_idx';"
+            )?,
+            "1"
+        );
+    }
 
     write_tar_gz(
         archive_path.as_path(),

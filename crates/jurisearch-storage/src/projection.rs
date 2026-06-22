@@ -1,6 +1,7 @@
 use jurisearch_ingest::legi::{
     CanonicalDocument, CanonicalGraphEdge, ParsedSectionTa, ParsedTextStruct, ParsedTextVersion,
 };
+use postgres::GenericClient;
 
 use crate::runtime::{ManagedPostgres, StorageError};
 
@@ -62,8 +63,21 @@ pub fn insert_legi_documents(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    let report = insert_legi_documents_with_client(
+        &mut transaction,
+        documents,
+        chunk_embedding_fingerprint,
+    )?;
+    transaction.commit().map_err(StorageError::PostgresClient)?;
+    Ok(report)
+}
 
-    let document_statement = transaction
+pub fn insert_legi_documents_with_client<C: GenericClient>(
+    client: &mut C,
+    documents: &[CanonicalDocument],
+    chunk_embedding_fingerprint: Option<&str>,
+) -> Result<CanonicalInsertReport, StorageError> {
+    let document_statement = client
         .prepare(
             "INSERT INTO documents \
                 (document_id, source, kind, source_uid, version_group, citation, title, body, \
@@ -91,7 +105,7 @@ pub fn insert_legi_documents(
                 updated_at = now();",
         )
         .map_err(StorageError::PostgresClient)?;
-    let chunk_statement = transaction
+    let chunk_statement = client
         .prepare(
             "INSERT INTO chunks \
                 (chunk_id, document_id, chunk_index, body, contextualized_body, chunk_kind, \
@@ -115,7 +129,7 @@ pub fn insert_legi_documents(
                 embedding_fingerprint = EXCLUDED.embedding_fingerprint;",
         )
         .map_err(StorageError::PostgresClient)?;
-    let edge_statement = transaction
+    let edge_statement = client
         .prepare(
             "INSERT INTO graph_edges \
                 (edge_id, from_document_id, to_document_id, edge_kind, edge_source, payload) \
@@ -142,7 +156,7 @@ pub fn insert_legi_documents(
             })?;
         let canonical_json = serde_json::to_string(document)?;
         let document_hierarchy_path = serde_json::to_string(&document.hierarchy_path)?;
-        transaction
+        client
             .execute(
                 &document_statement,
                 &[
@@ -175,7 +189,7 @@ pub fn insert_legi_documents(
                         chunk.chunk_id, chunk.chunk_index
                     ),
                 })?;
-            transaction
+            client
                 .execute(
                     &chunk_statement,
                     &[
@@ -199,12 +213,11 @@ pub fn insert_legi_documents(
         }
 
         for edge in &document.publisher_edges {
-            insert_publisher_edge(&mut transaction, &edge_statement, edge)?;
+            insert_publisher_edge(client, &edge_statement, edge)?;
             publisher_edges += 1;
         }
     }
 
-    transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(CanonicalInsertReport {
         documents: documents.len(),
         chunks,
@@ -219,7 +232,16 @@ pub fn insert_legi_metadata_roots(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
-    let statement = transaction
+    let report = insert_legi_metadata_roots_with_client(&mut transaction, roots)?;
+    transaction.commit().map_err(StorageError::PostgresClient)?;
+    Ok(report)
+}
+
+pub fn insert_legi_metadata_roots_with_client<C: GenericClient>(
+    client: &mut C,
+    roots: &[LegiMetadataRoot<'_>],
+) -> Result<LegiMetadataInsertReport, StorageError> {
+    let statement = client
         .prepare(
             "INSERT INTO legi_metadata_roots \
                 (metadata_key, root_kind, source_uid, parent_source_uid, title, \
@@ -248,7 +270,7 @@ pub fn insert_legi_metadata_roots(
 
     for root in roots {
         let row = LegiMetadataRow::from_root(*root)?;
-        transaction
+        client
             .execute(
                 &statement,
                 &[
@@ -270,7 +292,6 @@ pub fn insert_legi_metadata_roots(
             .map_err(StorageError::PostgresClient)?;
     }
 
-    transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(LegiMetadataInsertReport {
         metadata_roots: roots.len(),
     })
@@ -931,12 +952,12 @@ fn source_payload_digest(source_payload_hash: &str) -> &str {
 }
 
 fn insert_publisher_edge(
-    transaction: &mut postgres::Transaction<'_>,
+    client: &mut impl GenericClient,
     statement: &postgres::Statement,
     edge: &CanonicalGraphEdge,
 ) -> Result<(), StorageError> {
     let payload = serde_json::to_string(edge)?;
-    transaction
+    client
         .execute(
             statement,
             &[

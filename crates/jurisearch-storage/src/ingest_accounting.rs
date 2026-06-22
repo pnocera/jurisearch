@@ -190,6 +190,13 @@ pub fn start_ingest_run(
 ) -> Result<(), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    start_ingest_run_with_client(&mut client, input)
+}
+
+pub fn start_ingest_run_with_client<C: GenericClient>(
+    client: &mut C,
+    input: &IngestRunInput<'_>,
+) -> Result<(), StorageError> {
     client
         .execute(
             "INSERT INTO ingest_run \
@@ -240,6 +247,20 @@ pub fn finish_ingest_run(
     }
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    finish_ingest_run_with_client(&mut client, run_id, status, error_message)
+}
+
+pub fn finish_ingest_run_with_client<C: GenericClient>(
+    client: &mut C,
+    run_id: &str,
+    status: IngestRunStatus,
+    error_message: Option<&str>,
+) -> Result<(), StorageError> {
+    if status == IngestRunStatus::Running {
+        return Err(StorageError::IngestAccounting {
+            message: "finish_ingest_run requires a terminal status".to_owned(),
+        });
+    }
     let updated = client
         .execute(
             "UPDATE ingest_run \
@@ -264,6 +285,14 @@ pub fn update_ingest_run_manifest(
 ) -> Result<(), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    update_ingest_run_manifest_with_client(&mut client, run_id, manifest_json)
+}
+
+pub fn update_ingest_run_manifest_with_client<C: GenericClient>(
+    client: &mut C,
+    run_id: &str,
+    manifest_json: &str,
+) -> Result<(), StorageError> {
     let updated = client
         .execute(
             "UPDATE ingest_run \
@@ -287,6 +316,13 @@ pub fn record_ingest_member(
 ) -> Result<IngestMemberRecord, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    record_ingest_member_with_client(&mut client, input)
+}
+
+pub fn record_ingest_member_with_client<C: GenericClient>(
+    client: &mut C,
+    input: &IngestMemberInput<'_>,
+) -> Result<IngestMemberRecord, StorageError> {
     let row = client
         .query_one(
             "INSERT INTO ingest_member \
@@ -337,6 +373,15 @@ pub fn update_ingest_member_status(
 ) -> Result<(), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    update_ingest_member_status_with_client(&mut client, member_id, status, error_message)
+}
+
+pub fn update_ingest_member_status_with_client<C: GenericClient>(
+    client: &mut C,
+    member_id: i64,
+    status: IngestMemberStatus,
+    error_message: Option<&str>,
+) -> Result<(), StorageError> {
     let updated = client
         .execute(
             "UPDATE ingest_member \
@@ -361,7 +406,16 @@ pub fn record_ingest_error(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
-    let row = transaction
+    let error_id = record_ingest_error_with_client(&mut transaction, input)?;
+    transaction.commit().map_err(StorageError::PostgresClient)?;
+    Ok(error_id)
+}
+
+pub fn record_ingest_error_with_client<C: GenericClient>(
+    client: &mut C,
+    input: &IngestErrorInput<'_>,
+) -> Result<i64, StorageError> {
+    let row = client
         .query_one(
             "INSERT INTO ingest_error \
                 (run_id, member_id, error_class, error_code, message, retry_policy, context) \
@@ -379,7 +433,7 @@ pub fn record_ingest_error(
         )
         .map_err(StorageError::PostgresClient)?;
     if let Some(member_id) = input.member_id {
-        transaction
+        client
             .execute(
                 "UPDATE ingest_member \
                  SET error_count = error_count + 1, \
@@ -397,7 +451,6 @@ pub fn record_ingest_error(
             )
             .map_err(StorageError::PostgresClient)?;
     }
-    transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(row.get(0))
 }
 
@@ -409,6 +462,15 @@ pub fn ingest_resume_decision(
 ) -> Result<IngestResumeDecision, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    ingest_resume_decision_with_client(&mut client, archive_name, member_path, compatibility)
+}
+
+pub fn ingest_resume_decision_with_client<C: GenericClient>(
+    client: &mut C,
+    archive_name: &str,
+    member_path: &str,
+    compatibility: IngestCompatibility<'_>,
+) -> Result<IngestResumeDecision, StorageError> {
     let Some(row) = client
         .query_opt(
             "SELECT run_id, status, parser_version, schema_version, code_version, source_payload_hash \

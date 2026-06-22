@@ -40,22 +40,23 @@ use jurisearch_storage::{
     ingest_accounting::{
         CoverageMetric, IngestCompatibility, IngestErrorInput, IngestHealthReport,
         IngestMemberInput, IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
-        finish_ingest_run, ingest_resume_decision, load_ingest_embedding_coverage,
-        load_ingest_health, load_ingest_projection_coverage, record_ingest_error,
-        record_ingest_member, start_ingest_run, update_ingest_member_status,
-        update_ingest_run_manifest,
+        finish_ingest_run_with_client, ingest_resume_decision_with_client,
+        load_ingest_embedding_coverage, load_ingest_health, load_ingest_projection_coverage,
+        record_ingest_error_with_client, record_ingest_member_with_client,
+        start_ingest_run_with_client, update_ingest_member_status_with_client,
+        update_ingest_run_manifest_with_client,
     },
     projection::{
         ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot,
         backfill_legi_article_hierarchy_from_metadata,
         backfill_legi_article_hierarchy_from_metadata_scoped, insert_chunk_embeddings,
-        insert_legi_documents, insert_legi_metadata_roots,
+        insert_legi_documents_with_client, insert_legi_metadata_roots_with_client,
     },
     retrieval::{
         ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
         RetrievalMode, context_documents_json, fetch_documents_json, hybrid_candidates_json,
     },
-    runtime::{ManagedPostgres, PgConfig, StorageError},
+    runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -66,6 +67,8 @@ const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v3";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
 const MODEL_CACHE_REQUIRED_FILES: &[&str] = &["model.onnx", "tokenizer.json"];
 const LOOPBACK_ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const LEGI_INGEST_TRANSACTION_BATCH_SIZE: usize = 128;
+const LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -1226,6 +1229,33 @@ struct LegiArchiveIngestCounters {
     processed_text_source_uids: BTreeSet<String>,
 }
 
+impl LegiArchiveIngestCounters {
+    fn merge_committed(&mut self, committed: Self) {
+        self.inserted_documents += committed.inserted_documents;
+        self.inserted_chunks += committed.inserted_chunks;
+        self.inserted_publisher_edges += committed.inserted_publisher_edges;
+        self.parsed_metadata_members += committed.parsed_metadata_members;
+        self.persisted_metadata_members += committed.persisted_metadata_members;
+        self.skipped_members += committed.skipped_members;
+        self.skipped_compatible_members += committed.skipped_compatible_members;
+        self.skipped_no_text_articles += committed.skipped_no_text_articles;
+        self.failed_members += committed.failed_members;
+        self.quarantined_payloads += committed.quarantined_payloads;
+        for (root, count) in committed.parsed_metadata_roots {
+            *self.parsed_metadata_roots.entry(root).or_default() += count;
+        }
+        for (root, count) in committed.unsupported_roots {
+            *self.unsupported_roots.entry(root).or_default() += count;
+        }
+        self.processed_article_document_ids
+            .extend(committed.processed_article_document_ids);
+        self.processed_section_source_uids
+            .extend(committed.processed_section_source_uids);
+        self.processed_text_source_uids
+            .extend(committed.processed_text_source_uids);
+    }
+}
+
 fn legi_archive_manifest(
     plan: &ArchivePlan,
     counters: &LegiArchiveIngestCounters,
@@ -1296,7 +1326,13 @@ fn ingest_legi_archives_payload(
     safe_mode: bool,
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_configured_index_dir(index_dir)?;
-    let postgres = open_index(index_dir.as_path())?;
+    let postgres = open_index_for_bulk_ingest(index_dir.as_path())?;
+    let mut ingest_client =
+        postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+            .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    ingest_client
+        .batch_execute("SET synchronous_commit TO off;")
+        .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
     let plan = plan_from_dir(ArchiveSource::Legi, archives_dir).map_err(|error| {
         ErrorObject::bad_input(format!("failed to plan LEGI archives: {error}"))
     })?;
@@ -1310,8 +1346,8 @@ fn ingest_legi_archives_payload(
     );
     let initial_manifest_json = initial_manifest.to_string();
 
-    start_ingest_run(
-        &postgres,
+    start_ingest_run_with_client(
+        &mut ingest_client,
         &IngestRunInput {
             run_id: run_id.as_str(),
             source: "legi",
@@ -1333,19 +1369,44 @@ fn ingest_legi_archives_payload(
 
     'archives: for archive in archives {
         let archive_name = archive.file_name.as_str();
+        let mut pending_members = Vec::with_capacity(LEGI_INGEST_TRANSACTION_BATCH_SIZE);
+        let mut pending_member_bytes = 0usize;
         let read_result = for_each_xml_member_until(&archive.path, max_member_bytes, |member| {
             if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
                 return Ok(ArchiveVisit::Stop);
             }
             counters.visited_members += 1;
-            if let Err(error) = process_legi_archive_member(
-                &postgres,
-                run_id.as_str(),
-                archive_name,
-                &member,
-                quarantine_dir,
-                &mut counters,
-            ) {
+            let member_bytes = member.bytes.len();
+            if !pending_members.is_empty()
+                && pending_member_bytes.saturating_add(member_bytes)
+                    > LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT
+                && let Err(error) = flush_legi_archive_member_batch(
+                    &mut ingest_client,
+                    run_id.as_str(),
+                    archive_name,
+                    &mut pending_members,
+                    &mut pending_member_bytes,
+                    quarantine_dir,
+                    &mut counters,
+                )
+            {
+                fatal_error = Some(storage_error_object(error));
+                return Ok(ArchiveVisit::Stop);
+            }
+            pending_members.push(member);
+            pending_member_bytes = pending_member_bytes.saturating_add(member_bytes);
+            if (pending_members.len() >= LEGI_INGEST_TRANSACTION_BATCH_SIZE
+                || pending_member_bytes >= LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT)
+                && let Err(error) = flush_legi_archive_member_batch(
+                    &mut ingest_client,
+                    run_id.as_str(),
+                    archive_name,
+                    &mut pending_members,
+                    &mut pending_member_bytes,
+                    quarantine_dir,
+                    &mut counters,
+                )
+            {
                 fatal_error = Some(storage_error_object(error));
                 return Ok(ArchiveVisit::Stop);
             }
@@ -1357,6 +1418,22 @@ fn ingest_legi_archives_payload(
                 },
             )
         });
+
+        if fatal_error.is_none()
+            && read_result.is_ok()
+            && !pending_members.is_empty()
+            && let Err(error) = flush_legi_archive_member_batch(
+                &mut ingest_client,
+                run_id.as_str(),
+                archive_name,
+                &mut pending_members,
+                &mut pending_member_bytes,
+                quarantine_dir,
+                &mut counters,
+            )
+        {
+            fatal_error = Some(storage_error_object(error));
+        }
 
         if let Err(error) = read_result {
             let error = ErrorObject::bad_input(format!(
@@ -1373,7 +1450,7 @@ fn ingest_legi_archives_payload(
     }
 
     if fatal_error.is_none() {
-        let backfill_scope = LegiHierarchyBackfillScope {
+        let scoped_backfill = LegiHierarchyBackfillScope {
             document_ids: counters
                 .processed_article_document_ids
                 .iter()
@@ -1390,7 +1467,13 @@ fn ingest_legi_archives_payload(
                 .cloned()
                 .collect(),
         };
-        if !backfill_scope.is_empty() {
+        let full_resume_backfill = counters.skipped_compatible_members > 0;
+        let backfill_scope = if full_resume_backfill {
+            LegiHierarchyBackfillScope::default()
+        } else {
+            scoped_backfill
+        };
+        if full_resume_backfill || !backfill_scope.is_empty() {
             match backfill_legi_article_hierarchy_from_metadata_scoped(&postgres, &backfill_scope) {
                 Ok(report) => {
                     counters.hierarchy_backfilled_documents = report.documents_updated;
@@ -1411,8 +1494,11 @@ fn ingest_legi_archives_payload(
     };
     let final_manifest = legi_archive_manifest(&plan, &counters, manifest_run_status.as_str());
     let final_manifest_json = final_manifest.to_string();
-    if let Err(error) = update_ingest_run_manifest(&postgres, run_id.as_str(), &final_manifest_json)
-    {
+    if let Err(error) = update_ingest_run_manifest_with_client(
+        &mut ingest_client,
+        run_id.as_str(),
+        &final_manifest_json,
+    ) {
         fatal_error.get_or_insert_with(|| storage_error_object(error));
     }
 
@@ -1422,8 +1508,13 @@ fn ingest_legi_archives_payload(
         IngestRunStatus::Failed
     };
     let error_message = fatal_error.as_ref().map(|error| error.message.as_str());
-    finish_ingest_run(&postgres, run_id.as_str(), run_status, error_message)
-        .map_err(storage_error_object)?;
+    finish_ingest_run_with_client(
+        &mut ingest_client,
+        run_id.as_str(),
+        run_status,
+        error_message,
+    )
+    .map_err(storage_error_object)?;
     if let Some(error) = fatal_error {
         return Err(error);
     }
@@ -1466,8 +1557,61 @@ fn ingest_legi_archives_payload(
     }))
 }
 
-fn process_legi_archive_member(
-    postgres: &ManagedPostgres,
+fn flush_legi_archive_member_batch(
+    client: &mut postgres::Client,
+    run_id: &str,
+    archive_name: &str,
+    pending_members: &mut Vec<ArchiveMember>,
+    pending_member_bytes: &mut usize,
+    quarantine_dir: Option<&Path>,
+    counters: &mut LegiArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    if pending_members.is_empty() {
+        return Ok(());
+    }
+    process_legi_archive_member_batch(
+        client,
+        run_id,
+        archive_name,
+        pending_members,
+        quarantine_dir,
+        counters,
+    )?;
+    pending_members.clear();
+    *pending_member_bytes = 0;
+    Ok(())
+}
+
+fn process_legi_archive_member_batch(
+    client: &mut postgres::Client,
+    run_id: &str,
+    archive_name: &str,
+    members: &[ArchiveMember],
+    quarantine_dir: Option<&Path>,
+    counters: &mut LegiArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    transaction
+        .batch_execute("SET LOCAL synchronous_commit TO off;")
+        .map_err(StorageError::PostgresClient)?;
+    let mut committed = LegiArchiveIngestCounters::default();
+    for member in members {
+        process_legi_archive_member(
+            &mut transaction,
+            run_id,
+            archive_name,
+            member,
+            quarantine_dir,
+            &mut committed,
+        )?;
+    }
+    transaction.commit().map_err(StorageError::PostgresClient)?;
+    counters.merge_committed(committed);
+    Ok(())
+}
+
+fn process_legi_archive_member<C: postgres::GenericClient>(
+    client: &mut C,
     run_id: &str,
     archive_name: &str,
     member: &ArchiveMember,
@@ -1481,8 +1625,8 @@ fn process_legi_archive_member(
         code_version: CLI_CODE_VERSION,
         source_payload_hash: source_payload_hash.as_str(),
     };
-    let resume = ingest_resume_decision(
-        postgres,
+    let resume = ingest_resume_decision_with_client(
+        client,
         archive_name,
         member.member_path.as_str(),
         compatibility,
@@ -1490,7 +1634,7 @@ fn process_legi_archive_member(
     match resume.action {
         IngestResumeAction::Skip => {
             record_legi_member(
-                postgres,
+                client,
                 run_id,
                 LegiMemberRecordInput {
                     archive_name,
@@ -1511,7 +1655,7 @@ fn process_legi_archive_member(
                 resume.mismatched_fields.join(", ")
             );
             let record = record_legi_member(
-                postgres,
+                client,
                 run_id,
                 LegiMemberRecordInput {
                     archive_name,
@@ -1523,7 +1667,7 @@ fn process_legi_archive_member(
                 },
             )?;
             record_legi_member_error(
-                postgres,
+                client,
                 run_id,
                 Some(record.member_id),
                 "validation_error",
@@ -1546,7 +1690,7 @@ fn process_legi_archive_member(
             let document = *document;
             let document_id = document.document_id.clone();
             let record = record_legi_member(
-                postgres,
+                client,
                 run_id,
                 LegiMemberRecordInput {
                     archive_name,
@@ -1557,9 +1701,9 @@ fn process_legi_archive_member(
                     compatibility,
                 },
             )?;
-            let report = insert_legi_documents(postgres, &[document], None)?;
-            update_ingest_member_status(
-                postgres,
+            let report = insert_legi_documents_with_client(client, &[document], None)?;
+            update_ingest_member_status_with_client(
+                client,
                 record.member_id,
                 IngestMemberStatus::Inserted,
                 None,
@@ -1571,7 +1715,7 @@ fn process_legi_archive_member(
         }
         Ok(ParsedLegiXml::TextVersion(text)) => {
             process_legi_metadata_root(
-                postgres,
+                client,
                 run_id,
                 archive_name,
                 member,
@@ -1586,7 +1730,7 @@ fn process_legi_archive_member(
         Ok(ParsedLegiXml::SectionTa(section)) => {
             let section_source_uid = section.section_id.clone();
             process_legi_metadata_root(
-                postgres,
+                client,
                 run_id,
                 archive_name,
                 member,
@@ -1606,7 +1750,7 @@ fn process_legi_archive_member(
         Ok(ParsedLegiXml::TextStruct(text_struct)) => {
             let text_source_uid = text_struct.text_id.clone();
             process_legi_metadata_root(
-                postgres,
+                client,
                 run_id,
                 archive_name,
                 member,
@@ -1622,7 +1766,7 @@ fn process_legi_archive_member(
         Ok(ParsedLegiXml::UnsupportedRoot { root }) => {
             *counters.unsupported_roots.entry(root.clone()).or_default() += 1;
             record_legi_member(
-                postgres,
+                client,
                 run_id,
                 LegiMemberRecordInput {
                     archive_name,
@@ -1638,7 +1782,7 @@ fn process_legi_archive_member(
         Err(error) => {
             if is_no_text_article_error(&error) {
                 record_legi_member(
-                    postgres,
+                    client,
                     run_id,
                     LegiMemberRecordInput {
                         archive_name,
@@ -1658,7 +1802,7 @@ fn process_legi_archive_member(
             let (error_class, error_code) = legi_parse_error_class(&error);
             let message = error.to_string();
             let record = record_legi_member(
-                postgres,
+                client,
                 run_id,
                 LegiMemberRecordInput {
                     archive_name,
@@ -1670,7 +1814,7 @@ fn process_legi_archive_member(
                 },
             )?;
             record_legi_member_error(
-                postgres,
+                client,
                 run_id,
                 Some(record.member_id),
                 error_class,
@@ -1689,8 +1833,8 @@ fn process_legi_archive_member(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_legi_metadata_root(
-    postgres: &ManagedPostgres,
+fn process_legi_metadata_root<C: postgres::GenericClient>(
+    client: &mut C,
     run_id: &str,
     archive_name: &str,
     member: &ArchiveMember,
@@ -1701,13 +1845,13 @@ fn process_legi_metadata_root(
     date_anchor: Option<&str>,
     metadata_root: LegiMetadataRoot<'_>,
 ) -> Result<(), StorageError> {
-    let report = insert_legi_metadata_roots(postgres, &[metadata_root])?;
+    let report = insert_legi_metadata_roots_with_client(client, &[metadata_root])?;
     *counters
         .parsed_metadata_roots
         .entry(root.to_owned())
         .or_default() += 1;
     record_legi_member(
-        postgres,
+        client,
         run_id,
         LegiMemberRecordInput {
             archive_name,
@@ -1733,13 +1877,13 @@ struct LegiMemberRecordInput<'a> {
     compatibility: IngestCompatibility<'a>,
 }
 
-fn record_legi_member(
-    postgres: &ManagedPostgres,
+fn record_legi_member<C: postgres::GenericClient>(
+    client: &mut C,
     run_id: &str,
     input: LegiMemberRecordInput<'_>,
 ) -> Result<jurisearch_storage::ingest_accounting::IngestMemberRecord, StorageError> {
-    record_ingest_member(
-        postgres,
+    record_ingest_member_with_client(
+        client,
         &IngestMemberInput {
             run_id,
             archive_name: input.archive_name,
@@ -1754,8 +1898,8 @@ fn record_legi_member(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_legi_member_error(
-    postgres: &ManagedPostgres,
+fn record_legi_member_error<C: postgres::GenericClient>(
+    client: &mut C,
     run_id: &str,
     member_id: Option<i64>,
     error_class: &str,
@@ -1783,8 +1927,8 @@ fn record_legi_member_error(
         "quarantined": quarantined
     })
     .to_string();
-    record_ingest_error(
-        postgres,
+    record_ingest_error_with_client(
+        client,
         &IngestErrorInput {
             run_id,
             member_id,
@@ -2031,6 +2175,16 @@ fn configured_index_dir(index_dir: Option<&Path>) -> Option<PathBuf> {
 fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
     let pg_config = PgConfig::discover().map_err(storage_error_object)?;
     ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
+}
+
+fn open_index_for_bulk_ingest(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
+    let pg_config = PgConfig::discover().map_err(storage_error_object)?;
+    ManagedPostgres::start_durable_with_profile(
+        pg_config,
+        index_dir,
+        PostgresRuntimeProfile::BulkIngest,
+    )
+    .map_err(storage_error_object)
 }
 
 #[derive(Debug)]

@@ -851,6 +851,7 @@ dependencies = [
  "jurisearch-ingest",
  "jurisearch-official-api",
  "jurisearch-storage",
+ "postgres",
  "predicates",
  "serde",
  "serde_json",

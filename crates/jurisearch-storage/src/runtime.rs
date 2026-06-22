@@ -14,6 +14,12 @@ const APP_DATABASE: &str = "jurisearch";
 const BOOTSTRAP_DATABASE: &str = "postgres";
 const SUPERUSER: &str = "postgres";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresRuntimeProfile {
+    Durable,
+    BulkIngest,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgConfig {
     pub path: PathBuf,
@@ -158,6 +164,14 @@ impl ManagedPostgres {
         pg_config: PgConfig,
         index_dir: impl Into<PathBuf>,
     ) -> Result<Self, StorageError> {
+        Self::start_durable_with_profile(pg_config, index_dir, PostgresRuntimeProfile::Durable)
+    }
+
+    pub fn start_durable_with_profile(
+        pg_config: PgConfig,
+        index_dir: impl Into<PathBuf>,
+        profile: PostgresRuntimeProfile,
+    ) -> Result<Self, StorageError> {
         pg_config.require_extension_assets("pg_search")?;
         pg_config.require_extension_assets("vector")?;
 
@@ -186,10 +200,11 @@ impl ManagedPostgres {
         }
 
         let port = free_loopback_port()?;
-        write_runtime_conf(&data_dir, &socket_dir, port)?;
+        write_runtime_conf(&data_dir, &socket_dir, port, profile)?;
         reclaim_data_dir(&pg_config.bindir, &data_dir);
         start_pg_ctl(&pg_config, &data_dir, &log_path)?;
         ensure_database(&pg_config, port, APP_DATABASE)?;
+        apply_runtime_profile(&pg_config, port, APP_DATABASE, profile)?;
 
         let mut postgres = Self {
             _temp_dir: None,
@@ -414,7 +429,12 @@ fn ensure_database(pg_config: &PgConfig, port: u16, database: &str) -> Result<()
     Ok(())
 }
 
-fn write_runtime_conf(data_dir: &Path, socket_dir: &Path, port: u16) -> Result<(), StorageError> {
+fn write_runtime_conf(
+    data_dir: &Path,
+    socket_dir: &Path,
+    port: u16,
+    profile: PostgresRuntimeProfile,
+) -> Result<(), StorageError> {
     let postgresql_conf_path = data_dir.join("postgresql.conf");
     let include_line = "include_if_exists = 'jurisearch.conf'";
     let mut postgresql_conf =
@@ -431,14 +451,70 @@ fn write_runtime_conf(data_dir: &Path, socket_dir: &Path, port: u16) -> Result<(
         fs::write(&postgresql_conf_path, postgresql_conf).map_err(StorageError::Io)?;
     }
 
-    fs::write(
-        data_dir.join("jurisearch.conf"),
-        format!(
-            "shared_preload_libraries = 'pg_search'\nlisten_addresses = '127.0.0.1'\nport = {port}\nunix_socket_directories = {}\n",
-            sql_string_literal(&socket_dir.to_string_lossy())
-        ),
-    )
-    .map_err(StorageError::Io)
+    let mut runtime_conf = format!(
+        "shared_preload_libraries = 'pg_search'\nlisten_addresses = '127.0.0.1'\nport = {port}\nunix_socket_directories = {}\n",
+        sql_string_literal(&socket_dir.to_string_lossy())
+    );
+    if profile == PostgresRuntimeProfile::BulkIngest {
+        runtime_conf.push_str(
+            "synchronous_commit = 'off'\n\
+             wal_compression = 'on'\n\
+             max_wal_size = '8GB'\n\
+             checkpoint_timeout = '30min'\n\
+             checkpoint_completion_target = '0.9'\n\
+             shared_buffers = '1GB'\n\
+             maintenance_work_mem = '1GB'\n",
+        );
+    }
+
+    fs::write(data_dir.join("jurisearch.conf"), runtime_conf).map_err(StorageError::Io)
+}
+
+fn apply_runtime_profile(
+    pg_config: &PgConfig,
+    port: u16,
+    database: &str,
+    profile: PostgresRuntimeProfile,
+) -> Result<(), StorageError> {
+    match profile {
+        PostgresRuntimeProfile::BulkIngest => {
+            psql(
+                pg_config,
+                port,
+                BOOTSTRAP_DATABASE,
+                &format!(
+                    "ALTER DATABASE {} SET synchronous_commit = 'off';",
+                    sql_identifier(database)
+                ),
+            )?;
+        }
+        PostgresRuntimeProfile::Durable => {
+            psql(
+                pg_config,
+                port,
+                BOOTSTRAP_DATABASE,
+                &format!(
+                    "ALTER DATABASE {} RESET synchronous_commit;",
+                    sql_identifier(database)
+                ),
+            )?;
+            // Defensive cleanup for live/manual tuning applied through
+            // postgresql.auto.conf; the bulk profile itself uses jurisearch.conf.
+            psql(
+                pg_config,
+                port,
+                BOOTSTRAP_DATABASE,
+                "ALTER SYSTEM RESET max_wal_size;",
+            )?;
+            psql(
+                pg_config,
+                port,
+                BOOTSTRAP_DATABASE,
+                "SELECT pg_reload_conf();",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn discover_pgrx_pg_config() -> Result<PathBuf, StorageError> {
