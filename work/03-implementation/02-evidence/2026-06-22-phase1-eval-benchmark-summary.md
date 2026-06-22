@@ -19,7 +19,7 @@ target/debug/jurisearch \
   eval phase1 --mode <bm25|dense|hybrid> --top-k 20
 ```
 
-## Release-Gating Fixture Results
+## Release-Candidate Fixture Results
 
 | Mode | Passed | Failed | Elapsed |
 |---|---:|---:|---:|
