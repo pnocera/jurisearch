@@ -409,7 +409,8 @@ pub fn compiled_schema() -> Value {
                         "type": "array",
                         "items": { "$ref": "#/schemas/Phase1GateCheck" }
                     },
-                    "eval_fixtures": { "$ref": "#/schemas/EvalFixtureSummary" }
+                    "eval_fixtures": { "$ref": "#/schemas/EvalFixtureSummary" },
+                    "reranker_decision": { "$ref": "#/schemas/RerankerDecision" }
                 }
             },
             "Phase1GateCheck": {
@@ -417,6 +418,18 @@ pub fn compiled_schema() -> Value {
                     "name": { "type": "string" },
                     "status": { "enum": ["pass", "pending", "fail"] },
                     "message": { "type": "string" }
+                }
+            },
+            "RerankerDecision": {
+                "properties": {
+                    "state": { "enum": ["deferred", "adopted"] },
+                    "provider": { "enum": ["disabled", "http", "local_onnx"] },
+                    "adopted": { "type": "boolean" },
+                    "decision_date": { "type": "string", "format": "date" },
+                    "model_candidate": { "type": "string" },
+                    "evidence": { "type": "array", "items": { "type": "string" } },
+                    "reason": { "type": "string" },
+                    "future_adoption_gate": { "type": "string" }
                 }
             },
             "EvalFixtureSummary": {

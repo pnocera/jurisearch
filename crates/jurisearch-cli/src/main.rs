@@ -3687,6 +3687,7 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
     let ingest_available = ingest_health["state"] == "available";
     let query_ready = index["query_ready"].as_bool().unwrap_or(false);
     let locked_embedding_model = phase1_embedding_model_locked(ingest_health);
+    let reranker_decision = phase1_reranker_decision_payload();
     let replay_snapshot_status = ingest_health["replay_snapshot_status"]
         .as_str()
         .unwrap_or("unknown");
@@ -3770,10 +3771,8 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
         ),
         phase1_gate_check(
             "reranker_decision",
-            "pending",
-            // TODO(phase1): wire this to stored benchmark evidence before the
-            // Phase 1 statutory-search claim can open.
-            "reranker adoption or deferral must be recorded from the benchmark gate",
+            "pass",
+            "reranker adoption is deferred for Phase 1; disabled provider remains the default until legal eval proves a material rerank gain",
         ),
     ];
     let claim_allowed = checks
@@ -3786,6 +3785,26 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
         "scope": "phase1_legi_statutory_search",
         "checks": checks,
         "eval_fixtures": eval_summary,
+        "reranker_decision": reranker_decision,
+    })
+}
+
+fn phase1_reranker_decision_payload() -> Value {
+    // TODO(phase1-reranker): when the reranker provider seam lands, derive this
+    // from runtime config/manifests instead of the Phase 1 static deferral.
+    json!({
+        "state": "deferred",
+        "provider": "disabled",
+        "adopted": false,
+        "decision_date": "2026-06-22",
+        "model_candidate": "BAAI/bge-reranker-v2-m3",
+        "evidence": [
+            "work/03-implementation/02-evidence/2026-06-21-reranker-feasibility.md",
+            "work/03-implementation/02-evidence/2026-06-22-phase1-eval-benchmark-summary.md",
+            "work/03-implementation/02-evidence/2026-06-22-reranker-deferral-decision.md"
+        ],
+        "reason": "current Phase 1 release-candidate fixtures cannot measure a material rerank gain, no reranker provider is packaged, and cross-encoder latency/packaging remain unmeasured",
+        "future_adoption_gate": "hybrid+rerank must show material legal-retrieval quality gain on release-gating fixtures, with measured latency and graceful fallback to hybrid order"
     })
 }
 
@@ -4782,7 +4801,8 @@ mod tests {
             "projection_coverage": { "covered": 2, "total": 2 },
             "embedding_coverage": { "covered": 2, "total": 2 },
             "embedding_manifest": locked_embedding_manifest_json(),
-            "replay_snapshot_status": "available"
+            "replay_snapshot_status": "available",
+            "replay_snapshot_source": "refreshed"
         });
 
         let payload = phase1_gate_payload(&index, &ingest_health);
@@ -4801,7 +4821,16 @@ mod tests {
             check_status(&payload, "release_gating_eval_fixtures"),
             "pending"
         );
-        assert_eq!(check_status(&payload, "reranker_decision"), "pending");
+        assert_eq!(check_status(&payload, "reranker_decision"), "pass");
+        assert_eq!(payload["reranker_decision"]["state"], "deferred");
+        assert_eq!(payload["reranker_decision"]["provider"], "disabled");
+        assert_eq!(payload["reranker_decision"]["adopted"], false);
+        assert!(
+            payload["reranker_decision"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("cannot measure a material rerank gain")
+        );
         assert_eq!(payload["state"], "not_ready");
         assert_eq!(payload["claim_allowed"], false);
 

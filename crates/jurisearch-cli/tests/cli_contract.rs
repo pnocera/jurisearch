@@ -172,6 +172,18 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "#/schemas/Phase1GateCheck"
     );
     assert_eq!(
+        json["schemas"]["Phase1GateResponse"]["properties"]["reranker_decision"]["$ref"],
+        "#/schemas/RerankerDecision"
+    );
+    assert_eq!(
+        json["schemas"]["RerankerDecision"]["properties"]["provider"]["enum"][0],
+        "disabled"
+    );
+    assert_eq!(
+        json["schemas"]["RerankerDecision"]["properties"]["evidence"]["items"]["type"],
+        "string"
+    );
+    assert_eq!(
         json["schemas"]["EvalFixtureSummary"]["properties"]["release_candidates"]["type"],
         "integer"
     );
