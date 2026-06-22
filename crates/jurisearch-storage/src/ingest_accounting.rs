@@ -1,5 +1,5 @@
 use postgres::GenericClient;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::{ManagedPostgres, StorageError};
 
@@ -145,8 +145,15 @@ pub struct IngestHealthReport {
     pub projection_coverage: CoverageMetric,
     pub embedding_coverage: CoverageMetric,
     pub replay_snapshot_status: String,
+    pub replay_snapshot_source: String,
     pub replay_snapshot: ReplaySnapshotReport,
     pub recovery_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaySnapshotMode {
+    Cached,
+    Refresh,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -155,7 +162,7 @@ pub struct IngestReadinessReport {
     pub embedding_coverage: CoverageMetric,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplaySnapshotReport {
     pub documents: ReplaySnapshotComponent,
     pub chunks: ReplaySnapshotComponent,
@@ -165,10 +172,47 @@ pub struct ReplaySnapshotReport {
     pub signature: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplaySnapshotComponent {
     pub count: i64,
     pub signature: String,
+}
+
+impl ReplaySnapshotReport {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            documents: ReplaySnapshotComponent::empty(),
+            chunks: ReplaySnapshotComponent::empty(),
+            publisher_edges: ReplaySnapshotComponent::empty(),
+            embeddings: ReplaySnapshotComponent::empty(),
+            manifests: ReplaySnapshotComponent::empty(),
+            signature: String::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn status(&self) -> &'static str {
+        if self.documents.count == 0
+            && self.chunks.count == 0
+            && self.publisher_edges.count == 0
+            && self.embeddings.count == 0
+        {
+            "empty"
+        } else {
+            "available"
+        }
+    }
+}
+
+impl ReplaySnapshotComponent {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            count: 0,
+            signature: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -558,6 +602,13 @@ pub fn ingest_resume_decision_with_client<C: GenericClient>(
 }
 
 pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthReport, StorageError> {
+    load_ingest_health_with_replay_snapshot_mode(postgres, ReplaySnapshotMode::Cached)
+}
+
+pub fn load_ingest_health_with_replay_snapshot_mode(
+    postgres: &ManagedPostgres,
+    replay_snapshot_mode: ReplaySnapshotMode,
+) -> Result<IngestHealthReport, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let latest = client
@@ -636,15 +687,19 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         .collect();
 
     let readiness = load_readiness_metrics(&mut client)?;
-    let replay_snapshot = load_replay_snapshot(&mut client)?;
-    let replay_snapshot_status = if replay_snapshot.documents.count == 0
-        && replay_snapshot.chunks.count == 0
-        && replay_snapshot.publisher_edges.count == 0
-        && replay_snapshot.embeddings.count == 0
-    {
-        "empty"
+    let (replay_snapshot, replay_snapshot_source) = match replay_snapshot_mode {
+        ReplaySnapshotMode::Cached => load_cached_replay_snapshot(&mut client)?
+            .map(|snapshot| (snapshot, "cached".to_owned()))
+            .unwrap_or_else(|| (ReplaySnapshotReport::empty(), "missing".to_owned())),
+        ReplaySnapshotMode::Refresh => {
+            let snapshot = refresh_replay_snapshot_with_client(&mut client)?;
+            (snapshot, "refreshed".to_owned())
+        }
+    };
+    let replay_snapshot_status = if replay_snapshot_source == "missing" {
+        "missing".to_owned()
     } else {
-        "available"
+        replay_snapshot.status().to_owned()
     };
 
     let mut recovery_warnings = Vec::new();
@@ -674,9 +729,26 @@ pub fn load_ingest_health(postgres: &ManagedPostgres) -> Result<IngestHealthRepo
         projection_coverage: readiness.projection_coverage,
         embedding_coverage: readiness.embedding_coverage,
         replay_snapshot_status: replay_snapshot_status.to_owned(),
+        replay_snapshot_source,
         replay_snapshot,
         recovery_warnings,
     })
+}
+
+pub fn refresh_replay_snapshot(
+    postgres: &ManagedPostgres,
+) -> Result<ReplaySnapshotReport, StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    refresh_replay_snapshot_with_client(&mut client)
+}
+
+pub fn refresh_replay_snapshot_with_client(
+    client: &mut postgres::Client,
+) -> Result<ReplaySnapshotReport, StorageError> {
+    let snapshot = load_replay_snapshot(client)?;
+    store_replay_snapshot(client, &snapshot)?;
+    Ok(snapshot)
 }
 
 pub fn load_ingest_readiness(
@@ -812,7 +884,8 @@ fn load_replay_snapshot(
         "index_manifest",
         "SELECT key AS row_key, \
                 md5(concat_ws(chr(31), key, value::text)) AS row_hash \
-         FROM index_manifest",
+         FROM index_manifest \
+         WHERE key <> 'replay_snapshot'",
     )?;
     let signature_input = format!(
         "documents:{}:{}|chunks:{}:{}|publisher_edges:{}:{}|embeddings:{}:{}|manifests:{}:{}",
@@ -841,6 +914,52 @@ fn load_replay_snapshot(
         manifests,
         signature,
     })
+}
+
+fn load_cached_replay_snapshot<C: GenericClient>(
+    client: &mut C,
+) -> Result<Option<ReplaySnapshotReport>, StorageError> {
+    let Some(row) = client
+        .query_opt(
+            "SELECT value::text \
+             FROM index_manifest \
+             WHERE key = 'replay_snapshot';",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?
+    else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(0)) else {
+        return Ok(None);
+    };
+    if let Some(snapshot) = value.get("snapshot") {
+        Ok(serde_json::from_value(snapshot.clone()).ok())
+    } else {
+        Ok(serde_json::from_value(value).ok())
+    }
+}
+
+fn store_replay_snapshot<C: GenericClient>(
+    client: &mut C,
+    snapshot: &ReplaySnapshotReport,
+) -> Result<(), StorageError> {
+    let manifest = serde_json::json!({
+        "schema_version": "1",
+        "snapshot": snapshot,
+    })
+    .to_string();
+    client
+        .execute(
+            "INSERT INTO index_manifest(key, value, updated_at) \
+             VALUES ('replay_snapshot', $1::text::jsonb, now()) \
+             ON CONFLICT (key) DO UPDATE \
+             SET value = EXCLUDED.value, \
+                 updated_at = EXCLUDED.updated_at;",
+            &[&manifest],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    Ok(())
 }
 
 fn snapshot_component<C: GenericClient>(

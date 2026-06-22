@@ -4,10 +4,10 @@ use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestErrorInput, IngestMemberInput, IngestMemberStatus,
-        IngestResumeAction, IngestRunInput, IngestRunStatus, finish_ingest_run,
+        IngestResumeAction, IngestRunInput, IngestRunStatus, ReplaySnapshotMode, finish_ingest_run,
         ingest_resume_decision, load_ingest_embedding_coverage, load_ingest_health,
-        load_ingest_readiness, record_ingest_error, record_ingest_member, start_ingest_run,
-        update_ingest_member_status,
+        load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness, record_ingest_error,
+        record_ingest_member, start_ingest_run, update_ingest_member_status,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -229,7 +229,12 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     insert_projection_fixture(&postgres)?;
     finish_ingest_run(&postgres, "run-1", IngestRunStatus::Completed, None)?;
 
-    let health = load_ingest_health(&postgres)?;
+    let cold_cached_health = load_ingest_health(&postgres)?;
+    assert_eq!(cold_cached_health.replay_snapshot_status, "missing");
+    assert_eq!(cold_cached_health.replay_snapshot_source, "missing");
+
+    let health =
+        load_ingest_health_with_replay_snapshot_mode(&postgres, ReplaySnapshotMode::Refresh)?;
     assert_eq!(health.latest_run_id.as_deref(), Some("run-1"));
     assert_eq!(health.latest_run_status.as_deref(), Some("completed"));
     assert_eq!(health.latest_completed_run_id.as_deref(), Some("run-1"));
@@ -257,6 +262,7 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
         health.embedding_coverage.covered
     );
     assert_eq!(health.replay_snapshot_status, "available");
+    assert_eq!(health.replay_snapshot_source, "refreshed");
     assert_eq!(health.replay_snapshot.documents.count, 2);
     assert_eq!(health.replay_snapshot.chunks.count, 2);
     assert_eq!(health.replay_snapshot.publisher_edges.count, 0);
@@ -264,8 +270,25 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(health.replay_snapshot.manifests.count, 1);
     assert_eq!(health.replay_snapshot.signature.len(), 32);
     let replay_signature = health.replay_snapshot.signature.clone();
+    let cached_health = load_ingest_health(&postgres)?;
+    assert_eq!(cached_health.replay_snapshot_source, "cached");
+    assert_eq!(cached_health.replay_snapshot.signature, replay_signature);
+    let second_refresh =
+        load_ingest_health_with_replay_snapshot_mode(&postgres, ReplaySnapshotMode::Refresh)?;
+    assert_eq!(second_refresh.replay_snapshot.signature, replay_signature);
+    assert_eq!(second_refresh.replay_snapshot.manifests.count, 1);
+    postgres.execute_sql(
+        "UPDATE index_manifest \
+         SET value = '{\"snapshot\":{\"documents\":null}}'::jsonb \
+         WHERE key = 'replay_snapshot';",
+    )?;
+    let corrupt_cached_health = load_ingest_health(&postgres)?;
+    assert_eq!(corrupt_cached_health.replay_snapshot_status, "missing");
+    assert_eq!(corrupt_cached_health.replay_snapshot_source, "missing");
     assert_eq!(
-        load_ingest_health(&postgres)?.replay_snapshot.signature,
+        load_ingest_health_with_replay_snapshot_mode(&postgres, ReplaySnapshotMode::Refresh)?
+            .replay_snapshot
+            .signature,
         replay_signature
     );
     postgres.execute_sql(
@@ -273,8 +296,14 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
          SET title = 'Article 1240 changed' \
          WHERE document_id = 'legi:LEGIARTI000006419320@1804-02-21';",
     )?;
-    assert_ne!(
+    assert_eq!(
         load_ingest_health(&postgres)?.replay_snapshot.signature,
+        replay_signature
+    );
+    assert_ne!(
+        load_ingest_health_with_replay_snapshot_mode(&postgres, ReplaySnapshotMode::Refresh)?
+            .replay_snapshot
+            .signature,
         replay_signature
     );
     postgres.execute_sql(

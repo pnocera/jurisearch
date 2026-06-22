@@ -160,6 +160,10 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "#/schemas/ModelCacheStatus"
     );
     assert_eq!(
+        json["schemas"]["StatusRequest"]["properties"]["deep"]["default"],
+        false
+    );
+    assert_eq!(
         json["schemas"]["StatusResponse"]["properties"]["phase1_gate"]["$ref"],
         "#/schemas/Phase1GateResponse"
     );
@@ -1078,7 +1082,27 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
     assert_eq!(json["ingest_health"]["projection_coverage"]["total"], 1);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["covered"], 1);
     assert_eq!(json["ingest_health"]["embedding_coverage"]["total"], 1);
+    assert_eq!(json["ingest_health"]["replay_snapshot_status"], "missing");
+    assert_eq!(json["ingest_health"]["replay_snapshot_source"], "missing");
+    assert_eq!(
+        json["ingest_health"]["replay_snapshot"]["documents"]["count"],
+        0
+    );
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["status", "--deep"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["ingest_health"]["replay_snapshot_status"], "available");
+    assert_eq!(json["ingest_health"]["replay_snapshot_source"], "refreshed");
     assert_eq!(
         json["ingest_health"]["replay_snapshot"]["documents"]["count"],
         1
@@ -1098,6 +1122,10 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
             .len(),
         32
     );
+    let replay_signature = json["ingest_health"]["replay_snapshot"]["signature"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     assert!(
         json["ingest_health"]["recovery_warnings"]
             .as_array()
@@ -1105,8 +1133,32 @@ fn status_reports_ingest_health_from_existing_index() -> Result<(), StorageError
             .is_empty()
     );
 
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let cached_json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        cached_json["ingest_health"]["replay_snapshot_status"],
+        "available"
+    );
+    assert_eq!(
+        cached_json["ingest_health"]["replay_snapshot_source"],
+        "cached"
+    );
+    assert_eq!(
+        cached_json["ingest_health"]["replay_snapshot"]["signature"],
+        replay_signature
+    );
+
     let input = format!(
-        "{{\"id\":\"status-index\",\"command\":\"status\",\"args\":{{\"index_dir\":\"{}\"}}}}\n",
+        "{{\"id\":\"status-index\",\"command\":\"status\",\"args\":{{\"index_dir\":\"{}\",\"deep\":true}}}}\n",
         root.path().to_string_lossy()
     );
     let output = Command::cargo_bin("jurisearch")
@@ -2537,6 +2589,10 @@ fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageErro
         json["recommended_next_command"],
         "jurisearch ingest embed-chunks"
     );
+    assert_eq!(json["replay_snapshot_cache"]["source"], "refreshed");
+    assert_eq!(json["replay_snapshot_cache"]["status"], "available");
+    assert_eq!(json["replay_snapshot_cache"]["documents"], 1);
+    assert_eq!(json["replay_snapshot_cache"]["chunks"], 1);
 
     let output = Command::cargo_bin("jurisearch")
         .unwrap()
@@ -3459,6 +3515,17 @@ fn ingest_embed_chunks_uses_endpoint_pool_and_finalizes_dense_index()
     );
     assert_eq!(json["dense_rebuild"]["chunks"], 2);
     assert_eq!(json["dense_rebuild"]["embeddings"], 2);
+    assert_eq!(json["replay_snapshot_cache"]["source"], "refreshed");
+    assert_eq!(json["replay_snapshot_cache"]["status"], "available");
+    assert_eq!(json["replay_snapshot_cache"]["chunks"], 2);
+    assert_eq!(json["replay_snapshot_cache"]["embeddings"], 2);
+    assert_eq!(
+        json["replay_snapshot_cache"]["signature"]
+            .as_str()
+            .unwrap()
+            .len(),
+        32
+    );
 
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
     assert_eq!(

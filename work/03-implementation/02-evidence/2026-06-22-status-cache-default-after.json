@@ -1,0 +1,236 @@
+{
+  "embedding": {
+    "base_url": "http://127.0.0.1:8097/v1",
+    "base_url_class": "local_loopback",
+    "base_urls": [
+      "http://127.0.0.1:8097/v1"
+    ],
+    "config_error": null,
+    "config_loaded": false,
+    "config_path": null,
+    "dimension": 1024,
+    "endpoint": {
+      "checked": true,
+      "message": "loopback embedding endpoint accepted a TCP connection",
+      "reachable": true,
+      "state": "reachable"
+    },
+    "estimated_chars_per_token": 4,
+    "max_estimated_tokens": 8192,
+    "max_input_chars": 20000,
+    "model": "bge-m3",
+    "model_cache": {
+      "missing_files": [],
+      "model_cache_key": "bge-m3",
+      "model_dir": "/home/pierre/.cache/jurisearch/models",
+      "model_path": null,
+      "model_present": null,
+      "required": false,
+      "required_files": [
+        "model.onnx",
+        "tokenizer.json"
+      ],
+      "state": "not_required"
+    },
+    "normalize": true,
+    "pool": [],
+    "pool_overrides_base_urls": false,
+    "pooling": "cls",
+    "provider": "openai_compatible",
+    "provisional": true,
+    "reembeddable": true,
+    "request_model": null,
+    "token_count_method": "estimated_chars",
+    "tokenizer_path": null
+  },
+  "index": {
+    "message": "Index is initialized and projection/embedding coverage gates pass.",
+    "path": "/home/pierre/Work/jurisearch/index/phase1-freemium-20250713",
+    "query_ready": true,
+    "state": "ready"
+  },
+  "ingest_health": {
+    "embedding_coverage": {
+      "covered": 1852745,
+      "percentage": 100.0,
+      "total": 1852745
+    },
+    "embedding_manifest": {
+      "coverage": {
+        "chunks": 1852745,
+        "embeddings": 1852745
+      },
+      "dimension": 1024,
+      "embedding_fingerprint": "bge-m3:1024:normalize:true",
+      "model": "bge-m3",
+      "normalize": true,
+      "provisional": true,
+      "reembeddable": true,
+      "vector_index": {
+        "lists": 32,
+        "method": "ivfflat",
+        "name": "chunk_embeddings_embedding_ivfflat_idx",
+        "operator_class": "vector_l2_ops"
+      }
+    },
+    "error_classes": [],
+    "failed_member_percentage": 0.0,
+    "failed_members": 0,
+    "inserted_members": 1274657,
+    "latest_completed_run": "phase1-freemium-20250713",
+    "latest_completed_run_id": "phase1-freemium-20250713",
+    "latest_manifest": {
+      "archive_plan": {
+        "baseline": {
+          "file_name": "Freemium_legi_global_20250713-140000.tar.gz",
+          "kind": "baseline",
+          "source": "legi",
+          "timestamp": "20250713-140000",
+          "timestamp_compact": "20250713140000"
+        },
+        "deltas": [],
+        "skipped": [],
+        "skipped_count": 0
+      },
+      "canonical_schema_version": "canonical_record:v3",
+      "code_version": "jurisearch-cli:0.1.0",
+      "complete": true,
+      "coverage": {
+        "failed_members": 0,
+        "hierarchy_backfill_invalidated_embeddings": 0,
+        "hierarchy_backfill_scoped_documents": 0,
+        "hierarchy_backfill_scoped_sections": 0,
+        "hierarchy_backfill_scoped_texts": 0,
+        "hierarchy_backfilled_documents": 0,
+        "inserted_chunks": 0,
+        "inserted_documents": 0,
+        "inserted_publisher_edges": 0,
+        "parsed_metadata_members": 0,
+        "parsed_metadata_roots": {},
+        "persisted_metadata_members": 0,
+        "quarantined_payloads": 0,
+        "skipped_compatible_members": 2556950,
+        "skipped_members": 2557045,
+        "skipped_no_text_articles": 0,
+        "unsupported_roots": {
+          "EMPTY_XML": 95
+        },
+        "visited_members": 2557045
+      },
+      "dataset": "LEGI",
+      "freshness": {
+        "latest_archive": "Freemium_legi_global_20250713-140000.tar.gz",
+        "latest_archive_kind": "baseline",
+        "latest_archive_timestamp": "20250713-140000",
+        "latest_archive_timestamp_compact": "20250713140000"
+      },
+      "parser_version": "legi_article_metadata_parser:v4",
+      "run_status": "completed",
+      "source": "legi",
+      "source_version": "20250713-140000"
+    },
+    "latest_run_id": "phase1-freemium-20250713",
+    "latest_run_status": "completed",
+    "projection_coverage": {
+      "covered": 1736165,
+      "percentage": 100.0,
+      "total": 1736165
+    },
+    "recovery_warnings": [],
+    "replay_snapshot": {
+      "chunks": {
+        "count": 1852745,
+        "signature": "89191645c174fa25388bd340daa3a7e8"
+      },
+      "documents": {
+        "count": 1736165,
+        "signature": "10b7b6e2f97a054d3159e296e753e949"
+      },
+      "embeddings": {
+        "count": 1852745,
+        "signature": "a106c0b6e087543d357bfe5579125200"
+      },
+      "manifests": {
+        "count": 2,
+        "signature": "e8a87bae14d27bb5a7f2223d2729bb8c"
+      },
+      "publisher_edges": {
+        "count": 12949444,
+        "signature": "16df081138f6a3eac4d3eb3063637401"
+      },
+      "signature": "430af44453662d6107a46e7baedde246"
+    },
+    "replay_snapshot_source": "cached",
+    "replay_snapshot_status": "available",
+    "skipped_members": 1282388,
+    "state": "available",
+    "total_members": 2557045
+  },
+  "phase1_gate": {
+    "checks": [
+      {
+        "message": "index reports query_ready=true",
+        "name": "index_query_ready",
+        "status": "pass"
+      },
+      {
+        "message": "a completed official-source ingest run is required before a Phase 1 claim",
+        "name": "latest_completed_ingest_run",
+        "status": "pass"
+      },
+      {
+        "message": "failed ingest members must be zero for the Phase 1 release gate",
+        "name": "failed_members",
+        "status": "pass"
+      },
+      {
+        "message": "projection coverage must be complete and non-empty",
+        "name": "projection_coverage",
+        "status": "pass"
+      },
+      {
+        "message": "embedding coverage must be complete and non-empty for the selected fingerprint",
+        "name": "embedding_coverage",
+        "status": "pass"
+      },
+      {
+        "message": "replay snapshot signatures over canonical projections must be available; status=available, source=cached",
+        "name": "replay_snapshot",
+        "status": "pass"
+      },
+      {
+        "message": "release-gating fixtures require official-source verification and named human review",
+        "name": "release_gating_eval_fixtures",
+        "status": "pending"
+      },
+      {
+        "message": "stored embedding manifest matches the locked D21 bge-m3 v1 model",
+        "name": "final_embedding_model",
+        "status": "pass"
+      },
+      {
+        "message": "reranker adoption or deferral must be recorded from the benchmark gate",
+        "name": "reranker_decision",
+        "status": "pending"
+      }
+    ],
+    "claim_allowed": false,
+    "eval_fixtures": {
+      "categories": {
+        "citation_state_statutory": 1,
+        "conceptual_statutory": 1,
+        "hierarchy_sensitive_statutory": 2,
+        "known_article_statutory": 1,
+        "temporal_statutory": 1
+      },
+      "hierarchy_sensitive": 2,
+      "release_candidates": 4,
+      "release_gating": 0,
+      "source_verified": 6,
+      "total": 6
+    },
+    "scope": "phase1_legi_statutory_search",
+    "state": "not_ready"
+  },
+  "schema_version": "1"
+}

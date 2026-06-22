@@ -51,9 +51,10 @@ use jurisearch_storage::{
     ingest_accounting::{
         CoverageMetric, IngestCompatibility, IngestErrorInput, IngestHealthReport,
         IngestMemberInput, IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
-        finish_ingest_run_with_client, ingest_resume_decision_with_client,
-        load_ingest_embedding_coverage, load_ingest_health, load_ingest_projection_coverage,
-        record_ingest_error_with_client, record_ingest_member_with_client,
+        ReplaySnapshotMode, ReplaySnapshotReport, finish_ingest_run_with_client,
+        ingest_resume_decision_with_client, load_ingest_embedding_coverage,
+        load_ingest_health_with_replay_snapshot_mode, load_ingest_projection_coverage,
+        record_ingest_error_with_client, record_ingest_member_with_client, refresh_replay_snapshot,
         start_ingest_run_with_client, update_ingest_member_status_with_client,
         update_ingest_run_manifest_with_client,
     },
@@ -110,7 +111,7 @@ enum Command {
     /// Return legal-vocabulary expansions.
     Expand(QueryArgs),
     /// Report corpus coverage, model fingerprints, and index health.
-    Status,
+    Status(StatusArgs),
     /// Explicit model-cache operations.
     Model(ModelCommand),
     /// Check or prepare local setup.
@@ -209,10 +210,18 @@ struct SessionContextArgs {
     index_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct StatusArgs {
+    #[arg(long)]
+    deep: bool,
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct SessionStatusArgs {
     #[serde(default)]
     index_dir: Option<PathBuf>,
+    #[serde(default)]
+    deep: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,7 +482,10 @@ fn run() -> anyhow::Result<()> {
 
     match command {
         Command::Help(help) => emit_help(help),
-        Command::Status => write_json(&status_payload(index_dir.as_deref())),
+        Command::Status(args) => write_json(&status_payload(
+            index_dir.as_deref(),
+            replay_snapshot_mode(args.deep),
+        )),
         Command::Session(args) | Command::Batch(args) => run_jsonl(args),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
         Command::Eval(eval) => emit_eval(eval, index_dir.as_deref()),
@@ -1134,7 +1146,10 @@ fn session_status_payload(args: Value) -> Result<Value, ErrorObject> {
         serde_json::from_value::<SessionStatusArgs>(args)
             .map_err(|error| ErrorObject::bad_input(format!("invalid status args: {error}")))?
     };
-    Ok(status_payload(args.index_dir.as_deref()))
+    Ok(status_payload(
+        args.index_dir.as_deref(),
+        replay_snapshot_mode(args.deep),
+    ))
 }
 
 fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
@@ -1554,6 +1569,11 @@ fn ingest_legi_archives_payload(
     if let Some(error) = fatal_error {
         return Err(error);
     }
+    let replay_snapshot_cache = if run_status == IngestRunStatus::Completed {
+        Some(refresh_replay_snapshot(&postgres).map_err(storage_error_object)?)
+    } else {
+        None
+    };
 
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
@@ -1589,7 +1609,10 @@ fn ingest_legi_archives_payload(
         "quarantined_payloads": counters.quarantined_payloads,
         "parsed_metadata_roots": counters.parsed_metadata_roots,
         "unsupported_roots": counters.unsupported_roots,
-        "quarantine_dir": quarantine_dir
+        "quarantine_dir": quarantine_dir,
+        "replay_snapshot_cache": replay_snapshot_cache
+            .as_ref()
+            .map(|snapshot| replay_snapshot_cache_json("refreshed", snapshot))
     }))
 }
 
@@ -2053,6 +2076,7 @@ fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, Er
     let postgres = open_index(index_dir.as_path())?;
     let report =
         backfill_legi_article_hierarchy_from_metadata(&postgres).map_err(storage_error_object)?;
+    let replay_snapshot = refresh_replay_snapshot(&postgres).map_err(storage_error_object)?;
 
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
@@ -2067,11 +2091,25 @@ fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, Er
         } else {
             None::<&str>
         },
+        "replay_snapshot_cache": replay_snapshot_cache_json("refreshed", &replay_snapshot)
     }))
 }
 
 fn default_legi_run_id() -> String {
     format!("legi-{}", unix_seconds())
+}
+
+fn replay_snapshot_cache_json(source: &str, snapshot: &ReplaySnapshotReport) -> Value {
+    json!({
+        "source": source,
+        "status": snapshot.status(),
+        "signature": snapshot.signature.as_str(),
+        "documents": snapshot.documents.count,
+        "chunks": snapshot.chunks.count,
+        "publisher_edges": snapshot.publisher_edges.count,
+        "embeddings": snapshot.embeddings.count,
+        "manifests": snapshot.manifests.count
+    })
 }
 
 fn embed_chunks_payload(
@@ -2152,6 +2190,7 @@ fn embed_chunks_payload(
         },
     )
     .map_err(storage_error_object)?;
+    let replay_snapshot = refresh_replay_snapshot(&postgres).map_err(storage_error_object)?;
 
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
@@ -2190,7 +2229,8 @@ fn embed_chunks_payload(
             "embedding_fingerprint": rebuild.embedding_fingerprint,
             "index_name": rebuild.index_name,
             "index_lists": rebuild.index_lists
-        }
+        },
+        "replay_snapshot_cache": replay_snapshot_cache_json("refreshed", &replay_snapshot)
     }))
 }
 
@@ -3590,7 +3630,15 @@ fn ensure_embedding_runtime_ready(
         .map_err(embedding_error_object)
 }
 
-fn status_payload(index_dir: Option<&Path>) -> Value {
+fn replay_snapshot_mode(deep: bool) -> ReplaySnapshotMode {
+    if deep {
+        ReplaySnapshotMode::Refresh
+    } else {
+        ReplaySnapshotMode::Cached
+    }
+}
+
+fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshotMode) -> Value {
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
     let model_cache = model_cache_status(&embedding_config);
@@ -3598,7 +3646,7 @@ fn status_payload(index_dir: Option<&Path>) -> Value {
     let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint.clone();
-    let (index, ingest_health) = status_index_and_ingest_health(index_dir);
+    let (index, ingest_health) = status_index_and_ingest_health(index_dir, replay_snapshot_mode);
     let phase1_gate = phase1_gate_payload(&index, &ingest_health);
 
     json!({
@@ -3639,6 +3687,15 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
     let ingest_available = ingest_health["state"] == "available";
     let query_ready = index["query_ready"].as_bool().unwrap_or(false);
     let locked_embedding_model = phase1_embedding_model_locked(ingest_health);
+    let replay_snapshot_status = ingest_health["replay_snapshot_status"]
+        .as_str()
+        .unwrap_or("unknown");
+    let replay_snapshot_source = ingest_health["replay_snapshot_source"]
+        .as_str()
+        .unwrap_or("unknown");
+    let replay_snapshot_message = format!(
+        "replay snapshot signatures over canonical projections must be available; status={replay_snapshot_status}, source={replay_snapshot_source}"
+    );
 
     let checks = vec![
         phase1_gate_check(
@@ -3687,7 +3744,7 @@ fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
             } else {
                 "pending"
             },
-            "replay snapshot signatures over canonical projections must be available",
+            replay_snapshot_message,
         ),
         phase1_gate_check(
             "release_gating_eval_fixtures",
@@ -3741,8 +3798,13 @@ fn phase1_embedding_model_locked(ingest_health: &Value) -> bool {
         && manifest["normalize"].as_bool() == Some(true)
 }
 
-fn phase1_gate_check(name: &str, status: impl Into<Phase1GateStatus>, message: &str) -> Value {
+fn phase1_gate_check(
+    name: &str,
+    status: impl Into<Phase1GateStatus>,
+    message: impl Into<String>,
+) -> Value {
     let status = status.into().as_str();
+    let message = message.into();
     json!({
         "name": name,
         "status": status,
@@ -3783,7 +3845,10 @@ fn coverage_value_complete(coverage: &Value) -> bool {
     matches!((covered, total), (Some(covered), Some(total)) if total > 0 && covered == total)
 }
 
-fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
+fn status_index_and_ingest_health(
+    index_dir: Option<&Path>,
+    replay_snapshot_mode: ReplaySnapshotMode,
+) -> (Value, Value) {
     let Some(index_dir) = configured_index_dir(index_dir) else {
         return (
             json!({
@@ -3809,44 +3874,46 @@ fn status_index_and_ingest_health(index_dir: Option<&Path>) -> (Value, Value) {
     }
 
     match open_index(&index_dir) {
-        Ok(postgres) => match load_ingest_health(&postgres) {
-            Ok(report) => {
-                let query_ready = coverage_complete(
-                    report.projection_coverage.covered,
-                    report.projection_coverage.total,
-                ) && coverage_complete(
-                    report.embedding_coverage.covered,
-                    report.embedding_coverage.total,
-                );
-                let message = if query_ready {
-                    "Index is initialized and projection/embedding coverage gates pass."
-                } else {
-                    "Index is initialized but projection/embedding coverage gates are incomplete."
-                };
-                (
-                    json!({
-                        "state": "ready",
-                        "query_ready": query_ready,
-                        "path": index_path,
-                        "message": message
-                    }),
-                    ingest_health_payload(report),
-                )
+        Ok(postgres) => {
+            match load_ingest_health_with_replay_snapshot_mode(&postgres, replay_snapshot_mode) {
+                Ok(report) => {
+                    let query_ready = coverage_complete(
+                        report.projection_coverage.covered,
+                        report.projection_coverage.total,
+                    ) && coverage_complete(
+                        report.embedding_coverage.covered,
+                        report.embedding_coverage.total,
+                    );
+                    let message = if query_ready {
+                        "Index is initialized and projection/embedding coverage gates pass."
+                    } else {
+                        "Index is initialized but projection/embedding coverage gates are incomplete."
+                    };
+                    (
+                        json!({
+                            "state": "ready",
+                            "query_ready": query_ready,
+                            "path": index_path,
+                            "message": message
+                        }),
+                        ingest_health_payload(report),
+                    )
+                }
+                Err(error) => {
+                    let error = storage_error_object(error);
+                    (
+                        json!({
+                            "state": "unavailable",
+                            "query_ready": false,
+                            "path": index_path,
+                            "message": "Index exists but ingest health could not be loaded.",
+                            "error": error
+                        }),
+                        pending_ingest_health(),
+                    )
+                }
             }
-            Err(error) => {
-                let error = storage_error_object(error);
-                (
-                    json!({
-                        "state": "unavailable",
-                        "query_ready": false,
-                        "path": index_path,
-                        "message": "Index exists but ingest health could not be loaded.",
-                        "error": error
-                    }),
-                    pending_ingest_health(),
-                )
-            }
-        },
+        }
         Err(error) => (
             json!({
                 "state": "unavailable",

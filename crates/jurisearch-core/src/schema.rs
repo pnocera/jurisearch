@@ -363,6 +363,16 @@ pub fn compiled_schema() -> Value {
                     }
                 }
             },
+            "StatusRequest": {
+                "properties": {
+                    "index_dir": { "type": "string" },
+                    "deep": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "When true, recompute and cache full replay snapshot signatures; default status reads cached signatures only."
+                    }
+                }
+            },
             "StatusResponse": {
                 "properties": {
                     "schema_version": { "type": "string" },
