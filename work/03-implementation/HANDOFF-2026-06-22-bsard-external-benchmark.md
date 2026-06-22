@@ -14,6 +14,8 @@ Date: 2026-06-22
 - `external-benchmarks/README.md`
 - `external-benchmarks/bsard_benchmark.py`
 - `work/03-implementation/02-evidence/2026-06-22-bsard-external-benchmark-harness-smoke.md`
+- `work/03-implementation/02-evidence/2026-06-22-bsard-full-benchmark-result.md`
+- `work/03-implementation/02-evidence/phase1-external-benchmark-bsard.json`
 - Claude review artifacts:
   - `work/03-implementation/01-reviews/2026-06-22-bsard-external-benchmark-harness-claude-review.md`
   - `work/03-implementation/01-reviews/2026-06-22-bsard-external-benchmark-harness-claude-review-r2.md`
@@ -97,10 +99,12 @@ Detailed smoke evidence is in `work/03-implementation/02-evidence/2026-06-22-bsa
   - Fixed threshold floors, metric-vs-threshold re-derivation, locked embedding checks, revision pinning, true recall, artifact identity/size checks, retries, cache-key hardening, deterministic tie-breaks.
 - R2 verdict: `GO`
   - Applied the non-blocking README note that gate artifacts must use default `--k 20`.
+- Full-result review verdict: `GO`
+  - Applied the non-blocking clarifications that BSARD BM25/RRF metrics are from the standalone Python harness and that the status snippet is hand-condensed from the literal `phase1_gate` JSON shape.
 
-## Next Step
+## Full Benchmark Result
 
-Run the full BSARD benchmark without limits:
+The full BSARD benchmark was run without corpus/question limits:
 
 ```bash
 python3 external-benchmarks/bsard_benchmark.py \
@@ -111,21 +115,65 @@ python3 external-benchmarks/bsard_benchmark.py \
   --out work/03-implementation/02-evidence/phase1-external-benchmark-bsard.json
 ```
 
-Then validate status:
+Result artifact:
+
+- `state=failed`
+- dataset revision `f3ca6a396a47c4a3afd26b766b5abc0a56bb4205`
+- `22,633` corpus documents
+- `222` test questions
+- runtime `2,339.89s`
+
+Metrics:
+
+| Mode | Recall@20 | Success@20 | MRR@20 | nDCG@20 |
+|---|---:|---:|---:|---:|
+| BM25 | `0.3789` | `0.5270` | `0.2699` | `0.2597` |
+| Dense | `0.4784` | `0.6712` | `0.3843` | `0.3512` |
+| Hybrid RRF | `0.4683` | `0.6261` | `0.3389` | `0.3297` |
+
+The artifact misses every status-enforced hybrid floor:
+
+- recall@20 floor `0.75`, observed `0.4683`
+- nDCG@20 floor `0.60`, observed `0.3297`
+- MRR@20 floor `0.50`, observed `0.3389`
+
+Dense retrieval outperformed the standalone benchmark harness RRF hybrid on BSARD, so the immediate quality work should investigate retrieval/ranking rather than relaxing the gate.
+
+Scope caveat: these BM25 and RRF numbers come from the standalone external Python harness, not the production Rust `pg_search` analyzer or production retrieval pipeline. The shared production-relevant component is the locked `bge-m3` embedding fingerprint.
+
+Status validation against the completed LEGI index:
 
 ```bash
+JURISEARCH_INDEX_DIR=/home/pierre/Work/jurisearch/index/phase1-freemium-20250713 \
 JURISEARCH_PHASE1_EXTERNAL_BENCHMARK=work/03-implementation/02-evidence/phase1-external-benchmark-bsard.json \
   cargo run -q -p jurisearch-cli -- status
 ```
 
-Expected:
+Relevant result:
 
-- If metrics clear floors, `external_expert_annotated_eval` passes.
-- `claim_allowed` may still depend on other Phase 1 checks in the live index.
+- `phase1_gate.state=not_ready`
+- `phase1_gate.claim_allowed=false`
+- `external_expert_annotated_eval=fail`
+- All other Phase 1 checks pass: index query readiness, completed ingest run, zero failed members, projection coverage, embedding coverage, replay snapshot, final embedding model, and reranker decision.
+
+The status summary above is hand-condensed; the literal CLI output stores checks under `phase1_gate.checks[]` and artifact details under `phase1_gate.external_benchmark.*`.
+
+Detailed evidence is in `work/03-implementation/02-evidence/2026-06-22-bsard-full-benchmark-result.md`.
+
+## Next Step
+
+Do not lower thresholds to make this artifact pass. The next step is a focused benchmark-quality investigation:
+
+- verify BSARD text/qrels/ID adaptation and whether title/metadata should be included;
+- compare dense-only, BM25-only, and hybrid variants because dense currently beats the benchmark harness RRF hybrid;
+- decide whether the eventual gate should keep using the standalone Python proxy harness or execute the production Rust retrieval pipeline against BSARD;
+- tune RRF/BM25 analyzer/query preprocessing on a development split or separate candidate set before rerunning the locked full test split;
+- measure whether the deferred reranker can clear the external benchmark with acceptable latency and fallback behavior;
+- keep LLeQA as a secondary external candidate under the same artifact/gate discipline.
 
 ## Open Risks
 
-- Full BSARD run will embed about 22.6k documents plus 222 test questions; OpenRouter throughput may vary.
+- Full BSARD run completed on 2026-06-22, but the artifact failed the current quality floors.
 - The harness still writes the `.npz` cache only after all document and query embeddings succeed. Retries help, but a hard endpoint failure can require a rerun.
 - BSARD is Belgian statutory law. Passing the gate supports only the scoped external French-language statutory benchmark claim, not France-LEGI human-reviewed gold.
 - BSARD/LLeQA are CC-BY-NC-SA-4.0; keep use eval-only and do not redistribute dataset content.
