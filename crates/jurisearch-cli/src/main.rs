@@ -1633,18 +1633,21 @@ fn process_legi_archive_member<C: postgres::GenericClient>(
     )?;
     match resume.action {
         IngestResumeAction::Skip => {
-            record_legi_member(
-                client,
-                run_id,
-                LegiMemberRecordInput {
-                    archive_name,
-                    member_path: member.member_path.as_str(),
-                    source_entity: None,
-                    date_anchor: None,
-                    status: IngestMemberStatus::Skipped,
-                    compatibility,
-                },
-            )?;
+            // Same-run skips would collide with the existing member row and demote inserted work.
+            if resume.previous_run_id.as_deref() != Some(run_id) {
+                record_legi_member(
+                    client,
+                    run_id,
+                    LegiMemberRecordInput {
+                        archive_name,
+                        member_path: member.member_path.as_str(),
+                        source_entity: None,
+                        date_anchor: None,
+                        status: IngestMemberStatus::Skipped,
+                        compatibility,
+                    },
+                )?;
+            }
             counters.skipped_members += 1;
             counters.skipped_compatible_members += 1;
             return Ok(());

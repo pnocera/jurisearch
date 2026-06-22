@@ -2101,6 +2101,87 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
 }
 
 #[test]
+fn ingest_legi_archives_same_run_resume_keeps_inserted_members_inserted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI LEGI same-run resume")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-same-run-resume.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-same-run-resume-archives.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_legi_global_20250101-000000.tar.gz");
+    let article = article_fixture();
+    write_tar_gz(
+        archive_path.as_path(),
+        &[("legi/articles/LEGIARTI000006419320.xml", article.as_bytes())],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-cli-same-resume"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["inserted_documents"], 1);
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "legi-archives", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-cli-same-resume"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["visited_members"], 1);
+    assert_eq!(json["inserted_documents"], 0);
+    assert_eq!(json["skipped_members"], 1);
+    assert_eq!(json["skipped_compatible_members"], 1);
+
+    let postgres = ManagedPostgres::start_durable(pg_config, index.path())?;
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT status || ':' || attempt_count::text || ':' || coalesce(source_entity, 'none') \
+             FROM ingest_member \
+             WHERE run_id = 'run-cli-same-resume' \
+               AND member_path = 'legi/articles/LEGIARTI000006419320.xml';",
+        )?,
+        "inserted:1:LEGIARTI000006419320"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text \
+             FROM ingest_member \
+             WHERE run_id = 'run-cli-same-resume';",
+        )?,
+        "1"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn ingest_legi_archives_skips_no_text_articles_without_failing_run()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(pg_config) = discover_pg_config("CLI LEGI no-text article skip")? else {
