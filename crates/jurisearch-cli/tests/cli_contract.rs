@@ -4043,6 +4043,210 @@ fn session_jsonl_expand_returns_curated_terms() {
     assert_eq!(values[1]["result"]["bye"], true);
 }
 
+#[test]
+fn ingest_juri_archives_rejects_zero_limit_before_opening_index() {
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "ingest",
+            "juri-archives",
+            "--source",
+            "cass",
+            "--archives-dir",
+            "/tmp",
+            "--limit-members",
+            "0",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+}
+
+fn cass_decision_fixture(uid: &str, num_affaire: &str) -> Vec<u8> {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<TEXTE_JURI_JUDI>
+<META><META_COMMUN><ID>{uid}</ID><ANCIEN_ID/><ORIGINE>JURI</ORIGINE>
+<URL>texte/juri/judi/JURI/TEXT/.../{uid}.xml</URL><NATURE>ARRET</NATURE>
+</META_COMMUN><META_SPEC><META_JURI>
+<TITRE>Cour de cassation, chambre sociale, 4 juin 2025, {num_affaire}</TITRE>
+<DATE_DEC>2025-06-04</DATE_DEC><JURIDICTION>Cour de cassation</JURIDICTION>
+<NUMERO>P2500111</NUMERO><SOLUTION>Cassation</SOLUTION>
+</META_JURI><META_JURI_JUDI>
+<NUMEROS_AFFAIRES><NUMERO_AFFAIRE>{num_affaire}</NUMERO_AFFAIRE></NUMEROS_AFFAIRES>
+<PUBLI_BULL publie="oui"/><FORMATION>CHAMBRE_SOCIALE</FORMATION>
+<ECLI>ECLI:FR:CCASS:2025:SO00111</ECLI>
+</META_JURI_JUDI></META_SPEC></META>
+<TEXTE><BLOC_TEXTUEL><CONTENU>La clause de non-concurrence est nulle faute de contrepartie financiere. La Cour casse l'arret attaque concernant M. [B].</CONTENU></BLOC_TEXTUEL>
+<SOMMAIRE/><CITATION_JP/></TEXTE>
+<LIENS><LIEN id="LEGIARTI000006900782" cidtexte="LEGITEXT000006072050" sens="cible" typelien="CITATION" num="L1121-1" naturetexte="" nortexte="" numtexte="" datesignatexte="">Article L1121-1 du code du travail</LIEN></LIENS>
+</TEXTE_JURI_JUDI>"#
+    )
+    .into_bytes()
+}
+
+#[test]
+fn ingest_juri_archives_records_accounting_and_quarantines_failures()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(pg_config) = discover_pg_config("CLI juri archive ingest")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-ingest.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-archives.")
+        .tempdir()?;
+    let quarantine = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-quarantine.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_cass_global_20250101-000000.tar.gz");
+    write_tar_gz(
+        archive_path.as_path(),
+        &[
+            (
+                "juri/cass/JURITEXT000051824029.xml",
+                cass_decision_fixture("JURITEXT000051824029", "23-14999").as_slice(),
+            ),
+            (
+                "juri/cass/JURITEXT000051824030.xml",
+                cass_decision_fixture("JURITEXT000051824030", "23-15000").as_slice(),
+            ),
+            // Missing required ID/DATE_DEC -> parse failure -> quarantined.
+            (
+                "juri/cass/BROKEN.xml",
+                b"<TEXTE_JURI_JUDI><META/></TEXTE_JURI_JUDI>",
+            ),
+        ],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-juri", "--quarantine-dir"])
+        .arg(quarantine.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "ingest juri-archives");
+    assert_eq!(json["source"], "cass");
+    assert_eq!(json["run_id"], "run-juri");
+    assert_eq!(json["run_status"], "failed"); // one broken member
+    // Honest provenance surfaced at the command + manifest level.
+    assert_eq!(json["zone_accurate"], false);
+    assert_eq!(json["chunking_provenance"], "heuristic");
+    assert_eq!(json["visited_members"], 3);
+    assert_eq!(json["inserted_documents"], 2);
+    assert_eq!(json["failed_members"], 1);
+    assert_eq!(json["quarantined_payloads"], 1);
+    assert!(json["inserted_publisher_edges"].as_u64().unwrap() >= 2);
+    assert_eq!(json["manifest"]["source"], "cass");
+    assert_eq!(json["manifest"]["dataset"], "CASS");
+    assert_eq!(json["manifest"]["zone_accurate"], false);
+    assert_eq!(json["manifest"]["chunking_provenance"], "heuristic");
+    assert_eq!(json["manifest"]["source_version"], "20250101-000000");
+
+    let quarantine_entries =
+        fs::read_dir(quarantine.path().join("run-juri"))?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(quarantine_entries.len(), 1);
+
+    // The two decisions are persisted as kind='decision' with the publisher edge resolved.
+    let postgres = ManagedPostgres::start_durable(pg_config, index.path())?;
+    let decision_count =
+        postgres.execute_sql("SELECT count(*) FROM documents WHERE kind = 'decision';")?;
+    assert_eq!(decision_count.trim(), "2");
+    let resolved_edge = postgres.execute_sql(
+        "SELECT count(*) FROM graph_edges \
+         WHERE edge_source = 'publisher' AND payload->>'to_source_uid' = 'LEGIARTI000006900782';",
+    )?;
+    assert_eq!(resolved_edge.trim(), "2");
+    postgres.stop()?;
+
+    Ok(())
+}
+
+#[test]
+fn ingest_juri_archives_compatible_replay_skips_inserted_members()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(_pg_config) = discover_pg_config("CLI juri replay skip")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-replay.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-replay-archives.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_jade_global_20250101-000000.tar.gz");
+    write_tar_gz(
+        archive_path.as_path(),
+        &[(
+            "juri/jade/CETATEXT000051549953.xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<TEXTE_JURI_ADMIN>
+<META><META_COMMUN><ID>CETATEXT000051549953</ID><ANCIEN_ID/><ORIGINE>CETAT</ORIGINE>
+<URL>texte/juri/admin/CETA/TEXT/.../CETATEXT000051549953.xml</URL><NATURE>Texte</NATURE>
+</META_COMMUN><META_SPEC><META_JURI>
+<TITRE>CAA de PARIS, 9eme chambre, 30/04/2025, 24PA03561</TITRE>
+<DATE_DEC>2025-04-30</DATE_DEC><JURIDICTION>CAA de PARIS</JURIDICTION>
+<NUMERO>24PA03561</NUMERO><SOLUTION/>
+</META_JURI><META_JURI_ADMIN>
+<FORMATION>9eme chambre</FORMATION><TYPE_REC>exces de pouvoir</TYPE_REC><PUBLI_RECUEIL>C</PUBLI_RECUEIL>
+</META_JURI_ADMIN></META_SPEC></META>
+<TEXTE><BLOC_TEXTUEL><CONTENU>Le refus de renouvellement du titre de sejour est legal.</CONTENU></BLOC_TEXTUEL><SOMMAIRE/></TEXTE>
+<LIENS/>
+</TEXTE_JURI_ADMIN>"#,
+        )],
+    )?;
+
+    let run = |run_id: &str| {
+        Command::cargo_bin("jurisearch")
+            .unwrap()
+            .arg("--index-dir")
+            .arg(index.path())
+            .args(["ingest", "juri-archives", "--source", "jade", "--archives-dir"])
+            .arg(archives.path())
+            .args(["--run-id", run_id])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+
+    let first: Value = serde_json::from_slice(&run("run-1"))?;
+    assert_eq!(first["inserted_documents"], 1);
+    assert_eq!(first["run_status"], "completed");
+
+    // A second run over the same unchanged archive must skip the already-inserted member.
+    let second: Value = serde_json::from_slice(&run("run-2"))?;
+    assert_eq!(second["inserted_documents"], 0);
+    assert_eq!(second["skipped_compatible_members"], 1);
+    assert_eq!(second["run_status"], "completed");
+
+    Ok(())
+}
+
 fn discover_pg_config(test_name: &str) -> Result<Option<PgConfig>, StorageError> {
     let pg_config = match PgConfig::discover() {
         Ok(pg_config) => pg_config,

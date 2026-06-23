@@ -38,6 +38,7 @@ use jurisearch_ingest::{
         ArchiveMember, ArchivePlan, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
         PlannedArchive, for_each_xml_member_until, plan_from_dir,
     },
+    juri::{JuriParseError, ParsedJuriXml, parse_juri_member},
     legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
 use jurisearch_official_api::{OfficialApiConfig, PisteClient};
@@ -61,10 +62,11 @@ use jurisearch_storage::{
     france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     migrations::CURRENT_SCHEMA_VERSION,
     projection::{
-        ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot, LegiProjectionStatements,
-        backfill_legi_article_hierarchy_from_metadata,
+        ChunkEmbeddingInsert, DocumentProjectionStatements, LegiHierarchyBackfillScope,
+        LegiMetadataRoot, LegiProjectionStatements, backfill_legi_article_hierarchy_from_metadata,
         backfill_legi_article_hierarchy_from_metadata_scoped, insert_chunk_embeddings,
-        insert_legi_documents_with_statements, insert_legi_metadata_roots_with_client,
+        insert_decision_documents_with_statements, insert_legi_documents_with_statements,
+        insert_legi_metadata_roots_with_client, prepare_document_projection_statements,
         prepare_legi_projection_statements,
     },
     retrieval::{
@@ -734,6 +736,30 @@ enum IngestSubcommand {
         #[arg(long)]
         safe_mode: bool,
     },
+    /// Stream DILA bulk jurisprudence archives (cass/capp/inca/jade) into canonical decisions.
+    JuriArchives {
+        /// Jurisprudence dataset to ingest.
+        #[arg(long)]
+        source: CliJuriSource,
+        /// Directory containing the jurisprudence archives to ingest.
+        #[arg(long)]
+        archives_dir: PathBuf,
+        /// Resume/extend an existing ingest run by ID (otherwise a new run is started).
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Process at most this many archive members (for smoke/partial runs).
+        #[arg(long)]
+        limit_members: Option<u32>,
+        /// Skip any single archive member larger than this many bytes.
+        #[arg(long, default_value_t = DEFAULT_MEMBER_BYTE_LIMIT)]
+        max_member_bytes: u64,
+        /// Write skipped/oversized/invalid members to this directory for inspection.
+        #[arg(long)]
+        quarantine_dir: Option<PathBuf>,
+        /// Conservative mode: quarantine on any parse anomaly instead of best-effort recovery.
+        #[arg(long)]
+        safe_mode: bool,
+    },
     /// Embed stored canonical chunks and finalize the dense ANN index.
     EmbedChunks {
         /// Maximum chunk count allowed for this run; refuses larger indexes instead of finalizing partial coverage.
@@ -842,12 +868,41 @@ impl From<CliOutputFormat> for OutputFormat {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliArchiveSource {
     Legi,
+    Cass,
+    Capp,
+    Inca,
+    Jade,
 }
 
 impl From<CliArchiveSource> for ArchiveSource {
     fn from(source: CliArchiveSource) -> Self {
         match source {
             CliArchiveSource::Legi => Self::Legi,
+            CliArchiveSource::Cass => Self::Cass,
+            CliArchiveSource::Capp => Self::Capp,
+            CliArchiveSource::Inca => Self::Inca,
+            CliArchiveSource::Jade => Self::Jade,
+        }
+    }
+}
+
+/// The four DILA bulk jurisprudence datasets ingested by `ingest juri-archives`.
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum CliJuriSource {
+    Cass,
+    Capp,
+    Inca,
+    Jade,
+}
+
+impl From<CliJuriSource> for ArchiveSource {
+    fn from(source: CliJuriSource) -> Self {
+        match source {
+            CliJuriSource::Cass => Self::Cass,
+            CliJuriSource::Capp => Self::Capp,
+            CliJuriSource::Inca => Self::Inca,
+            CliJuriSource::Jade => Self::Jade,
         }
     }
 }
@@ -3146,6 +3201,39 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 Err(error) => emit_error(error),
             }
         }
+        Some(IngestSubcommand::JuriArchives {
+            source,
+            archives_dir,
+            run_id,
+            limit_members,
+            max_member_bytes,
+            quarantine_dir,
+            safe_mode,
+        }) => {
+            if limit_members == Some(0) {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest juri-archives --limit-members must be at least 1 when provided",
+                ));
+            }
+            if max_member_bytes == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest juri-archives --max-member-bytes must be at least 1",
+                ));
+            }
+            match ingest_juri_archives_payload(
+                index_dir,
+                ArchiveSource::from(source),
+                archives_dir.as_path(),
+                run_id,
+                limit_members,
+                max_member_bytes,
+                quarantine_dir.as_deref(),
+                safe_mode,
+            ) {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
         Some(IngestSubcommand::EmbedChunks {
             limit,
             index_lists,
@@ -3544,6 +3632,587 @@ fn ingest_legi_archives_payload(
             .as_ref()
             .map(|snapshot| replay_snapshot_cache_value(snapshot.as_ref()))
     }))
+}
+
+// ===== DILA bulk jurisprudence (decision) ingestion ==========================================
+
+const JURI_PARSER_VERSION: &str = "juri_decision_parser:v1";
+const JURI_CANONICAL_SCHEMA_VERSION: &str = "juri_decision:v1";
+
+#[derive(Default)]
+struct JuriArchiveIngestCounters {
+    visited_members: usize,
+    inserted_documents: usize,
+    inserted_chunks: usize,
+    inserted_publisher_edges: usize,
+    skipped_members: usize,
+    skipped_compatible_members: usize,
+    failed_members: usize,
+    quarantined_payloads: usize,
+    unsupported_roots: BTreeMap<String, usize>,
+}
+
+impl JuriArchiveIngestCounters {
+    fn merge_committed(&mut self, committed: Self) {
+        self.inserted_documents += committed.inserted_documents;
+        self.inserted_chunks += committed.inserted_chunks;
+        self.inserted_publisher_edges += committed.inserted_publisher_edges;
+        self.skipped_members += committed.skipped_members;
+        self.skipped_compatible_members += committed.skipped_compatible_members;
+        self.failed_members += committed.failed_members;
+        self.quarantined_payloads += committed.quarantined_payloads;
+        for (root, count) in committed.unsupported_roots {
+            *self.unsupported_roots.entry(root).or_default() += count;
+        }
+    }
+}
+
+fn default_juri_run_id(source: ArchiveSource) -> String {
+    format!("{}-{}", source.as_str(), unix_seconds())
+}
+
+fn juri_archive_manifest(
+    source: ArchiveSource,
+    plan: &ArchivePlan,
+    counters: &JuriArchiveIngestCounters,
+    run_status: &str,
+) -> Value {
+    let latest_archive = plan.deltas.last().unwrap_or(&plan.baseline);
+    json!({
+        "source": source.as_str(),
+        "dataset": source.as_str().to_uppercase(),
+        // Honest provenance: bulk jurisprudence carries NO official Judilibre zone offsets, so all
+        // decision chunking is heuristic and never satisfies the official-zone gate by assertion.
+        "chunking_provenance": "heuristic",
+        "zone_accurate": false,
+        "run_status": run_status,
+        "complete": run_status == IngestRunStatus::Completed.as_str(),
+        "parser_version": JURI_PARSER_VERSION,
+        "canonical_schema_version": JURI_CANONICAL_SCHEMA_VERSION,
+        "code_version": CLI_CODE_VERSION,
+        "source_version": latest_archive.timestamp.to_string(),
+        "freshness": {
+            "latest_archive": latest_archive.file_name.as_str(),
+            "latest_archive_kind": latest_archive.kind,
+            "latest_archive_timestamp": latest_archive.timestamp.to_string(),
+            "latest_archive_timestamp_compact": latest_archive.timestamp.compact()
+        },
+        "archive_plan": {
+            "baseline": planned_archive_manifest(&plan.baseline),
+            "deltas": plan.deltas.iter().map(planned_archive_manifest).collect::<Vec<_>>(),
+            "skipped_count": plan.skipped.len(),
+            "skipped": &plan.skipped
+        },
+        "coverage": {
+            "visited_members": counters.visited_members,
+            "inserted_documents": counters.inserted_documents,
+            "inserted_chunks": counters.inserted_chunks,
+            "inserted_publisher_edges": counters.inserted_publisher_edges,
+            "skipped_members": counters.skipped_members,
+            "skipped_compatible_members": counters.skipped_compatible_members,
+            "failed_members": counters.failed_members,
+            "quarantined_payloads": counters.quarantined_payloads,
+            "unsupported_roots": &counters.unsupported_roots
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_juri_archives_payload(
+    index_dir: Option<&Path>,
+    source: ArchiveSource,
+    archives_dir: &Path,
+    run_id: Option<String>,
+    limit_members: Option<u32>,
+    max_member_bytes: u64,
+    quarantine_dir: Option<&Path>,
+    safe_mode: bool,
+) -> Result<Value, ErrorObject> {
+    if !source.is_jurisprudence() {
+        return Err(ErrorObject::bad_input(format!(
+            "ingest juri-archives source `{}` is not a jurisprudence dataset",
+            source.as_str()
+        )));
+    }
+    let index_dir = require_configured_index_dir(index_dir)?;
+    let postgres = open_index_for_bulk_ingest(index_dir.as_path())?;
+    let mut ingest_client =
+        postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+            .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    ingest_client
+        .batch_execute("SET synchronous_commit TO off;")
+        .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    let plan = plan_from_dir(source, archives_dir).map_err(|error| {
+        ErrorObject::bad_input(format!(
+            "failed to plan {} archives: {error}",
+            source.as_str()
+        ))
+    })?;
+    let run_id = run_id.unwrap_or_else(|| default_juri_run_id(source));
+    let archive_plan_json =
+        serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
+    let initial_manifest = juri_archive_manifest(
+        source,
+        &plan,
+        &JuriArchiveIngestCounters::default(),
+        IngestRunStatus::Running.as_str(),
+    );
+    let initial_manifest_json = initial_manifest.to_string();
+
+    start_ingest_run_with_client(
+        &mut ingest_client,
+        &IngestRunInput {
+            run_id: run_id.as_str(),
+            source: source.as_str(),
+            parser_version: JURI_PARSER_VERSION,
+            schema_version: JURI_CANONICAL_SCHEMA_VERSION,
+            code_version: CLI_CODE_VERSION,
+            safe_mode,
+            archive_plan_json: Some(archive_plan_json.as_str()),
+            manifest_json: Some(initial_manifest_json.as_str()),
+        },
+    )
+    .map_err(storage_error_object)?;
+
+    let mut counters = JuriArchiveIngestCounters::default();
+    let mut fatal_error = None::<ErrorObject>;
+    let limit_members = limit_members.map(|limit| limit as usize);
+    let mut archives = vec![&plan.baseline];
+    archives.extend(plan.deltas.iter());
+
+    'archives: for archive in archives {
+        let archive_name = archive.file_name.as_str();
+        let mut pending_members = Vec::with_capacity(LEGI_INGEST_TRANSACTION_BATCH_SIZE);
+        let mut pending_member_bytes = 0usize;
+        let read_result = for_each_xml_member_until(&archive.path, max_member_bytes, |member| {
+            if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
+                return Ok(ArchiveVisit::Stop);
+            }
+            counters.visited_members += 1;
+            let member_bytes = member.bytes.len();
+            if !pending_members.is_empty()
+                && pending_member_bytes.saturating_add(member_bytes)
+                    > LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT
+                && let Err(error) = flush_juri_archive_member_batch(
+                    &mut ingest_client,
+                    source,
+                    run_id.as_str(),
+                    archive_name,
+                    &mut pending_members,
+                    &mut pending_member_bytes,
+                    quarantine_dir,
+                    &mut counters,
+                )
+            {
+                fatal_error = Some(storage_error_object(error));
+                return Ok(ArchiveVisit::Stop);
+            }
+            pending_members.push(member);
+            pending_member_bytes = pending_member_bytes.saturating_add(member_bytes);
+            if (pending_members.len() >= LEGI_INGEST_TRANSACTION_BATCH_SIZE
+                || pending_member_bytes >= LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT)
+                && let Err(error) = flush_juri_archive_member_batch(
+                    &mut ingest_client,
+                    source,
+                    run_id.as_str(),
+                    archive_name,
+                    &mut pending_members,
+                    &mut pending_member_bytes,
+                    quarantine_dir,
+                    &mut counters,
+                )
+            {
+                fatal_error = Some(storage_error_object(error));
+                return Ok(ArchiveVisit::Stop);
+            }
+            Ok(
+                if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
+                    ArchiveVisit::Stop
+                } else {
+                    ArchiveVisit::Continue
+                },
+            )
+        });
+
+        if fatal_error.is_none()
+            && read_result.is_ok()
+            && !pending_members.is_empty()
+            && let Err(error) = flush_juri_archive_member_batch(
+                &mut ingest_client,
+                source,
+                run_id.as_str(),
+                archive_name,
+                &mut pending_members,
+                &mut pending_member_bytes,
+                quarantine_dir,
+                &mut counters,
+            )
+        {
+            fatal_error = Some(storage_error_object(error));
+        }
+
+        if let Err(error) = read_result {
+            fatal_error = Some(ErrorObject::bad_input(format!(
+                "failed to read {} archive `{}`: {error}",
+                source.as_str(),
+                archive.path.display()
+            )));
+        }
+        if fatal_error.is_some()
+            || limit_members.is_some_and(|limit| counters.visited_members >= limit)
+        {
+            break 'archives;
+        }
+    }
+
+    let run_status = if counters.failed_members == 0 && fatal_error.is_none() {
+        IngestRunStatus::Completed
+    } else {
+        IngestRunStatus::Failed
+    };
+    let final_manifest = juri_archive_manifest(source, &plan, &counters, run_status.as_str());
+    let final_manifest_json = final_manifest.to_string();
+    if let Err(error) = update_ingest_run_manifest_with_client(
+        &mut ingest_client,
+        run_id.as_str(),
+        &final_manifest_json,
+    ) {
+        fatal_error.get_or_insert_with(|| storage_error_object(error));
+    }
+
+    let error_message = fatal_error.as_ref().map(|error| error.message.as_str());
+    finish_ingest_run_with_client(&mut ingest_client, run_id.as_str(), run_status, error_message)
+        .map_err(storage_error_object)?;
+    if let Some(error) = fatal_error {
+        return Err(error);
+    }
+    let replay_snapshot_cache = if run_status == IngestRunStatus::Completed {
+        Some(maybe_refresh_replay_snapshot(&postgres)?)
+    } else {
+        None
+    };
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest juri-archives",
+        "source": source.as_str(),
+        "run_id": run_id,
+        "run_status": run_status.as_str(),
+        "safe_mode": safe_mode,
+        "zone_accurate": false,
+        "chunking_provenance": "heuristic",
+        "index_dir": index_dir,
+        "archives_dir": archives_dir,
+        "archives": {
+            "baseline": plan.baseline.file_name,
+            "deltas": plan.deltas.iter().map(|archive| archive.file_name.as_str()).collect::<Vec<_>>(),
+            "skipped": plan.skipped
+        },
+        "manifest": final_manifest,
+        "limit_members": limit_members,
+        "max_member_bytes": max_member_bytes,
+        "visited_members": counters.visited_members,
+        "inserted_documents": counters.inserted_documents,
+        "inserted_chunks": counters.inserted_chunks,
+        "inserted_publisher_edges": counters.inserted_publisher_edges,
+        "skipped_members": counters.skipped_members,
+        "skipped_compatible_members": counters.skipped_compatible_members,
+        "failed_members": counters.failed_members,
+        "quarantined_payloads": counters.quarantined_payloads,
+        "unsupported_roots": counters.unsupported_roots,
+        "quarantine_dir": quarantine_dir,
+        "replay_snapshot_cache": replay_snapshot_cache
+            .as_ref()
+            .map(|snapshot| replay_snapshot_cache_value(snapshot.as_ref()))
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_juri_archive_member_batch(
+    client: &mut postgres::Client,
+    source: ArchiveSource,
+    run_id: &str,
+    archive_name: &str,
+    pending_members: &mut Vec<ArchiveMember>,
+    pending_member_bytes: &mut usize,
+    quarantine_dir: Option<&Path>,
+    counters: &mut JuriArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    if pending_members.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    transaction
+        .batch_execute("SET LOCAL synchronous_commit TO off;")
+        .map_err(StorageError::PostgresClient)?;
+    let projection_statements = prepare_document_projection_statements(&mut transaction)?;
+    let mut committed = JuriArchiveIngestCounters::default();
+    for member in pending_members.iter() {
+        process_juri_archive_member(
+            &mut transaction,
+            source,
+            run_id,
+            archive_name,
+            member,
+            &projection_statements,
+            quarantine_dir,
+            &mut committed,
+        )?;
+    }
+    transaction.commit().map_err(StorageError::PostgresClient)?;
+    counters.merge_committed(committed);
+    pending_members.clear();
+    *pending_member_bytes = 0;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_juri_archive_member<C: postgres::GenericClient>(
+    client: &mut C,
+    source: ArchiveSource,
+    run_id: &str,
+    archive_name: &str,
+    member: &ArchiveMember,
+    projection_statements: &DocumentProjectionStatements,
+    quarantine_dir: Option<&Path>,
+    counters: &mut JuriArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    let source_payload_hash = source_payload_hash(&member.bytes);
+    let compatibility = IngestCompatibility {
+        parser_version: JURI_PARSER_VERSION,
+        schema_version: JURI_CANONICAL_SCHEMA_VERSION,
+        code_version: CLI_CODE_VERSION,
+        source_payload_hash: source_payload_hash.as_str(),
+    };
+    let resume = ingest_resume_decision_with_client(
+        client,
+        archive_name,
+        member.member_path.as_str(),
+        compatibility,
+    )?;
+    match resume.action {
+        IngestResumeAction::Skip => {
+            if resume.previous_run_id.as_deref() != Some(run_id) {
+                record_juri_member(
+                    client,
+                    source,
+                    run_id,
+                    JuriMemberRecordInput {
+                        archive_name,
+                        member_path: member.member_path.as_str(),
+                        source_entity: None,
+                        date_anchor: None,
+                        status: IngestMemberStatus::Skipped,
+                        compatibility,
+                    },
+                )?;
+            }
+            counters.skipped_members += 1;
+            counters.skipped_compatible_members += 1;
+            return Ok(());
+        }
+        IngestResumeAction::BlockedIncompatible => {
+            let message = format!(
+                "resume blocked by compatibility mismatch on fields [{}]",
+                resume.mismatched_fields.join(", ")
+            );
+            let record = record_juri_member(
+                client,
+                source,
+                run_id,
+                JuriMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: None,
+                    date_anchor: None,
+                    status: IngestMemberStatus::Failed,
+                    compatibility,
+                },
+            )?;
+            record_juri_member_error(
+                client,
+                run_id,
+                Some(record.member_id),
+                "validation_error",
+                "compatibility_mismatch",
+                message.as_str(),
+                archive_name,
+                member,
+                quarantine_dir,
+                counters,
+            )?;
+            counters.failed_members += 1;
+            return Ok(());
+        }
+        IngestResumeAction::Process | IngestResumeAction::Retry => {}
+    }
+
+    match parse_juri_member(source, member) {
+        Ok(ParsedJuriXml::Decision(decision)) => {
+            let decision = *decision;
+            let record = record_juri_member(
+                client,
+                source,
+                run_id,
+                JuriMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: Some(decision.source_uid.as_str()),
+                    date_anchor: Some(decision.decision_date.as_str()),
+                    status: IngestMemberStatus::Parsed,
+                    compatibility,
+                },
+            )?;
+            let report =
+                insert_decision_documents_with_statements(client, projection_statements, &[decision], None)?;
+            update_ingest_member_status_with_client(
+                client,
+                record.member_id,
+                IngestMemberStatus::Inserted,
+                None,
+            )?;
+            counters.inserted_documents += report.documents;
+            counters.inserted_chunks += report.chunks;
+            counters.inserted_publisher_edges += report.publisher_edges;
+        }
+        Ok(ParsedJuriXml::UnsupportedRoot { root }) => {
+            *counters.unsupported_roots.entry(root.clone()).or_default() += 1;
+            record_juri_member(
+                client,
+                source,
+                run_id,
+                JuriMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: Some(root.as_str()),
+                    date_anchor: None,
+                    status: IngestMemberStatus::Skipped,
+                    compatibility,
+                },
+            )?;
+            counters.skipped_members += 1;
+        }
+        Err(error) => {
+            let (error_class, error_code) = juri_parse_error_class(&error);
+            let message = error.to_string();
+            let record = record_juri_member(
+                client,
+                source,
+                run_id,
+                JuriMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: None,
+                    date_anchor: None,
+                    status: IngestMemberStatus::Failed,
+                    compatibility,
+                },
+            )?;
+            record_juri_member_error(
+                client,
+                run_id,
+                Some(record.member_id),
+                error_class,
+                error_code,
+                message.as_str(),
+                archive_name,
+                member,
+                quarantine_dir,
+                counters,
+            )?;
+            counters.failed_members += 1;
+        }
+    }
+    Ok(())
+}
+
+struct JuriMemberRecordInput<'a> {
+    archive_name: &'a str,
+    member_path: &'a str,
+    source_entity: Option<&'a str>,
+    date_anchor: Option<&'a str>,
+    status: IngestMemberStatus,
+    compatibility: IngestCompatibility<'a>,
+}
+
+fn record_juri_member<C: postgres::GenericClient>(
+    client: &mut C,
+    source: ArchiveSource,
+    run_id: &str,
+    input: JuriMemberRecordInput<'_>,
+) -> Result<jurisearch_storage::ingest_accounting::IngestMemberRecord, StorageError> {
+    record_ingest_member_with_client(
+        client,
+        &IngestMemberInput {
+            run_id,
+            archive_name: input.archive_name,
+            member_path: input.member_path,
+            source: source.as_str(),
+            source_entity: input.source_entity,
+            date_anchor: input.date_anchor,
+            status: input.status,
+            compatibility: input.compatibility,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_juri_member_error<C: postgres::GenericClient>(
+    client: &mut C,
+    run_id: &str,
+    member_id: Option<i64>,
+    error_class: &str,
+    error_code: &str,
+    message: &str,
+    archive_name: &str,
+    member: &ArchiveMember,
+    quarantine_dir: Option<&Path>,
+    counters: &mut JuriArchiveIngestCounters,
+) -> Result<(), StorageError> {
+    let quarantined = maybe_quarantine_payload(
+        quarantine_dir,
+        run_id,
+        archive_name,
+        member.member_path.as_str(),
+        &member.bytes,
+    )?;
+    if quarantined {
+        counters.quarantined_payloads += 1;
+    }
+    let context = json!({
+        "archive_name": archive_name,
+        "member_path": member.member_path,
+        "quarantined": quarantined
+    })
+    .to_string();
+    record_ingest_error_with_client(
+        client,
+        &IngestErrorInput {
+            run_id,
+            member_id,
+            error_class,
+            error_code,
+            message,
+            retry_policy: "none",
+            context_json: Some(context.as_str()),
+        },
+    )?;
+    Ok(())
+}
+
+fn juri_parse_error_class(error: &JuriParseError) -> (&'static str, &'static str) {
+    match error {
+        JuriParseError::Xml { .. } => ("parse_error", "parse_malformed_xml"),
+        JuriParseError::NotUtf8 { .. } => ("parse_error", "parse_not_utf8"),
+        JuriParseError::MissingRequiredField { .. } => {
+            ("validation_error", "validation_missing_required_field")
+        }
+        JuriParseError::InvalidDate { .. } => ("validation_error", "validation_invalid_date"),
+        JuriParseError::InvalidId { .. } => ("validation_error", "validation_invalid_id"),
+        JuriParseError::UnknownSource { .. } | JuriParseError::SourceFamilyMismatch { .. } => {
+            ("validation_error", "validation_source_mismatch")
+        }
+    }
 }
 
 fn flush_legi_archive_member_batch(
