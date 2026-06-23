@@ -70,7 +70,7 @@ use jurisearch_storage::{
     retrieval::{
         CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy,
         HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
-        context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        RetrievalOptions, context_documents_json, fetch_documents_json, hybrid_candidates_json,
         related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
@@ -233,6 +233,25 @@ struct SearchArgs {
     /// Pin temporal validity to this date (`YYYY-MM-DD`); only versions in force on that date match.
     #[arg(long)]
     as_of: Option<String>,
+    /// Override the hybrid RRF lexical weight (per-request; default from env, else 1.0).
+    #[arg(long)]
+    rrf_lexical_weight: Option<f64>,
+    /// Override the hybrid RRF dense weight (per-request; default from env, else 0.3).
+    #[arg(long)]
+    rrf_dense_weight: Option<f64>,
+    /// Override ivfflat.probes for dense ANN (per-request; default 4; higher = more recall, slower).
+    #[arg(long)]
+    probes: Option<u32>,
+}
+
+impl SearchArgs {
+    fn retrieval_options(&self) -> RetrievalOptions {
+        RetrievalOptions {
+            rrf_lexical_weight: self.rrf_lexical_weight,
+            rrf_dense_weight: self.rrf_dense_weight,
+            ivfflat_probes: self.probes,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -273,6 +292,12 @@ struct SessionSearchArgs {
     cursor: Option<String>,
     #[serde(default)]
     as_of: Option<String>,
+    #[serde(default)]
+    rrf_lexical_weight: Option<f64>,
+    #[serde(default)]
+    rrf_dense_weight: Option<f64>,
+    #[serde(default)]
+    probes: Option<u32>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -473,6 +498,39 @@ enum EvalSubcommand {
     /// gets relevance labels from --qrels or an external --judge-cmd, and scores P@k / recall@k /
     /// nDCG@k / MRR per mode with optional seed-free bootstrap CIs for between-mode deltas.
     Run(EvalRunArgs),
+    /// Sweep a hybrid retrieval parameter against a fixture and report the metric-maximizing value.
+    ///
+    /// Re-runs the eval (hybrid mode) at each sweep point with request-scoped options (no env
+    /// mutation). Example:  eval tune --questions q.json --qrels qrels.json --sweep rrf-dense=0.1:1.5:0.1
+    Tune(EvalTuneArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct EvalTuneArgs {
+    /// JSON file: array of {"id","query","as_of"?}.
+    #[arg(long)]
+    questions: PathBuf,
+    /// JSON qrels file (provide this OR --judge-cmd).
+    #[arg(long)]
+    qrels: Option<PathBuf>,
+    /// External judge command (provide this OR --qrels).
+    #[arg(long)]
+    judge_cmd: Option<String>,
+    /// Parameter sweep `PARAM=start:stop:step`; PARAM in {rrf-dense, rrf-lexical, probes}.
+    #[arg(long)]
+    sweep: String,
+    /// Metric to maximize (p@K, recall@K, ndcg@K, mrr@K).
+    #[arg(long, default_value = "ndcg@10")]
+    metric: String,
+    /// Candidates retrieved per question.
+    #[arg(long, default_value_t = 10)]
+    top_k: u32,
+    /// Minimum relevance label counted as relevant.
+    #[arg(long, default_value_t = 1)]
+    rel_min: i64,
+    /// Write the eval_tune artifact JSON to this path (also printed to stdout).
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -857,7 +915,14 @@ fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> 
         }
         Some(EvalSubcommand::Run(args)) => {
             let out_path = args.out.clone();
-            match eval_run_payload(args, index_dir) {
+            match eval_run_payload(args, RetrievalOptions::default(), index_dir) {
+                Ok(response) => emit_artifact(response, out_path),
+                Err(error) => emit_error(error),
+            }
+        }
+        Some(EvalSubcommand::Tune(args)) => {
+            let out_path = args.out.clone();
+            match eval_tune_payload(args, index_dir) {
                 Ok(response) => emit_artifact(response, out_path),
                 Err(error) => emit_error(error),
             }
@@ -1164,7 +1229,11 @@ fn run_external_judge(command: &str, input: &Value) -> Result<Value, ErrorObject
 /// Custom retrieval eval: retrieve each question through the chosen modes (document grouping), pool
 /// candidates, get relevance labels from qrels or an external judge, score per mode, and optionally
 /// bootstrap between-mode delta CIs. Opens the index once.
-fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+fn eval_run_payload(
+    args: EvalRunArgs,
+    options: RetrievalOptions,
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
     if args.qrels.is_none() && args.judge_cmd.is_none() {
         return Err(ErrorObject::bad_input(
             "eval run needs relevance labels: provide --qrels or --judge-cmd",
@@ -1246,6 +1315,7 @@ fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value
                     embedding_fingerprint: fingerprint,
                     retrieval_mode: *mode,
                     group_by: GroupBy::Document,
+                    options,
                     after_cursor: None,
                     as_of: as_of.as_str(),
                     kind_filter: Some("article"),
@@ -1418,6 +1488,7 @@ fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value
     };
 
     let total_pool: usize = results.iter().map(|result| result.pool.len()).sum();
+    let (env_lexical, env_dense) = rrf_weights();
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "kind": "eval_run_benchmark",
@@ -1427,9 +1498,108 @@ fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value
         "top_k": args.top_k,
         "rel_min": args.rel_min,
         "judge": judge_source,
+        "retrieval_options": {
+            "rrf_lexical_weight": options.rrf_lexical_weight.unwrap_or(env_lexical),
+            "rrf_dense_weight": options.rrf_dense_weight.unwrap_or(env_dense),
+            "ivfflat_probes": options.ivfflat_probes.unwrap_or(4),
+        },
         "pool": { "total_pairs": total_pool },
         "metrics": Value::Object(metrics_out),
         "bootstrap": bootstrap_out,
+    }))
+}
+
+/// Sweep one hybrid retrieval parameter against a fixture and report the metric-maximizing value.
+/// Re-runs `eval_run_payload` (hybrid only) per sweep point with request-scoped options.
+fn eval_tune_payload(args: EvalTuneArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let (param, range) = args.sweep.split_once('=').ok_or_else(|| {
+        ErrorObject::bad_input("--sweep must be PARAM=start:stop:step (e.g. rrf-dense=0.1:1.5:0.1)")
+    })?;
+    let bounds: Vec<&str> = range.split(':').collect();
+    if bounds.len() != 3 {
+        return Err(ErrorObject::bad_input("--sweep range must be start:stop:step"));
+    }
+    let parse = |s: &str| -> Result<f64, ErrorObject> {
+        s.trim()
+            .parse::<f64>()
+            .map_err(|_| ErrorObject::bad_input(format!("--sweep value `{s}` is not a number")))
+    };
+    let (start, stop, step) = (parse(bounds[0])?, parse(bounds[1])?, parse(bounds[2])?);
+    if step <= 0.0 || stop < start {
+        return Err(ErrorObject::bad_input(
+            "--sweep requires step > 0 and stop >= start",
+        ));
+    }
+    if !matches!(param, "rrf-dense" | "rrf-lexical" | "probes") {
+        return Err(ErrorObject::bad_input(format!(
+            "unknown sweep param `{param}`; expected rrf-dense, rrf-lexical, or probes"
+        )));
+    }
+
+    let mut values = Vec::new();
+    let mut value = start;
+    while value <= stop + 1e-9 {
+        values.push((value * 1e6).round() / 1e6);
+        value += step;
+    }
+    if values.is_empty() {
+        return Err(ErrorObject::bad_input("--sweep produced no values"));
+    }
+
+    let mut points = Vec::new();
+    for value in &values {
+        let options = match param {
+            "rrf-dense" => RetrievalOptions {
+                rrf_dense_weight: Some(*value),
+                ..Default::default()
+            },
+            "rrf-lexical" => RetrievalOptions {
+                rrf_lexical_weight: Some(*value),
+                ..Default::default()
+            },
+            // probes
+            _ => RetrievalOptions {
+                ivfflat_probes: Some(value.max(1.0) as u32),
+                ..Default::default()
+            },
+        };
+        let run_args = EvalRunArgs {
+            questions: args.questions.clone(),
+            qrels: args.qrels.clone(),
+            judge_cmd: args.judge_cmd.clone(),
+            modes: "hybrid".to_owned(),
+            metrics: args.metric.clone(),
+            top_k: args.top_k,
+            rel_min: args.rel_min,
+            bootstrap: 0,
+            out: None,
+        };
+        let result = eval_run_payload(run_args, options, index_dir)?;
+        let metric_value = result["metrics"]["hybrid"][&args.metric].as_f64();
+        points.push(json!({ "value": value, "metric": metric_value }));
+    }
+
+    let best = points
+        .iter()
+        .filter(|point| point["metric"].is_f64())
+        .max_by(|a, b| {
+            a["metric"]
+                .as_f64()
+                .partial_cmp(&b["metric"].as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "kind": "eval_tune",
+        "mode": "hybrid",
+        "sweep": { "param": param, "start": start, "stop": stop, "step": step },
+        "metric": args.metric,
+        "points": points,
+        "best": best,
+        "note": "Re-opens the index per sweep point; query-readiness is cached after the first."
     }))
 }
 
@@ -1709,6 +1879,9 @@ fn france_legi_search_documents(
         top_k,
         cursor: None,
         as_of: Some(as_of.to_owned()),
+        rrf_lexical_weight: None,
+        rrf_dense_weight: None,
+        probes: None,
     };
     let response = match search_with_postgres(
         postgres,
@@ -1852,6 +2025,9 @@ fn eval_phase1_fixture_result(
             top_k,
             cursor: None,
             as_of: fixture.as_of.clone(),
+            rrf_lexical_weight: None,
+            rrf_dense_weight: None,
+            probes: None,
         },
         index_dir,
     );
@@ -2180,6 +2356,7 @@ fn search_with_postgres(
                 embedding_fingerprint: embedding_fingerprint.as_deref(),
                 retrieval_mode,
                 group_by,
+                options: args.retrieval_options(),
                 after_cursor: after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
                 as_of: as_of.as_str(),
                 kind_filter,
@@ -2418,6 +2595,7 @@ fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value,
                 embedding_fingerprint: fingerprint,
                 retrieval_mode: mode,
                 group_by: GroupBy::Document,
+                options: RetrievalOptions::default(),
                 after_cursor: None,
                 as_of: as_of.as_str(),
                 kind_filter,
@@ -2669,6 +2847,9 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
             top_k: args.top_k,
             cursor: args.cursor,
             as_of: args.as_of,
+            rrf_lexical_weight: args.rrf_lexical_weight,
+            rrf_dense_weight: args.rrf_dense_weight,
+            probes: args.probes,
         },
         index_dir.as_deref(),
     )

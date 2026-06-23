@@ -842,6 +842,40 @@ pub fn compiled_schema() -> Value {
                     "bootstrap": { "type": ["object", "null"] }
                 }
             },
+            "EvalTuneRequest": {
+                "required": ["questions", "sweep"],
+                "properties": {
+                    "questions": { "type": "string" },
+                    "qrels": { "type": ["string", "null"] },
+                    "judge_cmd": { "type": ["string", "null"] },
+                    "sweep": { "type": "string", "description": "PARAM=start:stop:step; PARAM in {rrf-dense, rrf-lexical, probes}." },
+                    "metric": { "type": "string", "default": "ndcg@10" },
+                    "top_k": { "type": "integer", "minimum": 1, "default": 10 },
+                    "rel_min": { "type": "integer", "default": 1 },
+                    "out": { "type": ["string", "null"] }
+                }
+            },
+            "EvalTuneResponse": {
+                "description": "eval_tune artifact (also written to --out when given).",
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "kind": { "const": "eval_tune" },
+                    "mode": { "const": "hybrid" },
+                    "sweep": { "type": "object" },
+                    "metric": { "type": "string" },
+                    "points": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "value": { "type": "number" },
+                                "metric": { "type": ["number", "null"] }
+                            }
+                        }
+                    },
+                    "best": { "type": ["object", "null"] }
+                }
+            },
             "FranceLegiCategory": {
                 "properties": {
                     "metric_value": { "type": "number" },

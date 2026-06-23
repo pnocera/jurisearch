@@ -57,6 +57,16 @@ impl GroupBy {
     }
 }
 
+/// Per-request retrieval tuning. `None` means "use the environment/default", so existing callers
+/// are unaffected. Carried as immutable request state (NOT process env), so warm sessions and a
+/// future server can serve concurrent requests with different weights/probes deterministically.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RetrievalOptions {
+    pub rrf_lexical_weight: Option<f64>,
+    pub rrf_dense_weight: Option<f64>,
+    pub ivfflat_probes: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HybridCandidateQuery<'a> {
     pub query_text: &'a str,
@@ -64,12 +74,27 @@ pub struct HybridCandidateQuery<'a> {
     pub embedding_fingerprint: Option<&'a str>,
     pub retrieval_mode: RetrievalMode,
     pub group_by: GroupBy,
+    pub options: RetrievalOptions,
     pub after_cursor: Option<RetrievalCursor<'a>>,
     pub as_of: &'a str,
     pub kind_filter: Option<&'a str>,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,
+}
+
+impl HybridCandidateQuery<'_> {
+    fn effective_rrf_weights(&self) -> (f64, f64) {
+        let (lexical, dense) = rrf_weights();
+        (
+            self.options.rrf_lexical_weight.unwrap_or(lexical),
+            self.options.rrf_dense_weight.unwrap_or(dense),
+        )
+    }
+
+    fn effective_probes(&self) -> u32 {
+        self.options.ivfflat_probes.unwrap_or(4)
+    }
 }
 
 /// An opaque pagination cursor, tagged by grouping. A chunk cursor is `<score>:<chunk_id>`; a
@@ -175,9 +200,9 @@ pub fn hybrid_candidates_json(
         .unwrap_or_default();
     let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &kind_predicate)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
-        "SET ivfflat.probes = 4;\n\n"
+        format!("SET ivfflat.probes = {};\n\n", query.effective_probes())
     } else {
-        ""
+        String::new()
     };
     let limit = query.limit;
 
@@ -459,7 +484,7 @@ fn ranked_candidate_ctes(
             let query_embedding = sql_string_literal(query_embedding);
             let embedding_fingerprint = sql_string_literal(embedding_fingerprint);
             let dense_pool_limit = dense_pool_limit(query.dense_limit);
-            let (lexical_weight, dense_weight) = rrf_weights();
+            let (lexical_weight, dense_weight) = query.effective_rrf_weights();
             Ok(format!(
                 r#"
 lexical AS (

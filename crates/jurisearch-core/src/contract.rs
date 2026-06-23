@@ -184,6 +184,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "EvalRunResponse",
     },
     CommandSpec {
+        name: "eval tune",
+        summary: "Sweep a hybrid retrieval parameter (rrf weights / probes) against a fixture and report the metric-maximizing value (one-shot CLI only).",
+        status: CommandStatus::Implemented,
+        request_schema: "EvalTuneRequest",
+        response_schema: "EvalTuneResponse",
+    },
+    CommandSpec {
         name: "sync",
         summary: "Synchronize official sources through deltas or transactional histories.",
         status: CommandStatus::Stub,
@@ -211,7 +218,7 @@ pub const COMMANDS: &[CommandSpec] = &[
 /// (the `not_implemented` arm) and enforced by tests. The `session --jsonl` / `batch --jsonl`
 /// entries are the protocol itself and are intentionally not listed here.
 pub const SESSION_EXCLUDED_COMMANDS: &[&str] =
-    &["ingest", "eval france-legi", "eval run", "sync"];
+    &["ingest", "eval france-legi", "eval run", "eval tune", "sync"];
 
 /// True when `name` is callable over the warm session protocol.
 pub fn command_session_available(name: &str) -> bool {
