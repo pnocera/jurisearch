@@ -650,12 +650,42 @@ pub fn compiled_schema() -> Value {
             "EvalFranceLegiResponse": {
                 "description": "phase1_france_legi_benchmark artifact (also written to --out when given).",
                 "properties": {
-                    "schema_version": { "type": "string" },
-                    "command": { "const": "eval france-legi" },
-                    "state": { "enum": ["pending", "passed", "failed"] },
-                    "categories": { "type": "object" },
+                    "schema_version": { "const": 1 },
+                    "kind": { "const": "phase1_france_legi_benchmark" },
+                    "state": { "enum": ["passed", "failed"] },
+                    "jurisdiction": { "type": "string" },
+                    "claim_scope": { "type": "string" },
+                    "source": { "type": "string" },
+                    "retriever": { "type": "string" },
+                    "embedding": {
+                        "type": "object",
+                        "properties": {
+                            "fingerprint_model": { "type": "string" },
+                            "dimension": { "type": "integer" },
+                            "normalize": { "type": "boolean" }
+                        }
+                    },
                     "thresholds": { "type": "object" },
-                    "provenance": { "type": "object" }
+                    "categories": {
+                        "type": "object",
+                        "description": "Per-category results; each is a FranceLegiCategory.",
+                        "properties": {
+                            "structured_citation_resolution": { "$ref": "#/schemas/FranceLegiCategory" },
+                            "temporal_version_pinning": { "$ref": "#/schemas/FranceLegiCategory" },
+                            "semantic_retrieval": { "$ref": "#/schemas/FranceLegiCategory" }
+                        }
+                    },
+                    "provenance": { "type": "object" },
+                    "evidence": { "type": "array", "items": { "type": "string" } }
+                }
+            },
+            "FranceLegiCategory": {
+                "properties": {
+                    "metric_value": { "type": "number" },
+                    "queries": { "type": "integer" },
+                    "gating": { "type": "boolean" },
+                    "advisory": { "type": "boolean" },
+                    "routing_backends": { "type": "object" }
                 }
             }
         }

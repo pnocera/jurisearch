@@ -19,7 +19,7 @@ use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use jurisearch_core::{
     SCHEMA_VERSION,
-    contract::{CitationState, LegalKind, OutputFormat, agent_help},
+    contract::{CitationState, LegalKind, OutputFormat, SESSION_EXCLUDED_COMMANDS, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
     eval::{
         LegalRetrievalFixture, phase1_eval_fixture_summary, phase1_eval_fixtures,
@@ -114,6 +114,7 @@ const FRANCE_LEGI_GATE_TOP_K: u32 = 10;
 #[command(version, about = "Local-first French legal search CLI for AI agents.")]
 #[command(disable_help_subcommand = true)]
 struct Cli {
+    /// Path to the index directory (overrides $JURISEARCH_INDEX_DIR). Use an ABSOLUTE path.
     #[arg(long, env = "JURISEARCH_INDEX_DIR", global = true)]
     index_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -151,22 +152,43 @@ enum Command {
     /// Output: `ExpandResponse`. Example:  jurisearch expand "bail commercial"
     Expand(QueryArgs),
     /// Report corpus coverage, model fingerprints, and index health.
+    ///
+    /// Output: `StatusResponse` (includes the Phase-1 release gate). Example:  jurisearch status --deep
     Status(StatusArgs),
-    /// Explicit model-cache operations.
+    /// Explicit model-cache operations (subcommand: `fetch`).
+    ///
+    /// Models are never downloaded implicitly during search. Example:  jurisearch model fetch --allow-download
     Model(ModelCommand),
-    /// Check or prepare local setup.
+    /// Check or prepare local configuration and optional model caches.
+    ///
+    /// Output: `SetupResponse`. Example:  jurisearch setup
     Setup,
-    /// Warm JSONL subprocess protocol.
+    /// Warm JSONL subprocess protocol for order-preserving agent workflows.
+    ///
+    /// Reads one JSON request per line on stdin, writes one JSON response per line. Example:
+    ///   echo '{"id":"1","command":"search","args":{"query":"article 1240"}}' | jurisearch session --jsonl
     Session(JsonlArgs),
-    /// Finite JSONL protocol for eval/bulk runs.
+    /// Finite JSONL protocol for eval and bulk verification runs.
+    ///
+    /// Like `session` but terminates at end-of-input. Example:
+    ///   jurisearch batch --jsonl < requests.jsonl
     Batch(JsonlArgs),
-    /// Official-source ingestion helpers.
+    /// Official-source ingestion helpers (subcommands: plan-archives, legi-archives, embed-chunks, ...).
+    ///
+    /// Builds the canonical index from official archives. Example:
+    ///   jurisearch ingest legi-archives --archives-dir ./archives
     Ingest(IngestCommand),
-    /// Run built-in retrieval evaluation fixtures.
+    /// Run built-in retrieval evaluation fixtures (subcommands: phase1, france-legi).
+    ///
+    /// Example:  jurisearch eval phase1 --list
     Eval(EvalCommand),
-    /// Synchronize official sources.
+    /// Synchronize official sources through deltas or transactional histories (STUB).
+    ///
+    /// Example:  jurisearch sync --source legi
     Sync(SyncArgs),
-    /// Compiled agent help and schemas.
+    /// Compiled agent help and schemas (subcommands: agent, schema).
+    ///
+    /// Example:  jurisearch help schema --json
     Help(HelpCommand),
 }
 
@@ -418,23 +440,31 @@ struct IngestCommand {
 enum IngestSubcommand {
     /// Dry-run official archive precedence and delta ordering.
     PlanArchives {
+        /// Official source whose archives to plan (e.g. `legi`).
         #[arg(long, default_value = "legi")]
         source: CliArchiveSource,
+        /// Directory containing the downloaded official archives to plan.
         #[arg(long)]
         archives_dir: PathBuf,
     },
     /// Stream official LEGI archives into canonical storage with ingest accounting.
     LegiArchives {
+        /// Directory containing the LEGI archives to ingest.
         #[arg(long)]
         archives_dir: PathBuf,
+        /// Resume/extend an existing ingest run by ID (otherwise a new run is started).
         #[arg(long)]
         run_id: Option<String>,
+        /// Process at most this many archive members (for smoke/partial runs).
         #[arg(long)]
         limit_members: Option<u32>,
+        /// Skip any single archive member larger than this many bytes.
         #[arg(long, default_value_t = DEFAULT_MEMBER_BYTE_LIMIT)]
         max_member_bytes: u64,
+        /// Write skipped/oversized/invalid members to this directory for inspection.
         #[arg(long)]
         quarantine_dir: Option<PathBuf>,
+        /// Conservative mode: quarantine on any parse anomaly instead of best-effort recovery.
         #[arg(long)]
         safe_mode: bool,
     },
@@ -4262,7 +4292,12 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "model fetch" => session_model_fetch_payload(args),
         "eval phase1" => session_eval_phase1_payload(args),
         "setup" => Ok(setup_payload()),
-        "related" | "ingest" | "eval" | "sync" => Err(ErrorObject::not_implemented(command)),
+        // One-shot-only commands (the contract's SESSION_EXCLUDED_COMMANDS, e.g. `related`, `ingest`,
+        // `eval france-legi`, `sync`) are advertised but not session-callable: reject with
+        // not_implemented so the dispatcher matches the agent contract exactly.
+        other if SESSION_EXCLUDED_COMMANDS.contains(&other) => {
+            Err(ErrorObject::not_implemented(other))
+        }
         _ => Err(ErrorObject::bad_input(format!(
             "unknown session command `{command}`"
         ))),
@@ -6076,12 +6111,43 @@ mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
 
+    /// Full command-matrix help guard (T0.1): every subcommand path must have an `about`, and every
+    /// user-facing argument must have help text. Walks the entire clap tree so a new command/flag
+    /// without help fails CI instead of shipping an undocumented surface.
+    #[test]
+    fn every_command_and_arg_has_help() {
+        use clap::CommandFactory;
+        fn check(cmd: &clap::Command, path: &str) {
+            for arg in cmd.get_arguments() {
+                let id = arg.get_id().as_str();
+                if id == "help" || id == "version" || arg.is_hide_set() {
+                    continue;
+                }
+                assert!(
+                    arg.get_help().is_some() || arg.get_long_help().is_some(),
+                    "{path}: argument `{id}` has no help text"
+                );
+            }
+            for sub in cmd.get_subcommands() {
+                assert!(
+                    sub.get_about().is_some() || sub.get_long_about().is_some(),
+                    "{path}: subcommand `{}` has no about text",
+                    sub.get_name()
+                );
+                check(sub, &format!("{path} {}", sub.get_name()));
+            }
+        }
+        check(&Cli::command(), "jurisearch");
+    }
+
     /// Session-parity invariant: the warm protocol must reject exactly the one-shot-only commands
     /// with `not_implemented`, and must route (not reject) a handled command. Guards the dispatch
     /// arm against drift relative to `SESSION_EXCLUDED_COMMANDS`.
     #[test]
     fn session_dispatch_matches_one_shot_only_set() {
-        for cmd in ["related", "ingest", "eval", "sync"] {
+        // Iterate the contract's source of truth so the dispatcher and the constant cannot drift
+        // (this is exactly the `eval france-legi` gap a hard-coded list missed).
+        for cmd in SESSION_EXCLUDED_COMMANDS {
             let request = SessionRequest {
                 id: None,
                 command: cmd.to_string(),
@@ -6113,6 +6179,39 @@ mod tests {
             ),
             SessionResponse::Ok { .. } => {}
         }
+    }
+
+    /// The `eval france-legi` artifact must be fully described by its registered schema (no
+    /// emitted-but-unschema'd top-level key). Guards the contract's truthfulness for that command.
+    #[test]
+    fn france_legi_artifact_keys_are_schema_documented() {
+        let artifact = france_legi_artifact(
+            france_legi_category(1.0, 60, "structured_citation"),
+            france_legi_category(1.0, 12, "structured_citation"),
+            france_legi_category(0.5, 120, "hybrid"),
+            FranceLegiGoldLimits {
+                known_item: 60,
+                temporal: 12,
+                cross_reference: 120,
+            },
+            "phase1-freemium-20250713",
+            "20250713-140000",
+        );
+        let schema = compiled_schema();
+        let props = schema["schemas"]["EvalFranceLegiResponse"]["properties"]
+            .as_object()
+            .expect("EvalFranceLegiResponse.properties");
+        let missing: Vec<String> = artifact
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| !props.contains_key(key.as_str()))
+            .cloned()
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "france_legi_artifact keys absent from EvalFranceLegiResponse schema: {missing:?}"
+        );
     }
 
     #[test]
