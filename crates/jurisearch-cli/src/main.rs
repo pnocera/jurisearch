@@ -8141,15 +8141,19 @@ fn phase2_benchmark_payload_with_path(artifact_path: Option<&Path>) -> Value {
             return payload;
         }
     };
-    // Normalize the diagnostic surface so the emitted payload always matches the published schema,
-    // even for a parseable-but-malformed artifact (e.g. `[]` or `false` parse fine but are rejected).
-    payload["artifact"] = if artifact.is_object() {
-        artifact.clone()
-    } else {
-        Value::Null
+    // Normalize every diagnostic field to its schema-declared shape so the emitted payload always
+    // matches the published schema, even for a parseable-but-malformed artifact (e.g. a top-level
+    // `[]`/`false`, or an object whose `categories`/`provenance` are not objects).
+    let object_or_null = |value: &Value| -> Value {
+        if value.is_object() {
+            value.clone()
+        } else {
+            Value::Null
+        }
     };
-    payload["categories"] = artifact["categories"].clone();
-    payload["provenance"] = artifact["provenance"].clone();
+    payload["artifact"] = object_or_null(&artifact);
+    payload["categories"] = object_or_null(&artifact["categories"]);
+    payload["provenance"] = object_or_null(&artifact["provenance"]);
     payload["evidence"] = artifact["evidence"].as_array().map_or(json!([]), |_| artifact["evidence"].clone());
 
     let errors = phase2_benchmark_artifact_errors(&artifact);
@@ -9557,6 +9561,17 @@ mod tests {
         let payload = phase2_benchmark_payload_with_path(Some(&arr_path));
         assert_eq!(payload["state"], "failed");
         assert!(payload["artifact"].is_null());
+
+        // An object artifact whose `categories`/`provenance` are non-objects is rejected, and those
+        // diagnostic fields are normalized to null so the failure payload stays schema-shaped.
+        let malformed_path = dir.path().join("malformed_members.json");
+        std::fs::write(&malformed_path, json!({ "categories": [], "provenance": false }).to_string())
+            .unwrap();
+        let payload = phase2_benchmark_payload_with_path(Some(&malformed_path));
+        assert_eq!(payload["state"], "failed");
+        assert!(payload["artifact"].is_object()); // the artifact itself IS an object
+        assert!(payload["categories"].is_null());
+        assert!(payload["provenance"].is_null());
     }
 
     #[test]
