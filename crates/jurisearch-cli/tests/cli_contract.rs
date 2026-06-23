@@ -2895,10 +2895,10 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "no_results");
 
-    // `fetch --as-of` / `--part` were removed (T0.4): they only ever errored, so the flags no longer
-    // exist. fetch is exact, version-pinned retrieval; date-resolved fetch is deferred to a real
-    // feature (alongside `versions`/`diff`). A now-unknown `--as-of` is a clap usage error, not a
-    // JSON contract error, so there is nothing more to assert here.
+    // `fetch --as-of` was removed (T0.4): fetch is exact, version-pinned retrieval; date-resolved
+    // fetch is deferred (alongside `versions`/`diff`). A now-unknown `--as-of` is a clap usage error.
+    // `--part` was later re-introduced as a real decision feature (see
+    // `fetch_part_extracts_decision_parts_with_honest_provenance`).
     Ok(())
 }
 
@@ -3453,6 +3453,106 @@ fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>
         .clone();
     let online_missing: Value = serde_json::from_slice(&online_missing)?;
     assert_eq!(online_missing["state"], "not_found");
+
+    Ok(())
+}
+
+#[test]
+fn fetch_part_extracts_decision_parts_with_honest_provenance()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(_pg_config) = discover_pg_config("CLI fetch --part")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-fetch-part.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-fetch-part-archives.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_cass_global_20250101-000000.tar.gz");
+    let decision_xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<TEXTE_JURI_JUDI>
+<META><META_COMMUN><ID>JURITEXT000051824099</ID><ANCIEN_ID/><ORIGINE>JURI</ORIGINE>
+<URL>texte/juri/judi/JURI/TEXT/.../JURITEXT000051824099.xml</URL><NATURE>ARRET</NATURE>
+</META_COMMUN><META_SPEC><META_JURI>
+<TITRE>Cour de cassation, chambre civile 1, 4 juin 2025</TITRE>
+<DATE_DEC>2025-06-04</DATE_DEC><JURIDICTION>Cour de cassation</JURIDICTION>
+<NUMERO>P2500222</NUMERO><SOLUTION>Rejet</SOLUTION>
+</META_JURI><META_JURI_JUDI>
+<NUMEROS_AFFAIRES><NUMERO_AFFAIRE>23-15000</NUMERO_AFFAIRE></NUMEROS_AFFAIRES>
+<PUBLI_BULL publie="oui"/><FORMATION>CHAMBRE_CIVILE_1</FORMATION>
+<ECLI>ECLI:FR:CCASS:2025:C100222</ECLI>
+</META_JURI_JUDI></META_SPEC></META>
+<TEXTE><BLOC_TEXTUEL><CONTENU>Vu les articles 1240 et 1241 du code civil ;<br/>
+Faits et procedure<br/>
+1. Selon l'arret attaque, le demandeur a saisi la juridiction.<br/>
+PAR CES MOTIFS, la Cour REJETTE le pourvoi.</CONTENU></BLOC_TEXTUEL>
+<SOMMAIRE><SCT ID="1" TYPE="PRINCIPAL">RESPONSABILITE - faute</SCT><ANA ID="1">La faute engage la responsabilite de son auteur.</ANA></SOMMAIRE>
+<CITATION_JP/></TEXTE>
+<LIENS/>
+</TEXTE_JURI_JUDI>"#;
+    write_tar_gz(
+        archive_path.as_path(),
+        &[("juri/cass/JURITEXT000051824099.xml", decision_xml)],
+    )?;
+
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-fetch-part"])
+        .assert()
+        .success();
+
+    let fetch_part = |part: &str| -> Value {
+        let output = Command::cargo_bin("jurisearch")
+            .unwrap()
+            .arg("--index-dir")
+            .arg(index.path())
+            .args(["fetch", "cass:JURITEXT000051824099", "--part", part])
+            .assert()
+            .success()
+            .stderr(predicate::str::is_empty())
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
+
+    // Summary comes from the SOMMAIRE (not an official zone).
+    let summary = fetch_part("summary");
+    let part = &summary["documents"][0]["part"];
+    assert_eq!(part["applicable"], true);
+    assert_eq!(part["official_zones"], false);
+    assert_eq!(part["zone_provenance"], "sommaire");
+    assert_eq!(part["available"], true);
+    assert!(part["text"].as_str().unwrap().contains("responsabilite"));
+
+    // Dispositif is a heuristic extraction from the "PAR CES MOTIFS" marker.
+    let dispositif = fetch_part("dispositif");
+    let part = &dispositif["documents"][0]["part"];
+    assert_eq!(part["zone_provenance"], "heuristic");
+    assert_eq!(part["available"], true);
+    assert!(part["text"].as_str().unwrap().contains("REJETTE"));
+
+    // Motivations have no bulk marker -> honestly unavailable (needs Judilibre zones).
+    let motivations = fetch_part("motivations");
+    let part = &motivations["documents"][0]["part"];
+    assert_eq!(part["zone_provenance"], "unavailable");
+    assert_eq!(part["available"], false);
+
+    // Unknown part -> bad_input.
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["fetch", "cass:JURITEXT000051824099", "--part", "bogus"])
+        .assert()
+        .code(2);
 
     Ok(())
 }

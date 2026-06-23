@@ -348,6 +348,11 @@ struct CompareArgs {
 struct FetchArgs {
     /// One or more exact, version-pinned stable IDs (e.g. `legi:LEGIARTI000006850948@1994-08-21`).
     ids: Vec<String>,
+    /// Decision part to extract: `summary`, `visa`, `dispositif`, `motivations`, or `moyens`.
+    /// DILA bulk decisions carry no official Judilibre zones, so non-summary parts are best-effort
+    /// `heuristic` (or `unavailable`); each part reports its `zone_provenance`.
+    #[arg(long)]
+    part: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,6 +399,8 @@ fn default_group_by() -> CliGroupBy {
 #[derive(Debug, Deserialize)]
 struct SessionFetchArgs {
     ids: Vec<String>,
+    #[serde(default)]
+    part: Option<String>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -2932,24 +2939,174 @@ fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
 }
 
 fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let part = match args.part.as_deref() {
+        None => None,
+        Some(value) => Some(DecisionPart::parse(value).ok_or_else(|| {
+            ErrorObject::bad_input(format!(
+                "unknown --part `{value}`; expected one of: summary, visa, dispositif, motivations, moyens"
+            ))
+        })?),
+    };
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
     let ids = args.ids.iter().map(String::as_str).collect::<Vec<_>>();
     let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
         .map_err(storage_error_object)?;
-    let response: Value = serde_json::from_str(&response)
+    let mut response: Value = serde_json::from_str(&response)
         .map_err(|error| dependency_unavailable(error.to_string()))?;
     if response["documents"]
         .as_array()
         .is_some_and(|documents| documents.is_empty())
     {
-        Err(no_results(
+        return Err(no_results(
             "fetch returned no documents for the requested IDs",
-        ))
-    } else {
-        Ok(response)
+        ));
     }
+    if let Some(part) = part {
+        annotate_fetched_parts(&mut response, part)?;
+    }
+    Ok(response)
+}
+
+/// A named jurisprudence-decision part requested via `fetch --part`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecisionPart {
+    Summary,
+    Visa,
+    Dispositif,
+    Motivations,
+    Moyens,
+}
+
+impl DecisionPart {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "summary" | "sommaire" => Some(Self::Summary),
+            "visa" => Some(Self::Visa),
+            "dispositif" => Some(Self::Dispositif),
+            "motivations" | "motivation" => Some(Self::Motivations),
+            "moyens" | "moyen" => Some(Self::Moyens),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Visa => "visa",
+            Self::Dispositif => "dispositif",
+            Self::Motivations => "motivations",
+            Self::Moyens => "moyens",
+        }
+    }
+}
+
+/// Attach a `part` block to each fetched document. For non-decision documents the part is
+/// `not_applicable`. DILA bulk decisions have NO official Judilibre zones, so `summary` comes from the
+/// `SOMMAIRE` chunk and every other part is best-effort `heuristic` (or `unavailable`) — never claimed
+/// as an official zone. Each part reports `zone_provenance` and `official_zones: false`.
+fn annotate_fetched_parts(response: &mut Value, part: DecisionPart) -> Result<(), ErrorObject> {
+    let Some(documents) = response["documents"].as_array_mut() else {
+        return Ok(());
+    };
+    for document in documents {
+        let is_decision = document["kind"].as_str() == Some("decision");
+        if !is_decision {
+            document["part"] = json!({
+                "requested": part.name(),
+                "applicable": false,
+                "note": "fetch --part applies to jurisprudence decisions, not this document kind."
+            });
+            continue;
+        }
+        let body = document["body"].as_str().unwrap_or_default();
+        let summary = collect_decision_summary(document);
+        let extracted = extract_decision_part(part, body, summary.as_deref());
+        document["part"] = json!({
+            "requested": part.name(),
+            "applicable": true,
+            "official_zones": false,
+            "zone_provenance": extracted.provenance,
+            "available": extracted.text.is_some(),
+            "text": extracted.text,
+            "note": extracted.note
+        });
+    }
+    Ok(())
+}
+
+struct ExtractedPart {
+    text: Option<String>,
+    provenance: &'static str,
+    note: &'static str,
+}
+
+fn collect_decision_summary(document: &Value) -> Option<String> {
+    let chunks = document["chunks"].as_array()?;
+    let summary = chunks
+        .iter()
+        .filter(|chunk| chunk["chunk_kind"].as_str() == Some("decision_summary"))
+        .filter_map(|chunk| chunk["body"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!summary.trim().is_empty()).then_some(summary)
+}
+
+fn extract_decision_part(part: DecisionPart, body: &str, summary: Option<&str>) -> ExtractedPart {
+    match part {
+        // SOMMAIRE is a real (if not zone-offset) structural element of the source record.
+        DecisionPart::Summary => ExtractedPart {
+            text: summary.map(str::to_owned),
+            provenance: "sommaire",
+            note: "From the source SOMMAIRE (titrage/analyse); not a Judilibre zone offset.",
+        },
+        // The dispositif reliably follows a "PAR CES MOTIFS" / "DÉCIDE" marker in French decisions.
+        DecisionPart::Dispositif => ExtractedPart {
+            text: heuristic_dispositif(body),
+            provenance: "heuristic",
+            note: "Best-effort heuristic from a dispositif marker; not an official Judilibre zone.",
+        },
+        // The visa ("Vu …") opens many decisions.
+        DecisionPart::Visa => ExtractedPart {
+            text: heuristic_visa(body),
+            provenance: "heuristic",
+            note: "Best-effort heuristic from leading 'Vu …' lines; not an official Judilibre zone.",
+        },
+        // Motivations/moyens have no reliable bulk marker; honestly report unavailable rather than
+        // returning an over-claimed segmentation.
+        DecisionPart::Motivations | DecisionPart::Moyens => ExtractedPart {
+            text: None,
+            provenance: "unavailable",
+            note: "No official zones in DILA bulk; this part needs Judilibre zone enrichment.",
+        },
+    }
+}
+
+/// Heuristic dispositif: text from the last dispositif marker to the end of the body. Markers are
+/// matched case-insensitively against the ORIGINAL body (no `to_uppercase`, which can shift byte
+/// offsets on accented French text and mis-slice/panic). Marker offsets are valid UTF-8 byte indices.
+fn heuristic_dispositif(body: &str) -> Option<String> {
+    const MARKERS: &[&str] = &["PAR CES MOTIFS", "D E C I D E", "DECIDE", "DÉCIDE"];
+    let start = MARKERS
+        .iter()
+        .filter_map(|marker| rfind_ascii_ci(body, marker))
+        .max()?;
+    let tail = body[start..].trim();
+    (!tail.is_empty()).then(|| tail.to_owned())
+}
+
+/// Heuristic visa: the leading block of `Vu …` lines before the first numbered/considérant section.
+fn heuristic_visa(body: &str) -> Option<String> {
+    let visa: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            let upper = line.to_uppercase();
+            upper.starts_with("VU ") || upper.starts_with("VU :") || upper == "VU"
+        })
+        .collect();
+    (!visa.is_empty()).then(|| visa.join("\n"))
 }
 
 fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
@@ -3113,7 +3270,13 @@ fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
         ));
     }
     let index_dir = args.index_dir;
-    fetch_payload(FetchArgs { ids: args.ids }, index_dir.as_deref())
+    fetch_payload(
+        FetchArgs {
+            ids: args.ids,
+            part: args.part,
+        },
+        index_dir.as_deref(),
+    )
 }
 
 fn session_cite_payload(args: Value) -> Result<Value, ErrorObject> {
@@ -8726,6 +8889,35 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn heuristic_dispositif_is_utf8_safe_with_accents_before_marker() {
+        // Accented French text before the marker must not panic or mis-slice (no to_uppercase).
+        let body = "Considérant qu'il résulte des éléments versés aux débats que la décision est fondée. \
+            PAR CES MOTIFS, la Cour REJETTE le pourvoi.";
+        let dispositif = heuristic_dispositif(body).expect("dispositif found");
+        assert!(dispositif.starts_with("PAR CES MOTIFS"));
+        assert!(dispositif.contains("REJETTE"));
+        // No marker -> None.
+        assert_eq!(heuristic_dispositif("Texte sans marqueur de dispositif."), None);
+    }
+
+    #[test]
+    fn heuristic_visa_collects_leading_vu_lines() {
+        let body = "Vu les articles 1240 et 1241 du code civil ;\nFaits et procédure\n1. Le demandeur...";
+        let visa = heuristic_visa(body).expect("visa found");
+        assert!(visa.contains("1240"));
+        assert!(!visa.contains("Faits"));
+    }
+
+    #[test]
+    fn decision_part_parse_is_lenient() {
+        assert_eq!(DecisionPart::parse("Summary"), Some(DecisionPart::Summary));
+        assert_eq!(DecisionPart::parse("sommaire"), Some(DecisionPart::Summary));
+        assert_eq!(DecisionPart::parse("dispositif"), Some(DecisionPart::Dispositif));
+        assert_eq!(DecisionPart::parse("MOYEN"), Some(DecisionPart::Moyens));
+        assert_eq!(DecisionPart::parse("bogus"), None);
+    }
 
     #[test]
     fn parse_pourvoi_accepts_dotted_and_plain_forms() {
