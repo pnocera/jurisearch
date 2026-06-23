@@ -875,6 +875,12 @@ Acceptance:
 - Full French juridic search claim is allowed only after Phase 2 gates pass.
 - Results remain source-backed, temporally correct, citeable, and token-efficient.
 
+Current status (2026-06-23):
+
+- Done: `status.phase2_gate` is a fail-closed gate (scope `phase2_full_french_juridic_search`) for the full-juridic claim, mirroring `phase1_gate`. Gating checks: both-families jurisprudence corpus present, index query-ready, honest zone provenance (`zone_accurate=false`), and a `JURISEARCH_PHASE2_BENCHMARK` jurisprudence eval benchmark RE-DERIVED against policy floors (jurisprudence_retrieval recall@10 ≥ 0.50 / 30q; decision_citation accuracy ≥ 0.95 / 30q; france jurisdiction; locked bge-m3 fingerprint; honest provenance). Advisory: pseudonymisation preserved. `claim_allowed=false` until a passing benchmark + corpus/coverage/provenance all pass. `Phase2GateResponse` is advertised in the `help schema --json` `StatusResponse`. Evidence: `work/03-implementation/02-evidence/2026-06-23-phase2-eval-gate.md`.
+- Done (across 2.1–2.5, codex GO + pushed): DILA bulk ingestion of both juri families with accounting/resume/quarantine; per-source status coverage; inferred-citation graph edges + `related --rel interpreted_by`; decision `cite` (JURITEXT/CETATEXT/ECLI/pourvoi); decision search filters (court/formation/publication/date); decision `fetch --part` (honest heuristic/zone-unavailable); incremental `sync --source --since`. Pseudonymisation preservation is covered by juri parser unit + real-archive tests.
+- Remaining for an actual Phase 2 GO (not just the gate): build + run the jurisprudence eval benchmark (Cassation + administrative retrieval tasks + decision-citation verification) through the production pipeline and emit the gate artifact; eval-driven authority-weight tuning (court tier/formation/publication/recency); zone-aware `fetch --part` for motivations/dispositif requires Judilibre zone enrichment (bulk stays heuristic). Decision `context` over neighbouring zones is likewise a Judilibre-zone feature (bulk has none).
+
 ---
 
 ## 6. Phase 3+ — Ranking Depth and Corpus Expansion
