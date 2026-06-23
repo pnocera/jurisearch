@@ -1,11 +1,11 @@
 {
   "categories": {
     "cross_reference": {
-      "metric_value": 0.143,
+      "metric_value": 0.116,
       "queries": 120
     },
     "known_item": {
-      "metric_value": 0.55,
+      "metric_value": 0.6,
       "queries": 60
     },
     "temporal": {
@@ -26,6 +26,10 @@
   "kind": "phase1_france_legi_benchmark",
   "provenance": {
     "code_version": "jurisearch-cli:0.1.0",
+    "fusion": {
+      "rrf_dense_weight": 0.3,
+      "rrf_lexical_weight": 1.0
+    },
     "human_in_gold": false,
     "index_revision": "phase1-freemium-20250713",
     "llm_in_gold": false,
