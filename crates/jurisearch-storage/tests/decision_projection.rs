@@ -11,8 +11,9 @@ use jurisearch_ingest::legi::SourceProvenance;
 use jurisearch_storage::{
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_decision_documents},
     retrieval::{
-        FetchDocumentsQuery, GroupBy, HybridCandidateQuery, RetrievalMode, RetrievalOptions,
-        fetch_documents_json, hybrid_candidates_json,
+        FetchDocumentsQuery, GroupBy, HybridCandidateQuery, RelatedQuery, RelatedRelation,
+        RetrievalMode, RetrievalOptions, fetch_documents_json, hybrid_candidates_json,
+        related_neighbours_json,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -32,7 +33,7 @@ const JUDI_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <PUBLI_BULL publie="oui"/><FORMATION>CHAMBRE_SOCIALE</FORMATION>
 <ECLI>ECLI:FR:CCASS:2025:SO00111</ECLI>
 </META_JURI_JUDI></META_SPEC></META>
-<TEXTE><BLOC_TEXTUEL><CONTENU>La clause de non-concurrence est nulle faute de contrepartie financière. La Cour casse l'arret attaque concernant M. [B].</CONTENU></BLOC_TEXTUEL>
+<TEXTE><BLOC_TEXTUEL><CONTENU>La clause de non-concurrence est nulle faute de contrepartie financière. En application de l'article L1234-5 du code du travail, la Cour casse l'arret attaque concernant M. [B].</CONTENU></BLOC_TEXTUEL>
 <SOMMAIRE><SCT ID="1" TYPE="PRINCIPAL">CONTRAT DE TRAVAIL - clause de non-concurrence</SCT><ANA ID="1">La contrepartie financière est une condition de validité.</ANA></SOMMAIRE>
 <CITATION_JP/></TEXTE>
 <LIENS><LIEN id="LEGIARTI000006900782" cidtexte="LEGITEXT000006072050" sens="cible" typelien="CITATION" num="L1121-1" naturetexte="" nortexte="" numtexte="" datesignatexte="">Article L1121-1 du code du travail</LIEN></LIENS>
@@ -97,9 +98,16 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
     // publisher edge persisted with edge_source='publisher' and the resolved target uid in payload.
     let edge = postgres.execute_sql(
         "SELECT edge_source || '|' || coalesce(payload->>'to_source_uid','null') \
-         FROM graph_edges WHERE from_document_id = 'cass:JURITEXT000051824029';",
+         FROM graph_edges \
+         WHERE from_document_id = 'cass:JURITEXT000051824029' AND edge_source = 'publisher';",
     )?;
     assert_eq!(edge.trim(), "publisher|LEGIARTI000006900782");
+    // The body reference to article L1234-5 produced a distinguishable inferred edge.
+    let inferred = postgres.execute_sql(
+        "SELECT count(*) FROM graph_edges \
+         WHERE from_document_id = 'cass:JURITEXT000051824029' AND edge_source = 'inferred';",
+    )?;
+    assert_eq!(inferred.trim(), "1");
 
     // Embed every chunk: target (judicial) chunks get the target vector, the administrative decision
     // gets a decoy vector, so dense retrieval ranks the judicial decision first.
@@ -191,6 +199,84 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
     assert_eq!(fetched["body"], judicial.body);
     // Pseudonymisation preserved end-to-end through storage.
     assert!(fetched["body"].as_str().unwrap().contains("M. [B]"));
+
+    postgres.stop()?;
+    Ok(())
+}
+
+#[test]
+fn decision_graph_edges_and_interpreted_by() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("decision graph layer")? else {
+        return Ok(());
+    };
+
+    let judicial = decision(ArchiveSource::Cass, JUDI_XML);
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-decision-graph.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // A LEGI article the decision officially cites (publisher LIEN id=LEGIARTI000006900782, cible).
+    postgres.execute_sql(
+        "INSERT INTO documents \
+            (document_id, source, kind, source_uid, body, valid_from, source_payload_hash) \
+         VALUES ('legi:LEGIARTI000006900782@1990-01-01', 'legi', 'article', \
+                 'LEGIARTI000006900782', 'Article L1121-1 du code du travail.', \
+                 '1990-01-01', 'sha256:article');",
+    )?;
+
+    insert_decision_documents(&postgres, &[judicial.clone()], None)?;
+
+    // The decision projected BOTH a publisher edge (from LIENS) and an inferred edge (from the body
+    // reference to article L1234-5), kept distinguishable by edge_source.
+    let publisher = postgres.execute_sql(
+        "SELECT count(*) FROM graph_edges \
+         WHERE from_document_id = 'cass:JURITEXT000051824029' AND edge_source = 'publisher';",
+    )?;
+    assert_eq!(publisher.trim(), "1");
+    let inferred = postgres.execute_sql(
+        "SELECT count(*) FROM graph_edges \
+         WHERE from_document_id = 'cass:JURITEXT000051824029' AND edge_source = 'inferred';",
+    )?;
+    assert_eq!(inferred.trim(), "1");
+    let inferred_article = postgres.execute_sql(
+        "SELECT payload->'attributes'->0->>'value' FROM graph_edges \
+         WHERE from_document_id = 'cass:JURITEXT000051824029' AND edge_source = 'inferred';",
+    )?;
+    assert_eq!(inferred_article.trim(), "L1234-5");
+
+    // interpreted_by: from the cited article, find the decision interpreting it.
+    let interpreted = related_neighbours_json(
+        &postgres,
+        &RelatedQuery {
+            document_id: "legi:LEGIARTI000006900782@1990-01-01",
+            rel: RelatedRelation::InterpretedBy,
+            limit: 10,
+        },
+    )?;
+    let interpreted: serde_json::Value = serde_json::from_str(&interpreted)?;
+    assert_eq!(interpreted["rel"], "interpreted_by");
+    assert_eq!(interpreted["returned"], 1);
+    let neighbour = &interpreted["neighbours"][0];
+    assert_eq!(neighbour["document"]["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(neighbour["edge"]["edge_source"], "publisher");
+
+    // cites: from the decision, find the article it applies (the inverse direction).
+    let cites = related_neighbours_json(
+        &postgres,
+        &RelatedQuery {
+            document_id: "cass:JURITEXT000051824029",
+            rel: RelatedRelation::Cites,
+            limit: 10,
+        },
+    )?;
+    let cites: serde_json::Value = serde_json::from_str(&cites)?;
+    assert_eq!(cites["returned"], 1);
+    assert_eq!(
+        cites["neighbours"][0]["document"]["document_id"],
+        "legi:LEGIARTI000006900782@1990-01-01"
+    );
 
     postgres.stop()?;
     Ok(())

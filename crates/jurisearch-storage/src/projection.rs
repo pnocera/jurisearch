@@ -6,11 +6,13 @@ use postgres::GenericClient;
 
 use crate::runtime::{ManagedPostgres, StorageError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CanonicalInsertReport {
     pub documents: usize,
     pub chunks: usize,
     pub publisher_edges: usize,
+    /// Lower-trust body-parsed citation edges (`edge_source = "inferred"`). Always 0 for LEGI.
+    pub inferred_edges: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,7 +242,7 @@ pub fn insert_legi_documents_with_statements<C: GenericClient>(
         }
 
         for edge in &document.publisher_edges {
-            insert_publisher_edge(client, &edge_statement, edge)?;
+            insert_graph_edge(client, &edge_statement, edge)?;
             publisher_edges += 1;
         }
     }
@@ -249,6 +251,7 @@ pub fn insert_legi_documents_with_statements<C: GenericClient>(
         documents: documents.len(),
         chunks,
         publisher_edges,
+        inferred_edges: 0,
     })
 }
 
@@ -322,6 +325,7 @@ pub fn insert_decision_documents_with_statements<C: GenericClient>(
 
     let mut chunks = 0usize;
     let mut publisher_edges = 0usize;
+    let mut inferred_edges = 0usize;
     // Decisions are dated, not versioned: valid_from indexes on decision_date, valid_to/raw are null.
     let valid_to: Option<String> = None;
     let valid_to_raw: Option<String> = None;
@@ -395,8 +399,12 @@ pub fn insert_decision_documents_with_statements<C: GenericClient>(
         }
 
         for edge in &decision.publisher_edges {
-            insert_publisher_edge(client, &edge_statement, edge)?;
+            insert_graph_edge(client, &edge_statement, edge)?;
             publisher_edges += 1;
+        }
+        for edge in &decision.inferred_edges {
+            insert_graph_edge(client, &edge_statement, edge)?;
+            inferred_edges += 1;
         }
     }
 
@@ -404,6 +412,7 @@ pub fn insert_decision_documents_with_statements<C: GenericClient>(
         documents: decisions.len(),
         chunks,
         publisher_edges,
+        inferred_edges,
     })
 }
 
@@ -1182,7 +1191,9 @@ fn source_payload_digest(source_payload_hash: &str) -> &str {
         .unwrap_or(source_payload_hash)
 }
 
-fn insert_publisher_edge(
+/// Insert one canonical graph edge (publisher or inferred). The stored `edge_source` column is taken
+/// from `edge.edge_source`, so publisher and inferred edges remain distinguishable in queries.
+fn insert_graph_edge(
     client: &mut impl GenericClient,
     statement: &postgres::Statement,
     edge: &CanonicalGraphEdge,

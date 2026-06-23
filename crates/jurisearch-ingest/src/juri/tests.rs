@@ -368,6 +368,95 @@ fn validate_rejects_dishonest_chunking_provenance() {
 }
 
 #[test]
+fn inferred_citation_edges_from_body_text() {
+    // Body cites L1242-14 (statutory prefix) + 1014 (with "du code") + R1332-2; "article 8 de la
+    // convention" (bare number, no code) must be skipped.
+    let body = "Il resulte de l'article L. 1242-14 du code du travail et de l'article R.1332-2. \
+        En application de l'article 1014, alinéa 2, du code de procédure civile. \
+        L'article 8 de la convention européenne ne s'applique pas.";
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        body,
+    );
+    let decision = decision(ArchiveSource::Cass, &xml);
+
+    let numbers: Vec<&str> = decision
+        .inferred_edges
+        .iter()
+        .flat_map(|edge| edge.attributes.iter())
+        .filter(|attribute| attribute.key == "article_number")
+        .map(|attribute| attribute.value.as_str())
+        .collect();
+    assert!(numbers.contains(&"L1242-14"), "got {numbers:?}");
+    assert!(numbers.contains(&"R1332-2"), "got {numbers:?}");
+    assert!(numbers.contains(&"1014"), "got {numbers:?}");
+    // "article 8 de la convention" has no statutory prefix and no code hint -> not inferred.
+    assert!(!numbers.contains(&"8"), "bare convention article leaked: {numbers:?}");
+
+    // Every inferred edge is clearly distinguishable from publisher edges.
+    for edge in &decision.inferred_edges {
+        assert_eq!(edge.edge_source, "inferred");
+        assert_eq!(edge.relation, "cites_article");
+        assert!(edge.edge_id.starts_with("inferred-edge:"));
+        assert_eq!(edge.to_source_uid, None);
+    }
+    for edge in &decision.publisher_edges {
+        assert_eq!(edge.edge_source, "publisher");
+        assert!(edge.edge_id.starts_with("publisher-edge:"));
+    }
+    // The 1014 reference resolved a code hint.
+    let code_hints: Vec<&str> = decision
+        .inferred_edges
+        .iter()
+        .flat_map(|edge| edge.attributes.iter())
+        .filter(|attribute| attribute.key == "code_hint")
+        .map(|attribute| attribute.value.as_str())
+        .collect();
+    assert!(
+        code_hints.iter().any(|hint| hint.contains("procédure civile")),
+        "got {code_hints:?}"
+    );
+    decision.validate().expect("valid decision with inferred edges");
+}
+
+#[test]
+fn inferred_citation_edges_are_deterministic_and_deduped() {
+    let body = "article L1121-1 du code du travail. Encore l'article L. 1121-1 du code du travail.";
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        body,
+    );
+    let first = decision(ArchiveSource::Cass, &xml);
+    let second = decision(ArchiveSource::Cass, &xml);
+    assert_eq!(first.inferred_edges, second.inferred_edges);
+    // L1121-1 cited twice with the same code -> one deduped edge.
+    let l1121 = first
+        .inferred_edges
+        .iter()
+        .filter(|edge| {
+            edge.attributes
+                .iter()
+                .any(|attribute| attribute.key == "article_number" && attribute.value == "L1121-1")
+        })
+        .count();
+    assert_eq!(l1121, 1);
+}
+
+#[test]
+fn validate_rejects_mislabelled_inferred_edge() {
+    let body = "article L1121-1 du code du travail.";
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        body,
+    );
+    let mut decision = decision(ArchiveSource::Cass, &xml);
+    assert!(!decision.inferred_edges.is_empty());
+    decision.inferred_edges[0].edge_source = "publisher".to_owned();
+    let error = decision.validate().unwrap_err();
+    assert!(matches!(error, DecisionValidationError::InvalidEdge { .. }));
+}
+
+#[test]
 fn over_long_paragraph_is_labelled_hard_split() {
     // WARN 5: an over-long single paragraph splits into `hard_split` pieces, distinct from natural
     // `paragraph` packs.

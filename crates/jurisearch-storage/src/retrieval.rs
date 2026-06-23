@@ -152,6 +152,10 @@ pub enum RelatedRelation {
     CitedBy,
     /// Version-family members (LIEN_ART version-list edges).
     Temporal,
+    /// Decisions that officially cite this article (statute → interpreting jurisprudence). Like
+    /// `cited_by` but restricted to `kind = 'decision'` neighbours. (`cites` from a decision seed
+    /// already returns the articles it applies — the inverse direction.)
+    InterpretedBy,
 }
 
 impl RelatedRelation {
@@ -160,6 +164,7 @@ impl RelatedRelation {
             "cites" => Some(Self::Cites),
             "cited_by" => Some(Self::CitedBy),
             "temporal" => Some(Self::Temporal),
+            "interpreted_by" => Some(Self::InterpretedBy),
             _ => None,
         }
     }
@@ -169,13 +174,14 @@ impl RelatedRelation {
             Self::Cites => "cites",
             Self::CitedBy => "cited_by",
             Self::Temporal => "temporal",
+            Self::InterpretedBy => "interpreted_by",
         }
     }
 
     fn direction(self) -> &'static str {
         match self {
             Self::Cites | Self::Temporal => "outgoing",
-            Self::CitedBy => "incoming",
+            Self::CitedBy | Self::InterpretedBy => "incoming",
         }
     }
 }
@@ -1171,6 +1177,27 @@ resolved AS (
       AND e.payload->'attributes' @> {VERSION_FILTER}
       AND td.document_id <> {id}
     ORDER BY td.valid_from, td.source_uid
+    LIMIT {limit}
+)"#
+        ),
+        // Statute → interpreting jurisprudence: decisions whose official CITATION edges resolve to
+        // this article's source_uid. Same indexed CITATION/cible path as cited_by, restricted to
+        // decision neighbours. Never asserts jurisprudence constante — just ranked candidates.
+        RelatedRelation::InterpretedBy => format!(
+            r#"seed AS (SELECT source_uid FROM documents WHERE document_id = {id}),
+resolved AS (
+    SELECT e.edge_id, e.edge_kind, e.edge_source, e.payload,
+           fd.document_id, fd.source_uid, fd.citation, fd.title,
+           fd.valid_from::text AS valid_from, fd.valid_to::text AS valid_to,
+           fd.valid_to_raw, fd.source_url
+    FROM graph_edges e
+    JOIN seed s ON e.payload->>'to_source_uid' = s.source_uid
+    JOIN documents fd ON fd.document_id = e.from_document_id
+    WHERE e.edge_source = 'publisher'
+      AND e.payload->'attributes' @> {CITATION_FILTER}
+      AND fd.kind = 'decision'
+      AND fd.document_id <> {id}
+    ORDER BY fd.valid_from DESC NULLS LAST, fd.source_uid
     LIMIT {limit}
 )"#
         ),

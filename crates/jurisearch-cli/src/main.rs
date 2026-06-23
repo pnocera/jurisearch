@@ -154,8 +154,9 @@ enum Command {
     Cite(CiteArgs),
     /// Return depth-1 graph neighbours of a document with authority signals.
     ///
-    /// `--rel cites` (outgoing citations, default), `cited_by` (incoming), or `temporal` (version
-    /// family). Output: `RelatedResponse`. Example:
+    /// `--rel cites` (outgoing citations, default), `cited_by` (incoming), `temporal` (version
+    /// family), or `interpreted_by` (decisions that cite a statute article). Output:
+    /// `RelatedResponse`. Example:
     ///   jurisearch related legi:LEGIARTI000006850948@1994-08-21 --rel cites
     Related(RelatedArgs),
     /// Return structural neighbourhood (ancestry, siblings) for a document.
@@ -498,7 +499,8 @@ struct CiteArgs {
 struct RelatedArgs {
     /// Exact, version-pinned stable ID of the document whose graph neighbours to return.
     id: String,
-    /// Relation: `cites` (outgoing, default), `cited_by` (incoming), or `temporal` (version family).
+    /// Relation: `cites` (outgoing, default), `cited_by` (incoming), `temporal` (version family), or
+    /// `interpreted_by` (decisions citing a statute article).
     #[arg(long, default_value = "cites")]
     rel: String,
     /// Maximum number of neighbours to return.
@@ -2695,7 +2697,7 @@ fn related_payload(args: RelatedArgs, index_dir: Option<&Path>) -> Result<Value,
     }
     let relation = RelatedRelation::parse(&args.rel).ok_or_else(|| {
         ErrorObject::bad_input(format!(
-            "unknown --rel `{}`; expected one of: cites, cited_by, temporal",
+            "unknown --rel `{}`; expected one of: cites, cited_by, temporal, interpreted_by",
             args.rel
         ))
     })?;
@@ -3645,6 +3647,7 @@ struct JuriArchiveIngestCounters {
     inserted_documents: usize,
     inserted_chunks: usize,
     inserted_publisher_edges: usize,
+    inserted_inferred_edges: usize,
     skipped_members: usize,
     skipped_compatible_members: usize,
     failed_members: usize,
@@ -3657,6 +3660,7 @@ impl JuriArchiveIngestCounters {
         self.inserted_documents += committed.inserted_documents;
         self.inserted_chunks += committed.inserted_chunks;
         self.inserted_publisher_edges += committed.inserted_publisher_edges;
+        self.inserted_inferred_edges += committed.inserted_inferred_edges;
         self.skipped_members += committed.skipped_members;
         self.skipped_compatible_members += committed.skipped_compatible_members;
         self.failed_members += committed.failed_members;
@@ -3708,6 +3712,7 @@ fn juri_archive_manifest(
             "inserted_documents": counters.inserted_documents,
             "inserted_chunks": counters.inserted_chunks,
             "inserted_publisher_edges": counters.inserted_publisher_edges,
+            "inserted_inferred_edges": counters.inserted_inferred_edges,
             "skipped_members": counters.skipped_members,
             "skipped_compatible_members": counters.skipped_compatible_members,
             "failed_members": counters.failed_members,
@@ -3924,6 +3929,7 @@ fn ingest_juri_archives_payload(
         "inserted_documents": counters.inserted_documents,
         "inserted_chunks": counters.inserted_chunks,
         "inserted_publisher_edges": counters.inserted_publisher_edges,
+        "inserted_inferred_edges": counters.inserted_inferred_edges,
         "skipped_members": counters.skipped_members,
         "skipped_compatible_members": counters.skipped_compatible_members,
         "failed_members": counters.failed_members,
@@ -4083,6 +4089,7 @@ fn process_juri_archive_member<C: postgres::GenericClient>(
             counters.inserted_documents += report.documents;
             counters.inserted_chunks += report.chunks;
             counters.inserted_publisher_edges += report.publisher_edges;
+            counters.inserted_inferred_edges += report.inferred_edges;
         }
         Ok(ParsedJuriXml::UnsupportedRoot { root }) => {
             *counters.unsupported_roots.entry(root.clone()).or_default() += 1;
