@@ -8,7 +8,7 @@ use std::{
     process::ExitCode,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -4052,8 +4052,26 @@ impl JuriArchiveIngestCounters {
     }
 }
 
+/// Monotonic in-process counter making default run IDs unique even within the same nanosecond.
+static RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// A collision-resistant run-id suffix. `ingest`/`sync` runs without an explicit `--run-id` must not
+/// share an id: `start_ingest_run_with_client` upserts on `ON CONFLICT (run_id)`, so a collision lets
+/// a later run overwrite an earlier completed run's manifest (e.g. two rapid same-source syncs in the
+/// same second erasing the first run's freshness). Nanosecond clock + PID + an in-process counter
+/// makes the id unique across rapid same-process and separate-process invocations.
+fn unique_run_suffix() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id();
+    let sequence = RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos}-{pid}-{sequence}")
+}
+
 fn default_juri_run_id(source: ArchiveSource) -> String {
-    format!("{}-{}", source.as_str(), unix_seconds())
+    format!("{}-{}", source.as_str(), unique_run_suffix())
 }
 
 fn juri_archive_manifest(
@@ -5114,7 +5132,7 @@ fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, Er
 }
 
 fn default_legi_run_id() -> String {
-    format!("legi-{}", unix_seconds())
+    format!("legi-{}", unique_run_suffix())
 }
 
 /// Whether maintenance commands should skip the (expensive, full-table MD5) replay-snapshot refresh
@@ -9049,6 +9067,16 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn default_run_ids_are_unique_across_rapid_calls() {
+        // Two rapid default run ids must differ, or ON CONFLICT(run_id) would let one run overwrite
+        // another's manifest. Generate many in a tight loop (same second) and require all distinct.
+        let ids: std::collections::HashSet<String> =
+            (0..1000).map(|_| default_juri_run_id(ArchiveSource::Cass)).collect();
+        assert_eq!(ids.len(), 1000);
+        assert_ne!(default_legi_run_id(), default_legi_run_id());
+    }
 
     #[test]
     fn normalize_since_accepts_date_and_compact_forms() {

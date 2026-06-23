@@ -3694,6 +3694,8 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
         .stdout
         .clone();
     let noop: Value = serde_json::from_slice(&noop).unwrap();
+    // Two immediate same-source syncs must get distinct auto run IDs (no ON CONFLICT overwrite).
+    assert_ne!(json["run_id"], noop["run_id"]);
     assert_eq!(noop["inserted_documents"], 0); // nothing processed
     // Honest: a run that processed nothing reports null freshness (BLOCKER fix), not the dir's newest.
     assert!(noop["manifest"]["source_version"].is_null());
