@@ -85,7 +85,10 @@ pub fn compiled_schema() -> Value {
                     "format": { "enum": ["concise", "detailed"], "default": "concise" },
                     "top_k": { "type": "integer", "minimum": 1, "default": 10 },
                     "cursor": { "type": "string", "description": "Chunk cursor <score>:<chunk_id> or document cursor doc:<score>:<document_id>; must match --group-by." },
-                    "as_of": { "type": "string", "format": "date" }
+                    "as_of": { "type": "string", "format": "date" },
+                    "rrf_lexical_weight": { "type": "number", "minimum": 0, "description": "Per-request hybrid RRF lexical weight (default from env, else 1.0)." },
+                    "rrf_dense_weight": { "type": "number", "minimum": 0, "description": "Per-request hybrid RRF dense weight (default from env, else 0.3)." },
+                    "probes": { "type": "integer", "minimum": 1, "maximum": 4096, "description": "Per-request ivfflat.probes for dense ANN (default 4)." }
                 }
             },
             "SearchResponse": {
@@ -677,8 +680,11 @@ pub fn compiled_schema() -> Value {
                     "id": { "type": "string" },
                     "from": { "type": "string", "format": "date" },
                     "to": { "type": "string", "format": "date" },
+                    "family_count": { "type": "integer" },
                     "from_version": { "type": ["object", "null"] },
                     "to_version": { "type": ["object", "null"] },
+                    "missing_from": { "type": "boolean", "description": "No version in force on `from`." },
+                    "missing_to": { "type": "boolean", "description": "No version in force on `to`." },
                     "changed": { "type": ["boolean", "null"] }
                 }
             },

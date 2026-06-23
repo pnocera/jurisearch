@@ -1056,6 +1056,7 @@ SELECT jsonb_build_object(
     'id', {id},
     'from', {from_lit},
     'to', {to_lit},
+    'family_count', (SELECT count(*) FROM family),
     'from_version', (SELECT to_jsonb(f) FROM from_version f),
     'to_version', (SELECT to_jsonb(t) FROM to_version t),
     'changed', (

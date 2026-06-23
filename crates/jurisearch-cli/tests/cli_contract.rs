@@ -103,6 +103,15 @@ fn help_schema_json_is_valid_and_lists_commands() {
         json["schemas"]["SearchRequest"]["properties"]["group_by"]["enum"][1],
         "document"
     );
+    // T2.1 request-scoped tuning must be discoverable through the schema, not just the CLI flags.
+    assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["rrf_dense_weight"]["minimum"],
+        0
+    );
+    assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["probes"]["maximum"],
+        4096
+    );
     assert_eq!(
         json["schemas"]["SearchRequest"]["properties"]["cursor"]["type"],
         "string"

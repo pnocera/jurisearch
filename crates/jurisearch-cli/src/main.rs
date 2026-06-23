@@ -278,6 +278,29 @@ impl SearchArgs {
     }
 }
 
+/// Validate user-supplied tuning at the CLI/session boundary (before SQL): weights must be finite
+/// and >= 0; probes in [1, 4096]. Invalid input is a `bad_input` error, not a silent clamp.
+fn validate_retrieval_options(options: &RetrievalOptions) -> Result<(), ErrorObject> {
+    for (name, weight) in [
+        ("rrf-lexical-weight", options.rrf_lexical_weight),
+        ("rrf-dense-weight", options.rrf_dense_weight),
+    ] {
+        if let Some(weight) = weight
+            && (!weight.is_finite() || weight < 0.0)
+        {
+            return Err(ErrorObject::bad_input(format!(
+                "--{name} must be a finite value >= 0"
+            )));
+        }
+    }
+    if let Some(probes) = options.ivfflat_probes
+        && !(1..=4096).contains(&probes)
+    {
+        return Err(ErrorObject::bad_input("--probes must be between 1 and 4096"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Args)]
 struct CompareArgs {
     /// Query to compare across retrievers (bm25 vs dense vs hybrid).
@@ -510,6 +533,9 @@ struct ServeArgs {
     /// Bind a Unix-domain socket at this path. Provide this OR --tcp.
     #[arg(long)]
     socket: Option<PathBuf>,
+    /// Allow a non-loopback TCP bind (off-host exposure). Off by default; the protocol is unauthenticated.
+    #[arg(long)]
+    allow_remote: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1334,6 +1360,7 @@ fn eval_run_payload(
     if args.top_k == 0 {
         return Err(ErrorObject::bad_input("--top-k must be at least 1"));
     }
+    validate_retrieval_options(&options)?;
     let modes = parse_eval_modes(&args.modes)?;
     let metrics: Vec<MetricSpec> = args
         .metrics
@@ -1612,6 +1639,9 @@ fn eval_tune_payload(args: EvalTuneArgs, index_dir: Option<&Path>) -> Result<Val
             .map_err(|_| ErrorObject::bad_input(format!("--sweep value `{s}` is not a number")))
     };
     let (start, stop, step) = (parse(bounds[0])?, parse(bounds[1])?, parse(bounds[2])?);
+    if !start.is_finite() || !stop.is_finite() || !step.is_finite() {
+        return Err(ErrorObject::bad_input("--sweep start/stop/step must be finite"));
+    }
     if step <= 0.0 || stop < start {
         return Err(ErrorObject::bad_input(
             "--sweep requires step > 0 and stop >= start",
@@ -1621,6 +1651,14 @@ fn eval_tune_payload(args: EvalTuneArgs, index_dir: Option<&Path>) -> Result<Val
         return Err(ErrorObject::bad_input(format!(
             "unknown sweep param `{param}`; expected rrf-dense, rrf-lexical, or probes"
         )));
+    }
+    if param == "probes" && [start, stop, step].iter().any(|value| value.fract() != 0.0) {
+        return Err(ErrorObject::bad_input(
+            "--sweep probes=start:stop:step requires integer start/stop/step",
+        ));
+    }
+    if param == "probes" && start < 1.0 {
+        return Err(ErrorObject::bad_input("--sweep probes start must be >= 1"));
     }
 
     let mut values = Vec::new();
@@ -2207,6 +2245,7 @@ fn eval_phase1_fixture_search_result(fixture: &LegalRetrievalFixture, search: Va
 }
 
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    validate_retrieval_options(&args.retrieval_options())?;
     let retrieval_mode: RetrievalMode = args.mode.into();
     let output_format: OutputFormat = args.format.into();
     let after_cursor = args
@@ -5465,16 +5504,63 @@ fn inject_server_index_dir(args: &mut Value, default_index_dir: &Option<String>)
     }
 }
 
+/// Max bytes for one request line on the socket; oversize requests are rejected and the connection
+/// closed, so a client can't exhaust memory with an unbounded line.
+const SERVE_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read one newline-terminated request, bounded to `max` bytes. `Ok(None)` at EOF; an oversize line
+/// is an `InvalidData` error (the caller replies bad_input and closes).
+fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match reader.read(&mut byte)? {
+            0 => {
+                return Ok(if buf.is_empty() {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                });
+            }
+            _ => {
+                if byte[0] == b'\n' {
+                    return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+                }
+                buf.push(byte[0]);
+                if buf.len() > max {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "request line exceeds the size limit",
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// Serve the JSONL request protocol over one socket, sequentially (the index's advisory lock means
 /// one request holds the index at a time). Reuses `dispatch_session_request` — the same transport-
 /// neutral handler the warm session uses — so results are byte-identical to the one-shot CLI.
 fn serve_jsonl<R: BufRead, W: Write>(
-    reader: R,
+    mut reader: R,
     mut writer: W,
     default_index_dir: &Option<String>,
 ) -> io::Result<()> {
-    for line in reader.lines() {
-        let line = line?;
+    loop {
+        let line = match read_bounded_line(&mut reader, SERVE_MAX_REQUEST_BYTES) {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                let response = SessionResponse::err(None, ErrorObject::bad_input(error.to_string()));
+                let _ = writeln!(
+                    writer,
+                    "{}",
+                    serde_json::to_string(&response).unwrap_or_default()
+                );
+                break; // close the connection so the listener can accept the next client
+            }
+            Err(error) => return Err(error),
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -5507,29 +5593,59 @@ fn serve_jsonl<R: BufRead, W: Write>(
 fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     let default_index_dir = index_dir.map(|path| path.display().to_string());
     match (args.tcp.as_deref(), args.socket.as_deref()) {
-        (Some(_), Some(_)) | (None, None) => {
-            emit_error(ErrorObject::bad_input(
-                "serve requires exactly one of --tcp or --socket",
-            ))
-        }
+        (Some(_), Some(_)) | (None, None) => emit_error(ErrorObject::bad_input(
+            "serve requires exactly one of --tcp or --socket",
+        )),
         (Some(addr), None) => {
-            let listener = std::net::TcpListener::bind(addr)
-                .map_err(|error| anyhow::anyhow!("failed to bind TCP {addr}: {error}"))?;
+            // Resolve and refuse a non-loopback bind unless explicitly allowed: the protocol is
+            // unauthenticated, so binding 0.0.0.0/a LAN address would expose the index off-host.
+            let resolved = addr
+                .to_socket_addrs()
+                .map_err(|error| anyhow::anyhow!("invalid --tcp address {addr}: {error}"))?
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("--tcp address {addr} did not resolve"))?;
+            if !resolved.ip().is_loopback() && !args.allow_remote {
+                return emit_error(ErrorObject::bad_input(format!(
+                    "refusing to bind non-loopback address {resolved} without --allow-remote (the protocol is unauthenticated)"
+                )));
+            }
+            let listener = std::net::TcpListener::bind(resolved)
+                .map_err(|error| anyhow::anyhow!("failed to bind TCP {resolved}: {error}"))?;
             eprintln!(
-                "jurisearch serve: listening on tcp://{addr} (JSONL session protocol; single-client sequential)"
+                "jurisearch serve: listening on tcp://{resolved} (JSONL session protocol; single-client sequential)"
             );
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                // Drop a slow/idle client instead of holding the single-client daemon forever.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
                 let reader = io::BufReader::new(stream.try_clone()?);
-                // Sequential: handle the whole connection before accepting the next (the index's
-                // advisory lock allows only one holder at a time).
                 let _ = serve_jsonl(reader, stream, &default_index_dir);
             }
             Ok(())
         }
         (None, Some(path)) => {
-            use std::os::unix::net::UnixListener;
-            let _ = fs::remove_file(path);
+            use std::os::unix::fs::FileTypeExt;
+            use std::os::unix::net::{UnixListener, UnixStream};
+            // Only remove a CONFIRMED stale jurisearch socket — never a regular file/dir/symlink the
+            // user mistyped, and not a live server's socket.
+            if let Ok(meta) = fs::symlink_metadata(path) {
+                if !meta.file_type().is_socket() {
+                    return emit_error(ErrorObject::bad_input(format!(
+                        "refusing to bind: {} exists and is not a socket",
+                        path.display()
+                    )));
+                }
+                if UnixStream::connect(path).is_ok() {
+                    return emit_error(ErrorObject::bad_input(format!(
+                        "a server is already listening on {}",
+                        path.display()
+                    )));
+                }
+                fs::remove_file(path).map_err(|error| {
+                    anyhow::anyhow!("failed to remove stale socket {}: {error}", path.display())
+                })?;
+            }
             let listener = UnixListener::bind(path).map_err(|error| {
                 anyhow::anyhow!("failed to bind socket {}: {error}", path.display())
             })?;
@@ -5539,6 +5655,7 @@ fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
             );
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
                 let reader = io::BufReader::new(stream.try_clone()?);
                 let _ = serve_jsonl(reader, stream, &default_index_dir);
             }
@@ -5995,7 +6112,16 @@ fn versions_payload(args: VersionsArgs, index_dir: Option<&Path>) -> Result<Valu
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
     let response = document_versions_json(&postgres, &args.id).map_err(storage_error_object)?;
-    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+    let value: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    // An empty family means the id is unknown (the target is always its own family member).
+    if value["count"].as_u64() == Some(0) {
+        return Err(no_results(format!(
+            "no document/version family for id `{}`",
+            args.id
+        )));
+    }
+    Ok(value)
 }
 
 fn diff_payload(args: DiffArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
@@ -6012,7 +6138,22 @@ fn diff_payload(args: DiffArgs, index_dir: Option<&Path>) -> Result<Value, Error
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
     let response = document_diff_json(&postgres, &args.id, &args.from, &args.to)
         .map_err(storage_error_object)?;
-    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+    let mut value: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if value["family_count"].as_u64() == Some(0) {
+        return Err(no_results(format!(
+            "no document/version family for id `{}`",
+            args.id
+        )));
+    }
+    // Distinguish "no version in force on a date" from "version unchanged".
+    if let Some(map) = value.as_object_mut() {
+        let missing_from = map.get("from_version").map(Value::is_null).unwrap_or(true);
+        let missing_to = map.get("to_version").map(Value::is_null).unwrap_or(true);
+        map.insert("missing_from".to_owned(), Value::Bool(missing_from));
+        map.insert("missing_to".to_owned(), Value::Bool(missing_to));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Deserialize)]
