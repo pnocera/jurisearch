@@ -114,6 +114,17 @@ const PHASE1_FRANCE_LEGI_MIN_SEMANTIC_QUERIES: u64 = 50;
 // The gate validates recall/exactness @10, so the runner is fixed at top-10 (document-level).
 const FRANCE_LEGI_GATE_TOP_K: u32 = 10;
 
+// Phase 2 full-french-juridic gate. Fail-closed: the "best-in-class French juridic search" claim is
+// allowed only once a passing jurisprudence eval benchmark (Cassation + administrative retrieval AND
+// decision-citation verification, through the production pipeline) is supplied. Floors are the
+// release policy; status re-derives pass from the artifact's per-category metrics, never trusting a
+// self-reported `state`.
+const PHASE2_BENCHMARK_ENV: &str = "JURISEARCH_PHASE2_BENCHMARK";
+const PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_RECALL_AT_10: f64 = 0.50;
+const PHASE2_MIN_DECISION_CITATION_ACCURACY: f64 = 0.95;
+const PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_QUERIES: u64 = 30;
+const PHASE2_MIN_DECISION_CITATION_QUERIES: u64 = 30;
+
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
 #[command(version, about = "Local-first French legal search CLI for AI agents.")]
@@ -6976,6 +6987,7 @@ fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshot
     let (index, ingest_health, corpus_sources) =
         status_index_and_ingest_health(index_dir, replay_snapshot_mode);
     let phase1_gate = phase1_gate_payload(&index, &ingest_health);
+    let phase2_gate = phase2_gate_payload(&index, &ingest_health, &corpus_sources);
 
     json!({
         "schema_version": SCHEMA_VERSION,
@@ -7007,7 +7019,8 @@ fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshot
         },
         "ingest_health": ingest_health,
         "corpus_sources": corpus_sources,
-        "phase1_gate": phase1_gate
+        "phase1_gate": phase1_gate,
+        "phase2_gate": phase2_gate
     })
 }
 
@@ -8000,6 +8013,237 @@ fn phase1_france_legi_check_status(france_legi: &Value) -> &'static str {
             "pass"
         }
         Some("passed" | "failed") => "fail",
+        _ => "pending",
+    }
+}
+
+// ===== Phase 2 gate (full French juridic search) ==============================================
+
+/// The fail-closed Phase 2 gate: the "best-in-class French juridic search" claim is allowed only when
+/// jurisprudence is ingested, the index is query-ready, bulk zone provenance is reported honestly, and
+/// a passing jurisprudence eval benchmark (re-derived from per-category floors, not self-reported) is
+/// supplied via `JURISEARCH_PHASE2_BENCHMARK`. Until then `claim_allowed=false` / `state=not_ready`.
+fn phase2_gate_payload(index: &Value, ingest_health: &Value, corpus_sources: &Value) -> Value {
+    let benchmark = phase2_benchmark_payload();
+    phase2_gate_payload_with(index, ingest_health, corpus_sources, benchmark)
+}
+
+fn phase2_gate_payload_with(
+    index: &Value,
+    ingest_health: &Value,
+    corpus_sources: &Value,
+    benchmark: Value,
+) -> Value {
+    let query_ready = index["query_ready"].as_bool() == Some(true);
+    let ingest_available = ingest_health["state"] == "available";
+
+    // Which DILA bulk jurisprudence sources have a freshness-advancing completed run (status reports
+    // them in corpus_sources). cass/capp/inca are judicial; jade is administrative.
+    let juri_sources: Vec<&str> = ["cass", "capp", "inca", "jade"]
+        .into_iter()
+        .filter(|source| corpus_sources.get(source).is_some_and(Value::is_object))
+        .collect();
+    let judicial_present = juri_sources.iter().any(|s| matches!(*s, "cass" | "capp" | "inca"));
+    let administrative_present = juri_sources.contains(&"jade");
+    let corpus_present = judicial_present && administrative_present;
+
+    // Honest provenance: every present bulk source must report zone_accurate=false (it must never
+    // claim official Judilibre zones without enrichment).
+    let honest_zones = !juri_sources.is_empty()
+        && juri_sources
+            .iter()
+            .all(|s| corpus_sources[*s]["zone_accurate"].as_bool() == Some(false));
+
+    let benchmark_status = phase2_benchmark_check_status(&benchmark);
+
+    let checks = vec![
+        phase1_gate_check(
+            "jurisprudence_corpus_present",
+            corpus_present,
+            "both judicial (cass/capp/inca) and administrative (jade) DILA bulk jurisprudence must have a completed ingest run",
+        ),
+        phase1_gate_check(
+            "index_query_ready",
+            if query_ready { "pass" } else { "pending" },
+            "the index must be query-ready (projection + embedding coverage gates pass)",
+        ),
+        phase1_gate_check(
+            "honest_zone_provenance",
+            if honest_zones { "pass" } else { "pending" },
+            "bulk jurisprudence must report zone_accurate=false; the official-zone fetch gate is met only by Judilibre zone enrichment",
+        ),
+        phase1_gate_check_advisory(
+            "pseudonymisation_preserved",
+            if ingest_available { "pass" } else { "pending" },
+            "source pseudonymisation is preserved verbatim by the juri parser (unit + real-archive tests); advisory until the release benchmark asserts no re-identification",
+        ),
+        phase1_gate_check(
+            "jurisprudence_eval_benchmark",
+            benchmark_status,
+            "a passing jurisprudence eval benchmark — Cassation + administrative retrieval AND decision-citation verification through the production pipeline, re-derived against policy floors — is required before the full-juridic claim",
+        ),
+    ];
+
+    let claim_allowed = checks
+        .iter()
+        .filter(|check| check["gating"].as_bool() != Some(false))
+        .all(|check| check["status"].as_str() == Some("pass"));
+
+    json!({
+        "state": if claim_allowed { "ready" } else { "not_ready" },
+        "claim_allowed": claim_allowed,
+        "scope": "phase2_full_french_juridic_search",
+        "checks": checks,
+        "jurisprudence_corpus_sources": juri_sources,
+        "benchmark": benchmark
+    })
+}
+
+fn phase2_benchmark_payload() -> Value {
+    let artifact_path = std::env::var_os(PHASE2_BENCHMARK_ENV).map(PathBuf::from);
+    phase2_benchmark_payload_with_path(artifact_path.as_deref())
+}
+
+fn phase2_benchmark_payload_with_path(artifact_path: Option<&Path>) -> Value {
+    let mut payload = phase2_benchmark_default_payload();
+    let Some(artifact_path) = artifact_path else {
+        return payload;
+    };
+    payload["artifact_path"] = json!(artifact_path.to_string_lossy());
+    payload["source"] = json!(PHASE2_BENCHMARK_ENV);
+    let contents = match fs::read_to_string(artifact_path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            payload["state"] = json!("failed");
+            payload["artifact_error"] = json!(format!(
+                "failed to read Phase 2 benchmark artifact `{}`: {error}",
+                artifact_path.display()
+            ));
+            return payload;
+        }
+    };
+    let artifact = match serde_json::from_str::<Value>(&contents) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            payload["state"] = json!("failed");
+            payload["artifact_error"] = json!(format!(
+                "failed to parse Phase 2 benchmark artifact `{}` as JSON: {error}",
+                artifact_path.display()
+            ));
+            return payload;
+        }
+    };
+    payload["artifact"] = artifact.clone();
+    payload["categories"] = artifact["categories"].clone();
+    payload["provenance"] = artifact["provenance"].clone();
+    payload["evidence"] = artifact["evidence"].as_array().map_or(json!([]), |_| artifact["evidence"].clone());
+
+    let errors = phase2_benchmark_artifact_errors(&artifact);
+    if errors.is_empty() {
+        payload["state"] = json!(artifact["state"].as_str().unwrap_or("pending"));
+        payload["artifact_error"] = Value::Null;
+    } else {
+        payload["state"] = json!("failed");
+        payload["artifact_error"] = json!(errors.join("; "));
+    }
+    payload
+}
+
+fn phase2_benchmark_default_payload() -> Value {
+    json!({
+        "state": "pending",
+        "source": "not_configured",
+        "artifact_path": null,
+        "artifact_error": null,
+        "jurisdiction": "france",
+        "fingerprint": "bge-m3:1024:normalize:true",
+        "claim_scope": "full French juridic search (statutes + jurisprudence): Cassation + administrative retrieval AND decision-citation verification through the production pipeline",
+        "required_evidence": [
+            "jurisprudence retrieval tasks for Cassation and administrative courts, run through the production search pipeline",
+            "decision-citation verification (ECLI/pourvoi/CETATEXT) measured for accuracy",
+            "per-category metrics with query counts and the locked bge-m3 fingerprint, at or above policy floors",
+            "structured provenance: pipeline + code_version + index_revision, sampled=false / human_in_gold + llm_in_gold recorded",
+            "pseudonymisation preservation asserted (no re-identification, no cross-source linking)"
+        ],
+        "floors": {
+            "jurisprudence_retrieval_recall_at_10": PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_RECALL_AT_10,
+            "decision_citation_accuracy": PHASE2_MIN_DECISION_CITATION_ACCURACY,
+            "min_jurisprudence_retrieval_queries": PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_QUERIES,
+            "min_decision_citation_queries": PHASE2_MIN_DECISION_CITATION_QUERIES
+        },
+        "categories": null,
+        "provenance": null,
+        "evidence": [],
+        "reason": "no Phase 2 jurisprudence eval benchmark has been run yet; the full-juridic claim is fail-closed until a jurisdiction-correct passing artifact is supplied"
+    })
+}
+
+/// Re-derive whether a Phase 2 benchmark artifact PASSES against the policy floors (never trust a
+/// self-reported `state`). Returns the list of reasons it is NOT a valid pass (empty = valid).
+fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    if artifact["jurisdiction"].as_str() != Some("france") {
+        errors.push("jurisdiction must be `france`".to_owned());
+    }
+    if artifact["fingerprint"].as_str() != Some("bge-m3:1024:normalize:true") {
+        errors.push("fingerprint must be the locked bge-m3:1024:normalize:true".to_owned());
+    }
+    if !artifact["evidence"].as_array().is_some_and(|evidence| !evidence.is_empty()) {
+        errors.push("evidence must be a non-empty array".to_owned());
+    }
+    let provenance = &artifact["provenance"];
+    for flag in ["sampled", "human_in_gold", "llm_in_gold"] {
+        if !provenance[flag].is_boolean() {
+            errors.push(format!("provenance.{flag} must be a boolean"));
+        }
+    }
+    if provenance["sampled"].as_bool() == Some(true) {
+        errors.push("provenance.sampled must be false (full benchmark, not a sample)".to_owned());
+    }
+    phase2_benchmark_validate_category(
+        &artifact["categories"]["jurisprudence_retrieval"],
+        "jurisprudence_retrieval",
+        PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_RECALL_AT_10,
+        PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_QUERIES,
+        &mut errors,
+    );
+    phase2_benchmark_validate_category(
+        &artifact["categories"]["decision_citation"],
+        "decision_citation",
+        PHASE2_MIN_DECISION_CITATION_ACCURACY,
+        PHASE2_MIN_DECISION_CITATION_QUERIES,
+        &mut errors,
+    );
+    errors
+}
+
+fn phase2_benchmark_validate_category(
+    category: &Value,
+    name: &str,
+    floor: f64,
+    min_queries: u64,
+    errors: &mut Vec<String>,
+) {
+    let Some(value) = category["value"].as_f64() else {
+        errors.push(format!("category `{name}` is missing a numeric `value`"));
+        return;
+    };
+    if value < floor {
+        errors.push(format!("category `{name}` value {value} is below floor {floor}"));
+    }
+    match category["queries"].as_u64() {
+        Some(queries) if queries >= min_queries => {}
+        Some(queries) => errors.push(format!(
+            "category `{name}` has {queries} queries, below the minimum {min_queries}"
+        )),
+        None => errors.push(format!("category `{name}` is missing a `queries` count")),
+    }
+}
+
+fn phase2_benchmark_check_status(benchmark: &Value) -> &'static str {
+    match benchmark["state"].as_str() {
+        Some("passed") => "pass",
+        Some("failed") => "fail",
         _ => "pending",
     }
 }
@@ -9067,6 +9311,147 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    fn phase2_index_ready() -> Value {
+        json!({ "query_ready": true })
+    }
+    fn phase2_ingest_available() -> Value {
+        json!({ "state": "available" })
+    }
+    fn phase2_corpus_both_families() -> Value {
+        json!({
+            "cass": { "zone_accurate": false },
+            "jade": { "zone_accurate": false }
+        })
+    }
+    fn phase2_valid_benchmark_json() -> String {
+        json!({
+            "state": "passed",
+            "jurisdiction": "france",
+            "fingerprint": "bge-m3:1024:normalize:true",
+            "evidence": ["work/03-implementation/02-evidence/phase2-eval.json"],
+            "provenance": {
+                "pipeline": "production", "code_version": "x", "index_revision": "y",
+                "sampled": false, "human_in_gold": false, "llm_in_gold": true
+            },
+            "categories": {
+                "jurisprudence_retrieval": { "value": 0.62, "queries": 40 },
+                "decision_citation": { "value": 0.98, "queries": 40 }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn phase2_gate_is_fail_closed_without_a_benchmark() {
+        // Even with corpus present + query ready + honest zones, the claim stays closed until a
+        // passing jurisprudence benchmark is supplied.
+        let gate = phase2_gate_payload_with(
+            &phase2_index_ready(),
+            &phase2_ingest_available(),
+            &phase2_corpus_both_families(),
+            phase2_benchmark_default_payload(),
+        );
+        assert_eq!(gate["claim_allowed"], false);
+        assert_eq!(gate["state"], "not_ready");
+        let benchmark_check = gate["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "jurisprudence_eval_benchmark")
+            .unwrap();
+        assert_eq!(benchmark_check["status"], "pending");
+        assert_eq!(benchmark_check["gating"], true);
+    }
+
+    #[test]
+    fn phase2_gate_requires_both_judicial_and_administrative() {
+        // Only judicial (cass), no administrative (jade) -> corpus check fails.
+        let gate = phase2_gate_payload_with(
+            &phase2_index_ready(),
+            &phase2_ingest_available(),
+            &json!({ "cass": { "zone_accurate": false } }),
+            phase2_benchmark_default_payload(),
+        );
+        let corpus_check = gate["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "jurisprudence_corpus_present")
+            .unwrap();
+        // Missing administrative corpus -> not yet satisfied (pending), and the claim stays closed.
+        assert_eq!(corpus_check["status"], "pending");
+        assert_eq!(gate["claim_allowed"], false);
+    }
+
+    #[test]
+    fn phase2_gate_rejects_dishonest_zone_provenance() {
+        // A bulk source claiming zone_accurate=true must fail the honesty check.
+        let gate = phase2_gate_payload_with(
+            &phase2_index_ready(),
+            &phase2_ingest_available(),
+            &json!({ "cass": { "zone_accurate": true }, "jade": { "zone_accurate": false } }),
+            phase2_benchmark_default_payload(),
+        );
+        let honest = gate["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "honest_zone_provenance")
+            .unwrap();
+        assert_eq!(honest["status"], "pending");
+    }
+
+    #[test]
+    fn phase2_benchmark_re_derives_pass_and_rejects_bad_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A valid artifact re-derives to passed.
+        let valid = dir.path().join("valid.json");
+        std::fs::write(&valid, phase2_valid_benchmark_json()).unwrap();
+        let payload = phase2_benchmark_payload_with_path(Some(&valid));
+        assert_eq!(payload["state"], "passed");
+        assert!(payload["artifact_error"].is_null());
+
+        // Below-floor retrieval recall is rejected (state forced to failed).
+        let low: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+        let mut low = low;
+        low["categories"]["jurisprudence_retrieval"]["value"] = json!(0.10);
+        let low_path = dir.path().join("low.json");
+        std::fs::write(&low_path, low.to_string()).unwrap();
+        let payload = phase2_benchmark_payload_with_path(Some(&low_path));
+        assert_eq!(payload["state"], "failed");
+
+        // Wrong jurisdiction is rejected even if state says passed.
+        let mut wrong: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+        wrong["jurisdiction"] = json!("belgium");
+        let wrong_path = dir.path().join("wrong.json");
+        std::fs::write(&wrong_path, wrong.to_string()).unwrap();
+        assert_eq!(phase2_benchmark_payload_with_path(Some(&wrong_path))["state"], "failed");
+
+        // Sampled artifact is rejected.
+        let mut sampled: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+        sampled["provenance"]["sampled"] = json!(true);
+        let sampled_path = dir.path().join("sampled.json");
+        std::fs::write(&sampled_path, sampled.to_string()).unwrap();
+        assert_eq!(phase2_benchmark_payload_with_path(Some(&sampled_path))["state"], "failed");
+    }
+
+    #[test]
+    fn phase2_gate_opens_with_a_passing_benchmark() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = dir.path().join("valid.json");
+        std::fs::write(&valid, phase2_valid_benchmark_json()).unwrap();
+        let benchmark = phase2_benchmark_payload_with_path(Some(&valid));
+        let gate = phase2_gate_payload_with(
+            &phase2_index_ready(),
+            &phase2_ingest_available(),
+            &phase2_corpus_both_families(),
+            benchmark,
+        );
+        assert_eq!(gate["claim_allowed"], true);
+        assert_eq!(gate["state"], "ready");
+    }
 
     #[test]
     fn default_run_ids_are_unique_across_rapid_calls() {

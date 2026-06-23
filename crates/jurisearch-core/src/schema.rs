@@ -474,7 +474,25 @@ pub fn compiled_schema() -> Value {
                         }
                     },
                     "ingest_health": { "type": "object" },
-                    "phase1_gate": { "$ref": "#/schemas/Phase1GateResponse" }
+                    "corpus_sources": { "type": ["object", "null"] },
+                    "phase1_gate": { "$ref": "#/schemas/Phase1GateResponse" },
+                    "phase2_gate": { "$ref": "#/schemas/Phase2GateResponse" }
+                }
+            },
+            "Phase2GateResponse": {
+                "properties": {
+                    "state": { "enum": ["ready", "not_ready"] },
+                    "claim_allowed": { "type": "boolean" },
+                    "scope": { "type": "string" },
+                    "checks": {
+                        "type": "array",
+                        "items": { "$ref": "#/schemas/Phase1GateCheck" }
+                    },
+                    "jurisprudence_corpus_sources": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "benchmark": { "type": "object" }
                 }
             },
             "Phase1GateResponse": {
