@@ -1,0 +1,146 @@
+[
+  {
+    "id": "s01-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000051771225@1789-12-14",
+    "question": "Comment sait-on si quelqu'un est élu dès le premier vote, et que se passe-t-il si personne n'obtient assez de voix au début ?"
+  },
+  {
+    "id": "s01-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000051771225@1789-12-14",
+    "question": "Comment le conseil municipal désigne-t-il le maire après les élections, et que faire si personne n'a la majorité ?"
+  },
+  {
+    "id": "s02-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000006909376@1964-12-24",
+    "question": "Un ancien avocat français qui a travaillé dans un ancien territoire lié à la France peut-il faire compter ces années pour sa retraite d'avocat ?"
+  },
+  {
+    "id": "s02-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000006909376@1964-12-24",
+    "question": "Un professionnel ayant exercé dans un ancien territoire français peut-il faire compter ces années pour sa retraite ?"
+  },
+  {
+    "id": "s03-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000031101888@2016-09-01",
+    "question": "Au collège, à quoi servent les heures d'aide aux élèves et les projets menés entre plusieurs matières ?"
+  },
+  {
+    "id": "s03-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000031101888@2016-09-01",
+    "question": "À quoi servent les heures d'accompagnement des élèves et les projets entre plusieurs matières au collège ?"
+  },
+  {
+    "id": "s04-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000006254096@2006-08-22",
+    "question": "Quelle aide mensuelle une structure peut-elle recevoir quand elle accueille un jeune en volontariat ou en contrat aidé ?"
+  },
+  {
+    "id": "s04-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000006254096@2006-08-22",
+    "question": "Quelle aide financière une structure reçoit-elle quand elle accueille un jeune en service civique ou contrat aidé ?"
+  },
+  {
+    "id": "s05-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000038216915@2019-03-11",
+    "question": "Un bilan national doit-il être fait sur la façon dont la douleur des enfants atteints de cancer est prise en charge ?"
+  },
+  {
+    "id": "s05-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000038216915@2019-03-11",
+    "question": "Un bilan national est-il prévu sur la prise en charge de la douleur des enfants malades du cancer ?"
+  },
+  {
+    "id": "s06-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000043401943@2021-04-22",
+    "question": "Quand un fabricant demande l'autorisation de vendre un produit pour les cultures, doit-il utiliser tout de suite la nouvelle liste officielle des usages ou dispose-t-il d'un délai ?"
+  },
+  {
+    "id": "s06-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000043401943@2021-04-22",
+    "question": "Quand on demande l'autorisation de vendre un produit pour les cultures, faut-il appliquer tout de suite la nouvelle liste officielle des usages ou y a-t-il un délai ?"
+  },
+  {
+    "id": "s07-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000038926368@2019-08-16",
+    "question": "Pour ce concours d'entrée, après l'examen du dossier, quelles épreuves orales les candidats retenus doivent-ils passer ?"
+  },
+  {
+    "id": "s07-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000038926368@2019-08-16",
+    "question": "Quelles épreuves orales un candidat passe-t-il à un concours administratif une fois admissible ?"
+  },
+  {
+    "id": "s08-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000006503563@1987-08-02",
+    "question": "Quels ministres sont chargés de faire appliquer ce texte et où doit-il être publié ?"
+  },
+  {
+    "id": "s08-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000006503563@1987-08-02",
+    "question": "Quels ministres sont chargés d'appliquer un décret et où est-il publié ?"
+  },
+  {
+    "id": "s09-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000024047294@2011-06-01",
+    "question": "Pour cet examen professionnel dans l'animation territoriale, en quoi consistent l'écrit et l'oral, et combien de temps durent-ils ?"
+  },
+  {
+    "id": "s09-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000024047294@2011-06-01",
+    "question": "En quoi consistent l'écrit et l'oral d'un examen professionnel dans l'animation, et combien de temps durent-ils ?"
+  },
+  {
+    "id": "s10-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000034743791@2017-09-01",
+    "question": "Si un adjoint d'enseignement n'est pas d'accord avec son évaluation finale, quels délais a-t-il pour demander qu'elle soit revue ?"
+  },
+  {
+    "id": "s10-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000034743791@2017-09-01",
+    "question": "Comment contester une évaluation professionnelle jugée injuste dans la fonction publique, et sous quels délais ?"
+  },
+  {
+    "id": "s11-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000006850948@1994-08-21",
+    "question": "Quelles opérations sont prévues pour fermer définitivement un laboratoire contenant des matières nucléaires et enlever les risques radioactifs des locaux ?"
+  },
+  {
+    "id": "s11-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000006850948@1994-08-21",
+    "question": "Quelles opérations pour fermer définitivement un laboratoire contenant des matières nucléaires et supprimer les risques radioactifs ?"
+  },
+  {
+    "id": "s12-codex",
+    "source": "codex",
+    "document_id": "legi:LEGIARTI000006606697@1999-05-28",
+    "question": "Les produits destinés à tuer les rats et les souris dans les cultures peuvent-ils être vendus et utilisés librement ?"
+  },
+  {
+    "id": "s12-authored",
+    "source": "authored",
+    "document_id": "legi:LEGIARTI000006606697@1999-05-28",
+    "question": "Peut-on vendre et utiliser librement un poison contre les rats et les souris en agriculture ?"
+  }
+]

@@ -1,0 +1,2396 @@
+[
+  {
+    "question_id": "s01-codex",
+    "question": "Comment sait-on si quelqu'un est élu dès le premier vote, et que se passe-t-il si personne n'obtient assez de voix au début ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 6",
+        "snippet": "Le conseil scientifique procède à l'élection de son président lors de sa première réunion plénière. Le président est élu, à scrutin secret, au premier tour s'il obtient les suffrages à la majorité absolue de la totalité des membres du conseil ; si cette majorité n'est pas atteint"
+      },
+      {
+        "key": "c02",
+        "title": "Article 241-7",
+        "snippet": "Si les élections sont faites suivant un scrutin majoritaire à deux tours, nul n'est élu au premier tour de scrutin s'il n'a obtenu la majorité absolue des suffrages exprimés et un nombre de voix au moins égal au quart du nombre des électeurs inscrits. Au deuxième tour de scrutin "
+      },
+      {
+        "key": "c03",
+        "title": "Article L126",
+        "snippet": "Nul n'est élu au premier tour de scrutin s'il n'a réuni : 1° La majorité absolue des suffrages exprimés ; 2° Un nombre de suffrages égal au quart du nombre des électeurs inscrits. Au deuxième tour la majorité relative suffit. En cas d'égalité de suffrages, le plus âgé des candida"
+      },
+      {
+        "key": "c04",
+        "title": "Article 9",
+        "snippet": "Art. 9. - Est élu titulaire le candidat qui obtient le plus grand nombre de voix. Est élu suppléant celui qui obtient le plus grand nombre de voix après le titulaire. En cas d'égalité des voix entre plusieurs candidats, le candidat le plus âgé est élu comme titulaire et le suivan"
+      },
+      {
+        "key": "c05",
+        "title": "Article LO485",
+        "snippet": "Au premier tour de scrutin, il est attribué à la liste qui a recueilli la majorité absolue des suffrages exprimés et un nombre de suffrages au moins égal au quart des électeurs inscrits, un nombre de sièges égal au tiers du nombre des sièges à pourvoir arrondi, le cas échéant, à "
+      },
+      {
+        "key": "c06",
+        "title": "Article L253",
+        "snippet": "Nul n'est élu au premier tour de scrutin s'il n'a réuni : 1° La majorité absolue des suffrages exprimés ; 2° Un nombre de suffrages égal au quart de celui des électeurs inscrits. Au deuxième tour de scrutin, l'élection a lieu à la majorité relative, quel que soit le nombre des vo"
+      },
+      {
+        "key": "c07",
+        "title": "Article ANNEXE 4",
+        "snippet": "PROJET DE DÉLIBÉRATION RELATIVE À L'ÉLECTION DU PRÉSIDENT ET DU VICE-PRÉSIDENT Article R. 1123-10 du code de la santé publique Les membres titulaires élisent parmi eux le président du comité à la majorité absolue des présents. Si cette majorité n'a pu être atteinte à l'issue de d"
+      },
+      {
+        "key": "c08",
+        "title": "Article LO540",
+        "snippet": "Au premier tour de scrutin, il est attribué à la liste qui a recueilli la majorité absolue des suffrages exprimés et un nombre de suffrages au moins égal au quart des électeurs inscrits, un nombre de sièges égal à la moitié du nombre des sièges à pourvoir dans chaque section arro"
+      },
+      {
+        "key": "c09",
+        "title": "Article 10",
+        "snippet": "Les conseils de l'ordre désignent parmi leurs membres un bureau. Les membres du bureau d'un conseil de l'ordre sont élus pour un mandat de deux ans, au scrutin secret, par l'ensemble des membres du conseil. L'élection a lieu, au premier tour, à la majorité absolue des voix des me"
+      },
+      {
+        "key": "c10",
+        "title": "Article L192-18",
+        "snippet": "Dans le cas où l'élection a lieu au scrutin majoritaire, nul n'est élu au premier tour de scrutin s'il n'a obtenu la majorité absolue des suffrages exprimés et un nombre de voix au moins égal au quart des électeurs inscrits. Au deuxième tour de scrutin, la majorité relative suffi"
+      },
+      {
+        "key": "c11",
+        "title": "Article LO512",
+        "snippet": "Au premier tour de scrutin, il est attribué à la liste qui a recueilli la majorité absolue des suffrages exprimés et un nombre de suffrages au moins égal au quart des électeurs inscrits, un nombre de sièges égal au tiers du nombre des sièges à pourvoir arrondi, le cas échéant, à "
+      },
+      {
+        "key": "c12",
+        "title": "Article LO525",
+        "snippet": "Le candidat venant sur une liste immédiatement après le dernier élu est appelé à remplacer le conseiller territorial élu sur cette liste dont le siège devient vacant pour quelque cause que ce soit. Lorsque les dispositions du premier alinéa ne peuvent plus être appliquées, il est"
+      },
+      {
+        "key": "c13",
+        "title": "Article 21",
+        "snippet": "Ceux qui, dès le premier scrutin, réuniront la pluralité absolue, c'est-à-dire, la moitié des suffrages et un en sus, seront définitivement élus. Si au premier tour de scrutin il n'y a pas un nombre suffisant de citoyens élus à la pluralité absolue des voix, on procèdera à un sec"
+      },
+      {
+        "key": "c14",
+        "title": "Article LO498",
+        "snippet": "Le candidat venant sur une liste immédiatement après le dernier élu est appelé à remplacer le conseiller territorial élu sur cette liste dont le siège devient vacant pour quelque cause que ce soit. Lorsque les dispositions du premier alinéa ne peuvent plus être appliquées, il est"
+      },
+      {
+        "key": "c15",
+        "title": "Article 28",
+        "snippet": "Lors de la première réunion, le conseil procède à l'élection de son président. Celui-ci est élu à bulletins secrets, au premier tour, s'il obtient les suffrages à la majorité absolue de la totalité des membres du conseil scientifique de département. Si cette majorité n'est pas at"
+      },
+      {
+        "key": "c16",
+        "title": "Article 16",
+        "snippet": "Les maires seront toujours élus à la pluralité absolue des voix. Si le premier scrutin ne donne pas cette pluralité, il sera procédé à un second ; si celui-ci ne la donne point encore, il sera procédé à un troisième, dans lequel le choix ne pourra plus se faire qu'entre les deux "
+      },
+      {
+        "key": "c17",
+        "title": "Article 12",
+        "snippet": "Est élu titulaire le candidat qui obtient le plus grand nombre de voix. Est élu suppléant celui qui obtient le plus grand nombre de voix après le titulaire. En cas d'égalité des voix entre plusieurs candidats, le candidat le plus âgé est élu comme titulaire et le suivant en âge c"
+      },
+      {
+        "key": "c18",
+        "title": "Article R3413-111",
+        "snippet": "Les élections des membres titulaires et des membres correspondants ont lieu par correspondance au scrutin secret. Le dépouillement des bulletins est effectué par les membres du bureau, assistés par le secrétaire général, au cours d'une séance particulière à laquelle les membres t"
+      },
+      {
+        "key": "c19",
+        "title": "Article LO553",
+        "snippet": "Le candidat venant sur une liste immédiatement après le dernier élu dans la même section est appelé à remplacer le conseiller territorial élu sur cette liste dont le siège devient vacant pour quelque cause que ce soit. Lorsque les dispositions du premier alinéa ne peuvent plus êt"
+      },
+      {
+        "key": "c20",
+        "title": "Article 251-27",
+        "snippet": "Si les élections sont faites suivant le régime de la représentation proportionnelle, et si, au premier tour de scrutin le nombre de votants, bulletins blancs ou nuls non compris, est inférieur à la moitié des électeurs inscrits, il est procédé, dans les mêmes conditions de forme "
+      }
+    ]
+  },
+  {
+    "question_id": "s01-authored",
+    "question": "Comment le conseil municipal désigne-t-il le maire après les élections, et que faire si personne n'a la majorité ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article L2122-7",
+        "snippet": "Le maire est élu au scrutin secret et à la majorité absolue. Si, après deux tours de scrutin, aucun candidat n'a obtenu la majorité absolue, il est procédé à un troisième tour de scrutin et l'élection a lieu à la majorité relative. En cas d'égalité de suffrages, le plus âgé est d"
+      },
+      {
+        "key": "c02",
+        "title": "Article L122-5",
+        "snippet": "La séance dans laquelle il est procédé à l'élection du maire est présidée par le plus âgé des membres du conseil municipal. Pour toute élection du maire ou des adjoints, les membres du conseil municipal sont convoqués dans les formes et délais prévus par l'article L. 121-10 ; la "
+      },
+      {
+        "key": "c03",
+        "title": "Article L2122-7-2",
+        "snippet": "Dans les communes de 1 000 habitants et plus, les adjoints sont élus au scrutin de liste à la majorité absolue, sans panachage ni vote préférentiel. La liste est composée alternativement d'un candidat de chaque sexe. Si, après deux tours de scrutin, aucune liste n'a obtenu la maj"
+      },
+      {
+        "key": "c04",
+        "title": "Article 9",
+        "snippet": "I - La création d'une commune associée entraîne de plein droit : Le sectionnement électoral prévu par l'article L. 255-1 du code électoral ; L'institution d'un maire délégué. Le maire de l'ancienne commune en fonction au moment de la fusion devient de droit maire délégué jusqu'au"
+      },
+      {
+        "key": "c05",
+        "title": "Article L270",
+        "snippet": "Le candidat venant sur une liste immédiatement après le dernier élu est appelé à remplacer le conseiller municipal élu sur cette liste dont le siège devient vacant pour quelque cause que ce soit. La constatation, par la juridiction administrative, de l'inéligibilité d'un ou plusi"
+      },
+      {
+        "key": "c06",
+        "title": "Article L2121-21",
+        "snippet": "Le vote a lieu au scrutin public à la demande du quart des membres présents. Il est voté au scrutin secret : 1° Soit lorsqu'un tiers des membres présents le réclame ; 2° Soit lorsqu'il y a lieu de procéder à une nomination ou à une présentation. Dans ces derniers cas, si aucun de"
+      },
+      {
+        "key": "c07",
+        "title": "Article L2122-4",
+        "snippet": "Le conseil municipal élit le maire et les adjoints parmi ses membres, au scrutin secret. Nul ne peut être élu maire s'il n'est âgé de dix-huit ans révolus. Les fonctions de maire sont incompatibles avec l'exercice d'une des fonctions électives suivantes : président d'un conseil r"
+      },
+      {
+        "key": "c08",
+        "title": "Article L122-4",
+        "snippet": "Le conseil municipal élit le maire parmi ses membres, au scrutin secret et à la majorité absolue. Nul ne peut être élu maire s'il n'est âgé de dix-huit ans révolus. Si, après deux tours de scrutin, aucun candidat n'a obtenu la majorité absolue, il est procédé à un troisième tour "
+      },
+      {
+        "key": "c09",
+        "title": "Article L2113-8-1 A",
+        "snippet": "Par dérogation au troisième alinéa de l'article L. 2122-8, si le siège d'un ou de plusieurs conseillers municipaux devient vacant, pour quelque cause que ce soit, entre la date de publication de l'arrêté du représentant de l'Etat dans le département prononçant la création de la c"
+      },
+      {
+        "key": "c10",
+        "title": "Article L122-9",
+        "snippet": "Les maires et les adjoints sont nommés pour la même durée que le conseil municipal. Quand il y a lieu, pour quelque cause que ce soit, à une nouvelle élection du maire, il est procédé à une nouvelle élection des adjoints. Lorsque le maire a retiré les délégations qu'il avait donn"
+      },
+      {
+        "key": "c11",
+        "title": "Article L2122-8",
+        "snippet": "La séance au cours de laquelle il est procédé à l'élection du maire est présidée par le plus âgé des membres du conseil municipal. Pour toute élection du maire ou des adjoints, les membres du conseil municipal sont convoqués dans les formes et délais prévus aux articles L. 2121-1"
+      },
+      {
+        "key": "c12",
+        "title": "Article L2122-14",
+        "snippet": "Lorsque l'élection du maire ou des adjoints est annulée ou que, pour toute autre cause, le maire ou les adjoints ont cessé leurs fonctions, le conseil est convoqué pour procéder au remplacement dans le délai de quinzaine. Toutefois, si le conseil se trouve dans l'un des cas prévu"
+      },
+      {
+        "key": "c13",
+        "title": "Article L2122-10",
+        "snippet": "Le maire et les adjoints sont élus pour la même durée que le conseil municipal. Toutefois, dans les communes de 1 000 habitants et plus, le mandat du maire et des adjoints prend fin de plein droit lorsque la juridiction administrative, par une décision devenue définitive, a recti"
+      },
+      {
+        "key": "c14",
+        "title": "Article L122-7",
+        "snippet": "L'élection du maire et des adjoints peut être arguée de nullité dans les conditions, formes et délais prescrits pour les réclamations contre les élections du conseil municipal. Lorsque l'élection est annulée ou que, pour toute autre cause, le maire et les adjoints ont cessé leurs"
+      },
+      {
+        "key": "c15",
+        "title": "Article L2122-9",
+        "snippet": "Dans les communes de 1 000 habitants et plus, lorsqu'il y a lieu de procéder à l'élection d'un nouveau maire, le conseil municipal est réputé complet si les seules vacances qui existent en son sein sont la conséquence : 1° De démissions données lorsque le maire a cessé ses foncti"
+      }
+    ]
+  },
+  {
+    "question_id": "s02-codex",
+    "question": "Un ancien avocat français qui a travaillé dans un ancien territoire lié à la France peut-il faire compter ces années pour sa retraite d'avocat ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article Annexe, art. 9",
+        "snippet": "La retraite complémentaire est personnalisée par acquisition de points correspondant aux cotisations versées. Les droits acquis par chaque avocat sont comptabilisés en points dont le nombre est obtenu chaque année en divisant le montant de la cotisation, corrigé par référence au "
+      },
+      {
+        "key": "c02",
+        "title": "Article Annexe, art. 22",
+        "snippet": "Il est ouvert dans la comptabilité de la caisse un compte distinct qui reçoit le montant des cotisations afférentes à la retraite complémentaire. Ce compte supporte une partie des frais généraux de la caisse, au prorata des recettes respectives de l'ensemble des trois régimes gér"
+      },
+      {
+        "key": "c03",
+        "title": "Article 2",
+        "snippet": "Les prestations prises en charge par la caisse nationale des barreaux français sont calculées sur la base d'un élément de pension égal à la fraction de pension, qu'aurait obtenue ou obtiendrait un avocat métropolitain pour une année d'affiliation à la caisse métropolitaine. De mê"
+      },
+      {
+        "key": "c04",
+        "title": "Article Annexe, art. 15-1",
+        "snippet": "Les avocats en activité qui optent entre le 1er janvier et le 31 décembre 1988 pour l'une des classes supplémentaires de cotisations prévues à l'article 2-1 bénéficient pour chaque année de cotisations jusqu'au 31 décembre 1996 d'une attribution de points gratuits selon la corres"
+      },
+      {
+        "key": "c05",
+        "title": "Article 13",
+        "snippet": "I. - Pendant une période d'un an à compter de la date du retrait du Royaume-Uni de l'Union européenne, les ressortissants du Royaume-Uni exerçant la profession d'avocat en France à la date du retrait du Royaume-Uni de l'Union européenne, sous un titre professionnel du Royaume-Uni"
+      },
+      {
+        "key": "c06",
+        "title": "Article 1",
+        "snippet": "Les dispositions du présent titre s'appliquent : a) Aux Français ayant exercé une activité professionnelle qui ont dû ou ont estimé devoir quitter, par suite d'événements politiques, un territoire où ils étaient établies et qui était antérieurement placé sous la souveraineté, le "
+      },
+      {
+        "key": "c07",
+        "title": "Article Annexe, art. 11",
+        "snippet": "Le droit à la retraite complémentaire est acquis à tout avocat affilié à la caisse nationale des barreaux français, lorsqu'il remplit les conditions d'âge prévues par la réglementation du régime de base, pour l'ouverture du droit à la retraite. La liquidation de la retraite compl"
+      },
+      {
+        "key": "c08",
+        "title": "Article 101",
+        "snippet": "Tout avocat inscrit au barreau d'un Etat non membre de l'Union européenne est autorisé à exercer en France, dans les conditions prévues au présent titre et dans le cadre des traités internationaux conclus par l'Union européenne, que ce soit à titre temporaire et occasionnel ou à "
+      },
+      {
+        "key": "c09",
+        "title": "Article Annexe, art. 16",
+        "snippet": "En outre, les avocats en activité à la date de mise en vigueur du régime et cotisant dans la tranche supérieure de revenus, telle que fixée par l'assemblée générale, conformément aux dispositions de l'article 2 du présent règlement, bénéficieront d'une attribution, dans la limite"
+      },
+      {
+        "key": "c10",
+        "title": "Article L767-2",
+        "snippet": "Par dérogation à l'article L. 111-2-2, les salariés appelés de l'étranger à occuper un emploi en France peuvent demander, sur démarche conjointe avec leur employeur, à ne pas être affiliés auprès des régimes obligatoires de sécurité sociale français en matière d'assurance vieille"
+      },
+      {
+        "key": "c11",
+        "title": "Article Annexe, art. 21",
+        "snippet": "Les avocats âgés de cinquante-cinq ans et plus dans l'année de mise en vigueur du régime pourront effectuer leur rachat de points dans la limite maximale de deux années de droits par année de cotisation effective au régime complémentaire. Cette limite est supprimée pour les avoca"
+      },
+      {
+        "key": "c12",
+        "title": "Article Annexe, art. 18",
+        "snippet": "Les avocats assujettis à la retraite complémentaire à la date de la mise en vigueur du régime, cotisant dans la tranche supérieure de revenus et justifiant à cette date d'une ancienneté d'exercice effectif de la profession de plus de quinze années, peuvent procéder à des rachats "
+      },
+      {
+        "key": "c13",
+        "title": "Article 98",
+        "snippet": "Sera puni des peines prévues à l'article 72 tout professionnel autorisé à exercer partiellement l'activité d'avocat en application du présent titre qui aura, en violation des dispositions de celui-ci, donné des consultations ou rédigé pour autrui des actes sous seing privé en mat"
+      },
+      {
+        "key": "c14",
+        "title": "Article 4",
+        "snippet": "Les avocats visés à l'article 1er, âgés d'au moins soixante-cinq ans, qui ne perçoivent pas les avantages vieillesse auxquels ils pourraient prétendre de la part de la caisse des barreaux algériens, au titre de la législation applicable, avant le 1er juillet 1962, reçoivent à tit"
+      },
+      {
+        "key": "c15",
+        "title": "Article Annexe, art. 9-1",
+        "snippet": "Les points acquis par les avocats ayant adhéré à l'une des classes supplémentaires facultatives définies à l'article 2-1 sont attribués sur la base de la valeur du point fixée chaque année par l'assemblée générale en application de l'article 9, et ajoutés au compte individuel de "
+      },
+      {
+        "key": "c16",
+        "title": "Article 14",
+        "snippet": "Jusqu'au 31 décembre 1994, peuvent, s'ils justifient des aptitudes et des capacités nécessaires, être recrutés à titre temporaire pour exercer exclusivement des fonctions du premier groupe du second grade de la hiérarchie du corps judiciaire : 1° Les anciens magistrats de l'ordre"
+      },
+      {
+        "key": "c17",
+        "title": "Article 1",
+        "snippet": "Les anciens avocats français qui, ayant exercé près une juridiction d'un territoire français d'outre-mer, près une juridiction composée de magistrats français d'un territoire alors placé sous la souveraineté, le protectorat ou la tutelle de la France, ou près la cour d'appel d'Al"
+      },
+      {
+        "key": "c18",
+        "title": "Article Annexe, art. 15",
+        "snippet": "Tous les avocats en activité à la date de mise en oeuvre du régime bénéficient d'une attribution de points gratuits, dans la limite de vingt-cinq années antérieures d'activité effective de la profession d'avocat, ou d'avoué de première instance, ou d'agréé. Le temps de cléricatur"
+      }
+    ]
+  },
+  {
+    "question_id": "s02-authored",
+    "question": "Un professionnel ayant exercé dans un ancien territoire français peut-il faire compter ces années pour sa retraite ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article L4111-3",
+        "snippet": "Lorsqu'un Etat étranger accorde à des médecins, chirurgiens-dentistes ou sages-femmes, nationaux français ou ressortissants français, le droit d'exercer leur profession sur son territoire, le ressortissant de cet Etat peut être autorisé à pratiquer son art en France par arrêté du"
+      },
+      {
+        "key": "c02",
+        "title": "Article 19",
+        "snippet": "Un décret fixera les conditions dans lesquelles les Français résidant en France pourront obtenir la validation par le régime général de l'assurance vieillesse, pour l'application du livre III (titre II, chap. V) et du livre VII du Code de la sécurité sociale, des périodes de serv"
+      },
+      {
+        "key": "c03",
+        "title": "Article 1",
+        "snippet": "Les Français ayant exercé en Algérie une activité professionnelle, résidant en France et titulaires des droits acquis, en cours d'acquisition ou éventuels à des prestations de vieillesse dues par des institutions algériennes, ont droit à la validation des périodes d'activité sala"
+      },
+      {
+        "key": "c04",
+        "title": "Article L767-2",
+        "snippet": "Par dérogation à l'article L. 111-2-2, les salariés appelés de l'étranger à occuper un emploi en France peuvent demander, sur démarche conjointe avec leur employeur, à ne pas être affiliés auprès des régimes obligatoires de sécurité sociale français en matière d'assurance vieille"
+      },
+      {
+        "key": "c05",
+        "title": "Article 26-2",
+        "snippet": "Les services accomplis par un fonctionnaire dans un emploi classé en catégorie active au cours de la période de dix ans précédant sa titularisation sont comptabilisés comme des services actifs pour l'acquisition du droit au départ anticipé mentionné au deuxième alinéa du 1° du I "
+      },
+      {
+        "key": "c06",
+        "title": "Article 46",
+        "snippet": "En règle générale, le détachement prend fin au plus tard lorsque l'agent détaché atteint la limite d'âge de son cadre d'origine. Si la limite d'âge du nouvel emploi est supérieure à celle de l'ancien, l'intéressé pourra néanmoins, avant d'être atteint par celle-ci, demander son i"
+      },
+      {
+        "key": "c07",
+        "title": "Article 130",
+        "snippet": "Le travailleur qui a cessé son service peut faire valoir, auprès de son ancien employeur, ses droits en matière de congé, de voyage et de transport dans un délai maximum de deux ans à compter du jour de la cessation du travail chez ledit employeur. Toutefois, les frais de voyage "
+      },
+      {
+        "key": "c08",
+        "title": "Article 8",
+        "snippet": "Les années d'activité non-salariée accomplies entre le 1er juillet 1946 et le 1er juillet 1972 dans le cadre des conventions ou adhésions personnelles prévues par les textes législatifs ou réglementaires en vigueur pourront être prises en compte, pour le calcul des prestations su"
+      },
+      {
+        "key": "c09",
+        "title": "Article 1 QUATER",
+        "snippet": "Lorsqu'elles ont présenté leur demande en application du décret n° 74-571 du 17 mai 1974, les personnes visées à l'article 1er ci-dessus peuvent obtenir la validation des périodes d'activité professionnelle postérieures au 31 décembre 1948 dans les conditions fixées ci-dessous : "
+      },
+      {
+        "key": "c10",
+        "title": "Article 1",
+        "snippet": "Les dispositions du présent titre s'appliquent : a) Aux Français ayant exercé une activité professionnelle qui ont dû ou ont estimé devoir quitter, par suite d'événements politiques, un territoire où ils étaient établies et qui était antérieurement placé sous la souveraineté, le "
+      },
+      {
+        "key": "c11",
+        "title": "Article 8",
+        "snippet": "Le conseil d'administration de la caisse autonome nationale de la sécurité sociale dans les mines peut, sur la demande des intéressés, maintenir le bénéfice du régime spécial de la sécurité sociale dans les mines, pour les risques vieillesse invalidité en faveur des travailleurs "
+      },
+      {
+        "key": "c12",
+        "title": "Article L414-14",
+        "snippet": "L'employeur qui a fait l'objet d'une décision portant obligation de quitter le territoire français en raison du retrait, prononcé en application de l'article L. 432-11, de sa carte de résident peut, dans les trois années qui suivent cette décision d'éloignement, se voir refuser l"
+      },
+      {
+        "key": "c13",
+        "title": "Article 13 bis",
+        "snippet": "I- L'agent ou ancien agent qui, antérieurement au 1er septembre 1939, n'exerçait aucune activité professionnelle et qui justifie postérieurement à cette date de périodes pendant lesquelles il était mobilisé, en captivité, engagé volontaire en temps de guerre, combattant volontair"
+      },
+      {
+        "key": "c14",
+        "title": "Article 15",
+        "snippet": "I.-Aux services effectifs s'ajoutent, dans les conditions prévues pour les fonctionnaires civils de l'Etat, les bonifications suivantes : 1° Les bénéfices de campagne dans le cas de services militaires, notamment pour services à la mer et outre-mer ; 2° Une bonification fixée à q"
+      },
+      {
+        "key": "c15",
+        "title": "Article R234-4",
+        "snippet": "Les citoyens de l'Union européenne mentionnés au 1° de l'article L. 233-1 qui cessent leur activité professionnelle sur le territoire français acquièrent un droit au séjour permanent avant l'écoulement de la période ininterrompue de cinq ans de séjour prévue à l'article L. 234-1 "
+      },
+      {
+        "key": "c16",
+        "title": "Article Annexe, art. 18",
+        "snippet": "Les avocats assujettis à la retraite complémentaire à la date de la mise en vigueur du régime, cotisant dans la tranche supérieure de revenus et justifiant à cette date d'une ancienneté d'exercice effectif de la profession de plus de quinze années, peuvent procéder à des rachats "
+      },
+      {
+        "key": "c17",
+        "title": "Article LEGIARTI000025100598",
+        "snippet": "Les sages-femmes reconnues atteintes d'une incapacité d'exercer leur profession selon la procédure prévue par les statuts de la Caisse nationale d'assurance vieillesse des professions libérales, soit pour une durée continue supérieure à six mois, soit pour une durée totale cumulé"
+      },
+      {
+        "key": "c18",
+        "title": "Article R6152-96",
+        "snippet": "Les praticiens hospitaliers régis par la présente section peuvent se prévaloir du titre d'ancien médecin, chirurgien, psychiatre, spécialiste, biologiste, odontologiste ou pharmacien des hôpitaux, s'ils ont exercé leurs fonctions pendant cinq années effectives. Les fonctions exer"
+      },
+      {
+        "key": "c19",
+        "title": "Article L742-2",
+        "snippet": "Les travailleurs salariés ou assimilés mentionnés au troisième alinéa de l'article L. 742-1 qui adhèrent à l'assurance volontaire peuvent, pour les périodes durant lesquelles ils ont exercé, depuis le 1er juillet 1930, une activité salariée hors du territoire français, acquérir d"
+      },
+      {
+        "key": "c20",
+        "title": "Article 1",
+        "snippet": "Les agents des collectivités locales, tributaires de la caisse nationale de retraites des agents des collectivités locales, anciens déportés ou internés, titulaires de la carte de déporté ou interné de la Résistance ou de la carte de déporté ou interné politique et bénéficiaires "
+      }
+    ]
+  },
+  {
+    "question_id": "s03-codex",
+    "question": "Au collège, à quoi servent les heures d'aide aux élèves et les projets menés entre plusieurs matières ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article Français (suite)",
+        "snippet": "Les élèves en difficulté peuvent bénéficier, pendant le cycle central et selon des modalités variables (19), \"d'enseignements en effectifs allégés en vue d'une pédagogie de soutien groupes, ou de classes : \"quatrièmes d'aide et de soutien\" (21), par exemple. 1. La question des gr"
+      },
+      {
+        "key": "c02",
+        "title": "Article D331-47",
+        "snippet": "L'orientation est le résultat du processus continu d'élaboration et de réalisation du projet personnel de formation et d'insertion sociale et professionnelle que l'élève de collège, puis de lycée, mène en fonction de ses aspirations et de ses capacités. La participation de l'élèv"
+      },
+      {
+        "key": "c03",
+        "title": "Article 2",
+        "snippet": "Des heures de soutien supplémentaires consacrées à la maîtrise des savoirs fondamentaux peuvent être proposées aux élèves dont les besoins ont été identifiés conformément aux dispositions des articles D. 311-12 et D. 332-6 du code de l'éducation, dans la limite de deux heures heb"
+      },
+      {
+        "key": "c04",
+        "title": "Article 25",
+        "snippet": "Dans le cadre de la réglementation applicable à l'ensemble des fonctionnaires en matière de temps de travail, les professeurs d'enseignement général de collège sont tenus de fournir, sur l'ensemble de l'année scolaire : I. - Un service d'enseignement dont les maxima hebdomadaires"
+      },
+      {
+        "key": "c05",
+        "title": "Article 6",
+        "snippet": "Le dispositif d'accompagnement mentionné à l'article 2 ci-dessus comprend : Un enseignement en module d'un horaire global de trois heures et demie par semaine, dispensé dans certaines disciplines précisées dans les tableaux figurant en annexe du présent arrêté. A cet enseignement"
+      },
+      {
+        "key": "c06",
+        "title": "Article 6",
+        "snippet": "Outre la dotation horaire correspondant aux enseignements obligatoires, une dotation horaire, sur la base de trois heures par semaine et par division, est mise à la disposition des établissements qui en arrêtent l'emploi conformément à l'article D. 332-5 du code de l'éducation et"
+      },
+      {
+        "key": "c07",
+        "title": "Article ANNEXE I",
+        "snippet": "Cette épreuve est présentée à l'article 8 du présent arrêté. L'épreuve est notée sur 20. La note 0 est éliminatoire. Durée : trente-cinq minutes ; coefficient 3. SECTION ÉDUCATION MUSICALE ET CHANT CHORAL A - Epreuves d'admissibilité 1° Epreuve disciplinaire. L'épreuve est consti"
+      },
+      {
+        "key": "c08",
+        "title": "Article 3",
+        "snippet": "I. - Les contenus des enseignements complémentaires sont établis en fonction des objectifs de connaissances et de compétences du socle commun de connaissances, de compétences et de culture et des programmes des cycles concernés. II.-Les enseignements complémentaires prennent les "
+      },
+      {
+        "key": "c09",
+        "title": "Article R421-49",
+        "snippet": "Les équipes pédagogiques constituées par classe, ou groupe d'élèves éventuellement regroupés par cycles, favorisent la concertation entre les enseignants, en particulier en ce qui concerne l'élaboration et la mise en œuvre du projet d'établissement et la coordination des enseigne"
+      },
+      {
+        "key": "c10",
+        "title": "Article Annexe II",
+        "snippet": "En outre, un préparateur présent pendant toute la durée des épreuves orales est à la disposition des candidats pour leur apporter l'aide qu'il donne habituellement aux professeurs lors de la préparation de leurs classes. Le programme sur lequel portent les épreuves écrites et ora"
+      },
+      {
+        "key": "c11",
+        "title": "Article Annexe 1",
+        "snippet": "Niveau sixième (cycle 3) VOLUMES HORAIRES DES ENSEIGNEMENTS OBLIGATOIRES APPLICABLES AUX ÉLÈVES DU NIVEAU SIXIÈME DE COLLÈGE ENSEIGNEMENTS HORAIRES HEBDOMADAIRES Education physique et sportive 4 heures Enseignements artistiques (*) (arts plastiques + éducation musicale) 1 heure +"
+      },
+      {
+        "key": "c12",
+        "title": "Article D332-5",
+        "snippet": "Le collège offre, conformément au principe d'inclusion prévu à l'article L. 111-1 et sans constituer de filières, un enseignement et une organisation pédagogique appropriés à la diversité des élèves, afin de leur permettre d'acquérir, au niveau de maîtrise le plus élevé possible,"
+      },
+      {
+        "key": "c13",
+        "title": "Article L332-3",
+        "snippet": "Les collèges dispensent un enseignement commun, réparti sur quatre niveaux successifs. A chacun d'entre eux, des enseignements complémentaires peuvent être proposés afin de favoriser l'acquisition du socle commun de connaissances, de compétences et de culture et de faciliter l'él"
+      },
+      {
+        "key": "c14",
+        "title": "Article 4",
+        "snippet": "Les catégories de données à caractère personnel faisant l'objet du présent traitement sont les suivantes : 1° Quant aux élèves : a) Nom, prénoms, date de naissance, identifiant national élève (INE) ; b) Nom, prénoms, adresse des parents et/ou des responsables légaux ; c) Détail d"
+      },
+      {
+        "key": "c15",
+        "title": "Article D422-39",
+        "snippet": "Dans les collèges et les lycées comportant une ou plusieurs sections internationales ou une ou plusieurs classes menant au baccalauréat français international, un conseil de section internationale et de parcours international exerce les compétences consultatives prévues à l'artic"
+      },
+      {
+        "key": "c16",
+        "title": "Article L332-4",
+        "snippet": "Dans les collèges, des aménagements particuliers et des actions de soutien sont prévus au profit des élèves qui éprouvent des difficultés. Lorsque celles-ci sont graves et permanentes, les élèves reçoivent un enseignement adapté. Par ailleurs, des activités d'approfondissement da"
+      },
+      {
+        "key": "c17",
+        "title": "Article Annexe 2",
+        "snippet": "VOLUMES HORAIRES DES ENSEIGNEMENTS OBLIGATOIRES APPLICABLES AUX ÉLÈVES DES NIVEAUX DU CYCLE 4 DE COLLÈGE ENSEIGNEMENTS HORAIRES HEBDOMADAIRES Cinquième Quatrième Troisième Education physique et sportive 3 heures 3 heures 3 heures Enseignements artistiques (*) (arts plastiques + é"
+      },
+      {
+        "key": "c18",
+        "title": "Article 2",
+        "snippet": "I.-Les cent huit heures annuelles mentionnées au 2° de l'article 1er sont réparties de la manière suivante : 1° Trente-six heures consacrées à des activités pédagogiques complémentaires organisées dans le projet d'école, par groupes restreints d'élèves, pour l'aide aux élèves ren"
+      },
+      {
+        "key": "c19",
+        "title": "Article D422-41",
+        "snippet": "Les équipes pédagogiques constituées par classe, ou groupe d'élèves éventuellement regroupés par cycles favorisent la concertation entre les enseignants, en particulier en ce qui concerne l'élaboration et la mise en œuvre du projet d'établissement et la coordination des enseignem"
+      },
+      {
+        "key": "c20",
+        "title": "Article D331-23",
+        "snippet": "L'orientation est le résultat du processus continu d'élaboration et de réalisation du projet personnel de formation et d'insertion sociale et professionnelle que l'élève de collège, puis de lycée, mène en fonction de ses aspirations et de ses capacités. La participation de l'élèv"
+      }
+    ]
+  },
+  {
+    "question_id": "s03-authored",
+    "question": "À quoi servent les heures d'accompagnement des élèves et les projets entre plusieurs matières au collège ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article L332-4",
+        "snippet": "Dans les collèges, des aménagements particuliers et des actions de soutien sont prévus au profit des élèves qui éprouvent des difficultés. Lorsque celles-ci sont graves et permanentes, les élèves reçoivent un enseignement adapté. Par ailleurs, des activités d'approfondissement da"
+      },
+      {
+        "key": "c02",
+        "title": "Article 6",
+        "snippet": "Le dispositif d'accompagnement mentionné à l'article 2 ci-dessus comprend : Un enseignement en module d'un horaire global de trois heures et demie par semaine, dispensé dans certaines disciplines précisées dans les tableaux figurant en annexe du présent arrêté. A cet enseignement"
+      },
+      {
+        "key": "c03",
+        "title": "Article Français (suite)",
+        "snippet": "Les élèves en difficulté peuvent bénéficier, pendant le cycle central et selon des modalités variables (19), \"d'enseignements en effectifs allégés en vue d'une pédagogie de soutien groupes, ou de classes : \"quatrièmes d'aide et de soutien\" (21), par exemple. 1. La question des gr"
+      },
+      {
+        "key": "c04",
+        "title": "Article D332-6",
+        "snippet": "A tout moment de la scolarité, un accompagnement pédagogique spécifique est apporté aux élèves qui manifestent des besoins éducatifs particuliers, notamment ceux qui présentent des capacités singulières ou qui éprouvent des difficultés importantes dans l'acquisition du socle comm"
+      },
+      {
+        "key": "c05",
+        "title": "Article R421-2",
+        "snippet": "Les collèges, les lycées, les écoles régionales du premier degré et les établissements régionaux d'enseignement adapté disposent, en matière pédagogique et éducative, d'une autonomie qui porte sur : 1° L'organisation de l'établissement en classes et en groupes d'élèves ainsi que "
+      },
+      {
+        "key": "c06",
+        "title": "Article Annexe I",
+        "snippet": "A l'exception des partitions des pièces pour voix et accompagnement, les différents documents du sujet lui sont transmis en format numérique. 2. Interprétation d'un chant accompagné : au début de la préparation, le candidat transmet au jury les partitions d'un ensemble de trois c"
+      },
+      {
+        "key": "c07",
+        "title": "Article L332-3",
+        "snippet": "Les collèges dispensent un enseignement commun, réparti sur quatre niveaux successifs. A chacun d'entre eux, des enseignements complémentaires peuvent être proposés afin de favoriser l'acquisition du socle commun de connaissances, de compétences et de culture et de faciliter l'él"
+      },
+      {
+        "key": "c08",
+        "title": "Article Annexe V",
+        "snippet": "DOSSIER D'ÉTUDES POUR LES CAS PARTICULIERS 1. Objet Cette annexe décrit le contenu du dossier d'étude des systèmes ou projets de construction pour lesquels les méthodes de calcul Th-C ex ou Th-E ex ne sont pas applicables, fourni à l'appui de la demande d'agrément auprès du minis"
+      },
+      {
+        "key": "c09",
+        "title": "Article Annexe VII",
+        "snippet": "DOSSIER D'ETUDES POUR LES CAS PARTICULIERS 1. Objet Cette annexe décrit le contenu du dossier d'étude des systèmes ou projets de construction pour lesquels les méthodes de calcul Th-C ou Th-E ne sont pas applicables, fourni à l'appui de la demande d'agrément auprès du ministre ch"
+      },
+      {
+        "key": "c10",
+        "title": "Article LEGIARTI000047950302",
+        "snippet": "ANNEXE 2 VOLUMES COMPLÉMENTAIRES D'HEURES ENSEIGNANT Des volumes complémentaires d'heures enseignant sont attribués selon les modalités suivantes : - pour la pluridisciplinarité, un volume complémentaire de 174 heures ; - pour l'accompagnement au projet personnel et professionnel"
+      },
+      {
+        "key": "c11",
+        "title": "Article 2",
+        "snippet": "Des heures de soutien supplémentaires consacrées à la maîtrise des savoirs fondamentaux peuvent être proposées aux élèves dont les besoins ont été identifiés conformément aux dispositions des articles D. 311-12 et D. 332-6 du code de l'éducation, dans la limite de deux heures heb"
+      },
+      {
+        "key": "c12",
+        "title": "Article R421-41-3",
+        "snippet": "Le conseil pédagogique : 1° Dans les collèges, fait toute suggestion au chef d'établissement en vue de la désignation par ce dernier des enseignants : -qui participeront au conseil école-collège ; -qui, enseignant en classe de sixième, participeront au conseil du cycle 3 dans les"
+      },
+      {
+        "key": "c13",
+        "title": "Article ANNEXE I",
+        "snippet": "Cette épreuve est présentée à l'article 8 du présent arrêté. L'épreuve est notée sur 20. La note 0 est éliminatoire. Durée : trente-cinq minutes ; coefficient 3. SECTION ÉDUCATION MUSICALE ET CHANT CHORAL A - Epreuves d'admissibilité 1° Epreuve disciplinaire. L'épreuve est consti"
+      },
+      {
+        "key": "c14",
+        "title": "Article Annexe 1",
+        "snippet": "Niveau sixième (cycle 3) VOLUMES HORAIRES DES ENSEIGNEMENTS OBLIGATOIRES APPLICABLES AUX ÉLÈVES DU NIVEAU SIXIÈME DE COLLÈGE ENSEIGNEMENTS HORAIRES HEBDOMADAIRES Education physique et sportive 4 heures Enseignements artistiques (*) (arts plastiques + éducation musicale) 1 heure +"
+      },
+      {
+        "key": "c15",
+        "title": "Article 4",
+        "snippet": "Les catégories de données à caractère personnel faisant l'objet du présent traitement sont les suivantes : 1° Quant aux élèves : a) Nom, prénoms, date de naissance, identifiant national élève (INE) ; b) Nom, prénoms, adresse des parents et/ou des responsables légaux ; c) Détail d"
+      },
+      {
+        "key": "c16",
+        "title": "Article D332-5",
+        "snippet": "Le collège offre, conformément au principe d'inclusion prévu à l'article L. 111-1 et sans constituer de filières, un enseignement et une organisation pédagogique appropriés à la diversité des élèves, afin de leur permettre d'acquérir, au niveau de maîtrise le plus élevé possible,"
+      },
+      {
+        "key": "c17",
+        "title": "Article 2-2",
+        "snippet": "1° Ouvre droit au versement d'une part fonctionnelle l'exercice des missions d'enseignement ou à caractère pédagogique assurées en présence des élèves suivantes : Dans les collèges, lycées généraux et technologiques, établissements et structures de l'enseignement spécialisé et ad"
+      },
+      {
+        "key": "c18",
+        "title": "Article Annexe 2",
+        "snippet": "VOLUMES HORAIRES DES ENSEIGNEMENTS OBLIGATOIRES APPLICABLES AUX ÉLÈVES DES NIVEAUX DU CYCLE 4 DE COLLÈGE ENSEIGNEMENTS HORAIRES HEBDOMADAIRES Cinquième Quatrième Troisième Education physique et sportive 3 heures 3 heures 3 heures Enseignements artistiques (*) (arts plastiques + é"
+      },
+      {
+        "key": "c19",
+        "title": "Article Français",
+        "snippet": "en sciences de la vie et de la terre, deux grands volets sont présentés : les principes généraux qui concernent la gestion de la souplesse introduite dans les programmes, les parcours diversifiés, la liaison entre objet d'étude et projet d'activités, etc., et les commentaires rel"
+      },
+      {
+        "key": "c20",
+        "title": "Article 25",
+        "snippet": "Dans le cadre de la réglementation applicable à l'ensemble des fonctionnaires en matière de temps de travail, les professeurs d'enseignement général de collège sont tenus de fournir, sur l'ensemble de l'année scolaire : I. - Un service d'enseignement dont les maxima hebdomadaires"
+      },
+      {
+        "key": "c21",
+        "title": "Article 3",
+        "snippet": "I. - Les contenus des enseignements complémentaires sont établis en fonction des objectifs de connaissances et de compétences du socle commun de connaissances, de compétences et de culture et des programmes des cycles concernés. II.-Les enseignements complémentaires prennent les "
+      }
+    ]
+  },
+  {
+    "question_id": "s04-codex",
+    "question": "Quelle aide mensuelle une structure peut-elle recevoir quand elle accueille un jeune en volontariat ou en contrat aidé ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 13",
+        "snippet": "A l'exception des volontaires accueillis en France au titre de la réciprocité, le volontaire de solidarité internationale qui, à la fin de sa mission, ne remplit pas les conditions d'attribution du revenu de solidarité active prévu au chapitre 2 du titre VI du livre II du code de"
+      },
+      {
+        "key": "c02",
+        "title": "Article 4",
+        "snippet": "Les dossiers de demande comportent les documents suivants : 1° Le formulaire attestant de la participation à la session de formation validée par l'organisme de formation ; 2° Un relevé d'identité bancaire du demandeur ou, à défaut, tout document nécessaire à l'Agence de services "
+      },
+      {
+        "key": "c03",
+        "title": "Article 2",
+        "snippet": "En fonction de la nature du lien contractuel établi entre le jeune et la structure d'accueil, le montant mensuel de l'aide est fixé selon les modalités suivantes : 1° Pour le contrat de volontariat associatif : - au titre de la prise en charge financière du jeune, l'aide est au m"
+      },
+      {
+        "key": "c04",
+        "title": "Article 2",
+        "snippet": "Le bénéfice de cette aide est ouvert aux personnes remplissant les deux conditions suivantes : 1° Etre volontaire du service civique entre le 1er janvier et le 31 décembre 2023 ou avoir réalisé une mission de volontaire du service civique au cours de l'année 2022 ; 2° Avoir réali"
+      },
+      {
+        "key": "c05",
+        "title": "Article 5",
+        "snippet": "Tout paiement indu est récupéré pour le compte de l'Etat par l'Agence de services et de paiement. Dans le cadre des mesures de contrôle réalisées par l'Agence de services et de paiement, les bénéficiaires disposent d'un délai de deux mois à compter de la date de demande par l'Age"
+      },
+      {
+        "key": "c06",
+        "title": "Article 1",
+        "snippet": "Il est institué une aide exceptionnelle pour favoriser l'engagement des jeunes dans les conditions prévues par le présent décret. Cette aide unique, d'un montant forfaitaire de 100 euros, a pour objet de compenser une partie des coûts de l'inscription à une session de formation g"
+      },
+      {
+        "key": "c07",
+        "title": "Article 4",
+        "snippet": "Le montant de l'aide est fixé à 1 000 F par mois travaillé pendant les neuf premiers mois du contrat. Pour les jeunes rencontrant des difficultés particulières d'accès à l'emploi, visés au deuxième alinéa de l'article 3 du présent décret, cette aide est assortie d'un complément d"
+      },
+      {
+        "key": "c08",
+        "title": "Article 1",
+        "snippet": "Le financement prévu à l'article D. 121-33 du code de l'action sociale et des familles est attribué aux structures d'accueil agréées au titre du service civil volontaire qui ont conclu une convention avec l'Agence nationale pour la cohésion sociale et l'égalité des chances. Cette"
+      },
+      {
+        "key": "c09",
+        "title": "Article 10",
+        "snippet": "Dans le cas des volontaires accueillis en France au titre de la réciprocité, l'aide de l'Etat versée à l'association ou au groupement d'intérêt public agréé comprend, outre les aides décrites à l'article 11, une contribution financière au titre de l'indemnité mensuelle et la pris"
+      },
+      {
+        "key": "c10",
+        "title": "Article 2",
+        "snippet": "Le montant de l'aide est égal à 4 000 euros au maximum pour un même salarié. L'aide de l'Etat est due à compter du premier jour d'exécution du contrat de travail. Elle est versée à terme échu, à un rythme trimestriel à raison de 1 000 euros au maximum par trimestre dans la limite"
+      },
+      {
+        "key": "c11",
+        "title": "Article 3",
+        "snippet": "Les conventions prévues au premier alinéa de l'article 1er précisent notamment : a) Les missions confiées aux jeunes effectuant un service civil volontaire au sein de la structure d'accueil ; b) Les actions de tutorat, de formation, d'accompagnement et d'aide à la recherche d'emp"
+      },
+      {
+        "key": "c12",
+        "title": "Article 6",
+        "snippet": "Les demandes sont prises en compte dans l'ordre de réception des dossiers complets et dans la limite de 10 000 dossiers donnant lieu au versement de l'aide. Les demandes peuvent être déposées au plus tard le 30 novembre 2024. La date de fermeture du guichet peut être avancée par "
+      },
+      {
+        "key": "c13",
+        "title": "Article D121-28",
+        "snippet": "Le service civil volontaire a une durée minimale continue de six, neuf ou douze mois. La durée hebdomadaire de la mission agréée au titre du service civil volontaire est au moins égale à vingt-six heures. A l'exception des cas dans lesquels le service civil volontaire est accompl"
+      },
+      {
+        "key": "c14",
+        "title": "Article 3",
+        "snippet": "L'Agence de services et de paiement assure, pour le compte de l'Etat, la gestion administrative et financière de ce dispositif. A ce titre, l'Agence est chargée de : - réceptionner et instruire les demandes d'aide ; - procéder au rejet ou à l'attribution des aides dans la limite "
+      },
+      {
+        "key": "c15",
+        "title": "Article 5",
+        "snippet": "L'aide est due trimestriellement, à la fin du troisième, du sixième et du neuvième mois du contrat, sur présentation par l'employeur d'un justificatif attestant de l'emploi du jeune dans l'établissement."
+      }
+    ]
+  },
+  {
+    "question_id": "s04-authored",
+    "question": "Quelle aide financière une structure reçoit-elle quand elle accueille un jeune en service civique ou contrat aidé ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 6",
+        "snippet": "Les demandes sont prises en compte dans l'ordre de réception des dossiers complets et dans la limite de 10 000 dossiers donnant lieu au versement de l'aide. Les demandes peuvent être déposées au plus tard le 30 novembre 2024. La date de fermeture du guichet peut être avancée par "
+      },
+      {
+        "key": "c02",
+        "title": "Article 3",
+        "snippet": "L'Agence de services et de paiement assure, pour le compte de l'Etat, la gestion administrative et financière de ce dispositif. A ce titre, l'Agence est chargée de : - réceptionner et instruire les demandes d'aide ; - procéder au rejet ou à l'attribution des aides dans la limite "
+      },
+      {
+        "key": "c03",
+        "title": "Article R121-47-1",
+        "snippet": "Les organismes agréés en application de l'article L. 120-30 perçoivent une aide pour l'organisation de la formation civique et citoyenne prévue à l'article L. 120-14. Le montant de l'aide pour chaque personne volontaire ayant souscrit un engagement de service civique est fixé par"
+      },
+      {
+        "key": "c04",
+        "title": "Article 2",
+        "snippet": "En fonction de la nature du lien contractuel établi entre le jeune et la structure d'accueil, le montant mensuel de l'aide est fixé selon les modalités suivantes : 1° Pour le contrat de volontariat associatif : - au titre de la prise en charge financière du jeune, l'aide est au m"
+      },
+      {
+        "key": "c05",
+        "title": "Article 1",
+        "snippet": "Il est institué une aide exceptionnelle pour favoriser l'engagement des jeunes dans les conditions prévues par le présent décret. Cette aide unique, d'un montant forfaitaire de 100 euros, a pour objet de compenser une partie des coûts de l'inscription à une session de formation g"
+      },
+      {
+        "key": "c06",
+        "title": "Article L120-31",
+        "snippet": "Les organismes sans but lucratif de droit français agréés auprès desquels des personnes volontaires ont souscrit un engagement de service civique peuvent percevoir une aide, à la charge de l'Agence du service civique, aux fins de couvrir une partie des coûts relatifs à l'accueil,"
+      },
+      {
+        "key": "c07",
+        "title": "Article D121-34",
+        "snippet": "Sur la demande des structures d'accueil, sont agréées de droit au titre du service civil volontaire et pour une durée indéterminée les missions proposées aux jeunes dans les dispositifs suivants : a) Le volontariat de prévention, sécurité et défense civile ; b) Le volontariat int"
+      },
+      {
+        "key": "c08",
+        "title": "Article 2",
+        "snippet": "Le bénéfice de cette aide est ouvert aux personnes remplissant les deux conditions suivantes : 1° Etre volontaire du service civique entre le 1er janvier et le 31 décembre 2023 ou avoir réalisé une mission de volontaire du service civique au cours de l'année 2022 ; 2° Avoir réali"
+      },
+      {
+        "key": "c09",
+        "title": "Article D121-33",
+        "snippet": "L'accueil de chaque jeune au titre du service civil volontaire ouvre droit à un financement de l'Agence nationale pour la cohésion sociale et l'égalité des chances fixé par convention conclue avec l'organisme agréé permettant de prendre en charge tout ou partie de l'allocation ve"
+      },
+      {
+        "key": "c10",
+        "title": "Article 3",
+        "snippet": "Les conventions prévues au premier alinéa de l'article 1er précisent notamment : a) Les missions confiées aux jeunes effectuant un service civil volontaire au sein de la structure d'accueil ; b) Les actions de tutorat, de formation, d'accompagnement et d'aide à la recherche d'emp"
+      },
+      {
+        "key": "c11",
+        "title": "Article 4",
+        "snippet": "L'Agence nationale pour la cohésion sociale et l'égalité des chances ou son représentant contrôle l'exécution de la convention. A cette fin, la structure d'accueil lui communique, à sa demande, tout élément de nature à permettre de vérifier la bonne exécution de la convention et "
+      },
+      {
+        "key": "c12",
+        "title": "Article 3",
+        "snippet": "L'article R. 121-47-1 du code du service national et l'article 2 du présent décret sont applicables sur l'ensemble du territoire de la République."
+      },
+      {
+        "key": "c13",
+        "title": "Article 1",
+        "snippet": "Le financement prévu à l'article D. 121-33 du code de l'action sociale et des familles est attribué aux structures d'accueil agréées au titre du service civil volontaire qui ont conclu une convention avec l'Agence nationale pour la cohésion sociale et l'égalité des chances. Cette"
+      },
+      {
+        "key": "c14",
+        "title": "Article 4",
+        "snippet": "Le ministre de l'intérieur, de l'outre-mer, des collectivités territoriales et de l'immigration, le ministre de l'éducation nationale, de la jeunesse et de la vie associative, la ministre du budget, des comptes publics et de la réforme de l'Etat, porte-parole du Gouvernement, le "
+      },
+      {
+        "key": "c15",
+        "title": "Article 2",
+        "snippet": "Les dispositions de l'article R. 121-47-1 du code du service national sont applicables aux contrats d'engagement de service civique en cours à la date d'entrée en vigueur du présent décret. Pour ces contrats, l'aide est versée au plus tard un mois après l'entrée en vigueur du pré"
+      }
+    ]
+  },
+  {
+    "question_id": "s05-codex",
+    "question": "Un bilan national doit-il être fait sur la façon dont la douleur des enfants atteints de cancer est prise en charge ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 7",
+        "snippet": "Dans un délai de six mois à compter de la promulgation de la présente loi, le Gouvernement remet au Parlement un rapport sur les conditions de vie des parents qui doivent interrompre leur travail ou se mettre en congé pour accompagner leur enfant atteint d'un cancer ou d'une mala"
+      },
+      {
+        "key": "c02",
+        "title": "Article Annexe II - IV. Maquette 9",
+        "snippet": "FORMATION SPÉCIALISÉE TRANSVERSALE DOULEUR 1. Organisation générale 1.1. Objectifs généraux de la formation L'objectif de la FST est d'acquérir une formation transversale approfondie dédiée à l'évaluation et au traitement de la douleur. 1.2. Collèges d'Enseignants impliqués dans "
+      },
+      {
+        "key": "c03",
+        "title": "Article 7",
+        "snippet": "Les signataires de la convention nationale mentionnée à l'article L. 1141-2 du code de la santé publique engagent au plus tard dans un délai de six mois à compter de la publication de la présente loi une négociation sur la possibilité d'appliquer à l'ensemble des pathologies canc"
+      },
+      {
+        "key": "c04",
+        "title": "Article Annexe II - II. Maquette 23",
+        "snippet": "Mouvements anormaux : Hiérarchiser les examens à visée diagnostique en présence d'un mouvement anormal ; Diagnostiquer une maladie de Huntington ; Conduire le traitement d'un tremblement essentiel ; Conduire le traitement d'un syndrome choréique ; Proposer un traitement par toxin"
+      },
+      {
+        "key": "c05",
+        "title": "Article 8",
+        "snippet": "Le Gouvernement remet au Parlement, au plus tard douze mois après la promulgation de la présente loi, un rapport relatif à l'application de la convention dite « AERAS » (« s'Assurer et Emprunter avec un Risque Aggravé de Santé ») et à l'accès au crédit des personnes présentant un"
+      },
+      {
+        "key": "c06",
+        "title": "Article LEGIARTI000031634747",
+        "snippet": "Orientation n° 9 : adaptation des pratiques de l'infirmier de bloc opératoire aux nouveaux modes de prise en charge (chirurgie ambulatoire, robotique, télémédecine). Infirmier anesthésiste : Orientation n° 1 : formation aux techniques d'assistance cardio-circulatoire. Orientation"
+      },
+      {
+        "key": "c07",
+        "title": "Article 3",
+        "snippet": "La Caisse nationale d'assurance maladie fait suivre les données transmises conformément à l'article 2 dudit arrêté, à la Caisse nationale d'assurance vieillesse, chargée de la gestion du répertoire, qui interroge le répertoire national interrégimes des bénéficiaires de l'assuranc"
+      },
+      {
+        "key": "c08",
+        "title": "Article 6",
+        "snippet": "Le Gouvernement remet au Parlement, au plus tard douze mois après la promulgation de la présente loi, un rapport relatif à la prise en charge de la douleur, en particulier par les centres d'oncologie pédiatrique. Ce rapport précise notamment les moyens mis en œuvre pour le dépist"
+      },
+      {
+        "key": "c09",
+        "title": "Article LEGIARTI000049026261",
+        "snippet": "Ces cas doivent être évalués séparément puisque le dépistage (mammographie et examen clinique) reste négatif. On rappelle que le passage en seconde lecture des mammographies est impératif pour que les résultats de cette pratique puissent être évalués de façon fiable dans les même"
+      },
+      {
+        "key": "c10",
+        "title": "Article Annexe 1",
+        "snippet": "Connaître les principes de la régulation de la kaliémie A Définition Connaître les indications de prescription d'une kaliémie et la définition de l'hyperkaliémie B Diagnostic positif Connaître la symptomatologie clinique de l'hyperkaliémie A Examens complémentaires Connaître les "
+      },
+      {
+        "key": "c11",
+        "title": "Article Annexe XIII",
+        "snippet": "CAPACITÉ D'ÉVALUATION ET DE TRAITEMENT DE LA DOULEUR : DEUX ANS ENSEIGNEMENTS (Au moins cent soixante heures) Connaissances fondamentales : Bases anatomiques ; Bases neurophysiologiques ; Bases psychologiques et psycho-pathologiques ; Bases pharmacologiques ; Mécanismes de contrô"
+      },
+      {
+        "key": "c12",
+        "title": "Article 9",
+        "snippet": "Le Gouvernement remet au Parlement, chaque année, un rapport relatif à l'ensemble des financements publics alloués à la recherche sur les cancers pédiatriques. Ce rapport précise les volumes financiers annuels et pluriannuels dédiés aux programmes de recherche sur les cancers de "
+      },
+      {
+        "key": "c13",
+        "title": "Article 5",
+        "snippet": "Lorsqu'un enfant atteint d'une pathologie chronique ou d'un cancer connaît une hospitalisation ou une absence prolongée du milieu scolaire, les parents peuvent demander qu'un intervenant du secteur médical ou associatif organise, conjointement avec le professeur et avant le retou"
+      },
+      {
+        "key": "c14",
+        "title": "Article R6123-91-3",
+        "snippet": "I.-Sans préjudice de l'application des dispositions du I de l'article R. 6123-91, l'établissement autorisé au traitement du cancer pour l'enfant et l'adolescent de moins de dix-huit ans est membre d'une organisation hospitalière interrégionale de recours en oncologie pédiatrique,"
+      },
+      {
+        "key": "c15",
+        "title": "Article LEGIARTI000028717924",
+        "snippet": "Parents : Si votre enfant a eu besoin d'aide de façon urgente, avez-vous attendu... ? Enquêteur : citer les réponses possibles 1 Très longtemps 2 Longtemps 3 Assez longtemps 4 Peu longtemps 5 Vous n'avez pas attendu 6 [Vous n'avez pas eu besoin d'aide de façon urgente/ Votre enfa"
+      },
+      {
+        "key": "c16",
+        "title": "Article ANNEXE",
+        "snippet": "Prévenir la douleur d'intensité modérée et sévère dans au moins 75 % des cas où les moyens techniques actuellement disponibles permettent de le faire, notamment en postopératoire, pour les patients cancéreux (à tous les stades de la maladie), et lors de la prise en charge diagnos"
+      },
+      {
+        "key": "c17",
+        "title": "Article Annexe X",
+        "snippet": "Le patient peut être également mis en relation avec les services d'un réseau de santé proche de son domicile pour assurer la continuité des soins entre l'hôpital et la ville, si nécessaire. Les règles générales liées aux traitements anticancéreux oraux doivent également être rapp"
+      },
+      {
+        "key": "c18",
+        "title": "Article 4",
+        "snippet": "Dans un délai de six mois à compter de la promulgation de la présente loi, le Gouvernement remet au Parlement un rapport sur la possibilité du versement d'une indemnité de garde d'enfant aux personnes bénéficiant d'un traitement du cancer du sein, de soins consécutifs à un cancer"
+      }
+    ]
+  },
+  {
+    "question_id": "s05-authored",
+    "question": "Un bilan national est-il prévu sur la prise en charge de la douleur des enfants malades du cancer ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 3",
+        "snippet": "La Caisse nationale d'assurance maladie fait suivre les données transmises conformément à l'article 2 dudit arrêté, à la Caisse nationale d'assurance vieillesse, chargée de la gestion du répertoire, qui interroge le répertoire national interrégimes des bénéficiaires de l'assuranc"
+      },
+      {
+        "key": "c02",
+        "title": "Article 5",
+        "snippet": "Lorsqu'un enfant atteint d'une pathologie chronique ou d'un cancer connaît une hospitalisation ou une absence prolongée du milieu scolaire, les parents peuvent demander qu'un intervenant du secteur médical ou associatif organise, conjointement avec le professeur et avant le retou"
+      },
+      {
+        "key": "c03",
+        "title": "Article 7",
+        "snippet": "Dans un délai de six mois à compter de la promulgation de la présente loi, le Gouvernement remet au Parlement un rapport sur les conditions de vie des parents qui doivent interrompre leur travail ou se mettre en congé pour accompagner leur enfant atteint d'un cancer ou d'une mala"
+      },
+      {
+        "key": "c04",
+        "title": "Article Annexe II - IV. Maquette 9",
+        "snippet": "FORMATION SPÉCIALISÉE TRANSVERSALE DOULEUR 1. Organisation générale 1.1. Objectifs généraux de la formation L'objectif de la FST est d'acquérir une formation transversale approfondie dédiée à l'évaluation et au traitement de la douleur. 1.2. Collèges d'Enseignants impliqués dans "
+      },
+      {
+        "key": "c05",
+        "title": "Article Annexe XIII",
+        "snippet": "CAPACITÉ D'ÉVALUATION ET DE TRAITEMENT DE LA DOULEUR : DEUX ANS ENSEIGNEMENTS (Au moins cent soixante heures) Connaissances fondamentales : Bases anatomiques ; Bases neurophysiologiques ; Bases psychologiques et psycho-pathologiques ; Bases pharmacologiques ; Mécanismes de contrô"
+      },
+      {
+        "key": "c06",
+        "title": "Article Annexe",
+        "snippet": "La documentation comprend notamment les recommandations de la Haute Autorité de santé concernant la prise en charge de l'enfant en surpoids, les imprimés type pour la prescription des prestations, les outils d'aide au recueil de données nécessaires à l'évaluation de l'expérimenta"
+      },
+      {
+        "key": "c07",
+        "title": "Article 7",
+        "snippet": "Les signataires de la convention nationale mentionnée à l'article L. 1141-2 du code de la santé publique engagent au plus tard dans un délai de six mois à compter de la publication de la présente loi une négociation sur la possibilité d'appliquer à l'ensemble des pathologies canc"
+      },
+      {
+        "key": "c08",
+        "title": "Article 1",
+        "snippet": "Dans l'intérêt de la santé des personnes, l'équipe de recherche « Épidémiologie des cancers de l'enfant et de l'adolescent » (EPICEA) de l'Institut national de la santé et de la recherche médicale est autorisé à utiliser le répertoire national interrégimes des bénéficiaires de l'"
+      },
+      {
+        "key": "c09",
+        "title": "Article Annexe X",
+        "snippet": "Le patient peut être également mis en relation avec les services d'un réseau de santé proche de son domicile pour assurer la continuité des soins entre l'hôpital et la ville, si nécessaire. Les règles générales liées aux traitements anticancéreux oraux doivent également être rapp"
+      },
+      {
+        "key": "c10",
+        "title": "Article Annexe",
+        "snippet": "Le Gouvernement a mis en place un plan sur trois ans pour développer les soins palliatifs et améliorer la prise en charge de la douleur. Ces deux plans comportent à chaque fois une information large du public, un renforcement de la formation initiale et continue des professionnel"
+      },
+      {
+        "key": "c11",
+        "title": "Article Annexe II - II. Maquette 23",
+        "snippet": "Mouvements anormaux : Hiérarchiser les examens à visée diagnostique en présence d'un mouvement anormal ; Diagnostiquer une maladie de Huntington ; Conduire le traitement d'un tremblement essentiel ; Conduire le traitement d'un syndrome choréique ; Proposer un traitement par toxin"
+      },
+      {
+        "key": "c12",
+        "title": "Article 9",
+        "snippet": "Le Gouvernement remet au Parlement, chaque année, un rapport relatif à l'ensemble des financements publics alloués à la recherche sur les cancers pédiatriques. Ce rapport précise les volumes financiers annuels et pluriannuels dédiés aux programmes de recherche sur les cancers de "
+      },
+      {
+        "key": "c13",
+        "title": "Article ANNEXE",
+        "snippet": "Prévenir la douleur d'intensité modérée et sévère dans au moins 75 % des cas où les moyens techniques actuellement disponibles permettent de le faire, notamment en postopératoire, pour les patients cancéreux (à tous les stades de la maladie), et lors de la prise en charge diagnos"
+      },
+      {
+        "key": "c14",
+        "title": "Article 6",
+        "snippet": "Le Gouvernement remet au Parlement, au plus tard douze mois après la promulgation de la présente loi, un rapport relatif à la prise en charge de la douleur, en particulier par les centres d'oncologie pédiatrique. Ce rapport précise notamment les moyens mis en œuvre pour le dépist"
+      },
+      {
+        "key": "c15",
+        "title": "Article Annexe 1",
+        "snippet": "Epidémiologie Connaître l'épidémiologie des douleurs aiguës en ville et à l'hôpital, des douleurs chroniques A Diagnostic positif Reconnaître et évaluer une douleur aiguë et chronique chez l'adulte A Diagnostic positif Connaître les modalités du diagnostic d'une douleur par excès"
+      },
+      {
+        "key": "c16",
+        "title": "Article LEGIARTI000031634747",
+        "snippet": "Orientation n° 9 : adaptation des pratiques de l'infirmier de bloc opératoire aux nouveaux modes de prise en charge (chirurgie ambulatoire, robotique, télémédecine). Infirmier anesthésiste : Orientation n° 1 : formation aux techniques d'assistance cardio-circulatoire. Orientation"
+      },
+      {
+        "key": "c17",
+        "title": "Article 4",
+        "snippet": "Dans un délai de six mois à compter de la promulgation de la présente loi, le Gouvernement remet au Parlement un rapport sur la possibilité du versement d'une indemnité de garde d'enfant aux personnes bénéficiant d'un traitement du cancer du sein, de soins consécutifs à un cancer"
+      },
+      {
+        "key": "c18",
+        "title": "Article R6123-91-3",
+        "snippet": "I.-Sans préjudice de l'application des dispositions du I de l'article R. 6123-91, l'établissement autorisé au traitement du cancer pour l'enfant et l'adolescent de moins de dix-huit ans est membre d'une organisation hospitalière interrégionale de recours en oncologie pédiatrique,"
+      }
+    ]
+  },
+  {
+    "question_id": "s06-codex",
+    "question": "Quand un fabricant demande l'autorisation de vendre un produit pour les cultures, doit-il utiliser tout de suite la nouvelle liste officielle des usages ou dispose-t-il d'un délai ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 4",
+        "snippet": "Sans préjudice des dispositions prévues par les règlements (CE) n° 1272/2008 et (UE) n° 547/2011 susvisés, l'emballage ou l'étiquetage des produits de la gamme d'usages « amateur » répond aux conditions suivantes : 1° Il comporte de manière lisible et explicite pour un utilisateu"
+      },
+      {
+        "key": "c02",
+        "title": "Article R253-14",
+        "snippet": "I.-L'Agence procède à l'examen des demandes sans conduire d'évaluation répondant aux conditions mentionnées à l'article R. 253-13 dans les cas suivants : 1° Demande de changement d'emballage et d'étiquetage ou de changement de classement reposant sur de nouvelles études d'un prod"
+      },
+      {
+        "key": "c03",
+        "title": "Article R612-14",
+        "snippet": "Dans le cas prévu à l'article L. 612-5, deuxième alinéa, la culture est déposée au plus tard à la date de dépôt de la demande de brevet et la description précise : 1° Les informations dont dispose le demandeur sur les caractéristiques du micro-organisme ; 2° L'organisme habilité "
+      },
+      {
+        "key": "c04",
+        "title": "Article L255-18",
+        "snippet": "I.-Est puni de deux ans d'emprisonnement et de 75 000 € d'amende : 1° Le fait, pour toute personne, d'importer, de détenir en vue de la vente, de mettre en vente, de vendre ou de distribuer à titre gratuit une matière fertilisante, un adjuvant pour matières fertilisantes ou un su"
+      },
+      {
+        "key": "c05",
+        "title": "Article 10",
+        "snippet": "Le bénéfice de l'autorisation provisoire de vente ou de l'homologation implique, pour le demandeur, l'engagement de ne vendre, sous le nom commercial indiqué, qu'une spécialité définie : 1. Par son nom commercial ; 2. Par le nom du demandeur responsable de la mise sur le marché f"
+      },
+      {
+        "key": "c06",
+        "title": "Article 3",
+        "snippet": "La demande d'autorisation est accompagnée d'un dossier permettant de justifier de l'intérêt du projet par rapport aux enjeux environnementaux, et de démontrer sa compatibilité avec la protection de la santé humaine et animale ainsi que de l'environnement. Le contenu du dossier re"
+      },
+      {
+        "key": "c07",
+        "title": "Article 3",
+        "snippet": "Si la variété remplit les conditions précisées à l'article 2, son inscription sur cette liste est proposée par le C.T.P.S. Les dispositions des contrats visés à l'article 1er relatives à l'organisation de la production agricole de la variété et de la livraison des récoltes, à l'e"
+      },
+      {
+        "key": "c08",
+        "title": "Article R5121-69-1",
+        "snippet": "En cas de demande complémentaire par la Haute Autorité de santé au cours de l'évaluation de la demande mentionnée à l'article R. 5121-68, le cas échéant sur proposition de l'Agence nationale de sécurité du médicament et des produits de santé ou des ministres chargés de la santé e"
+      },
+      {
+        "key": "c09",
+        "title": "Article L113-1",
+        "snippet": "Le fabricant, le producteur ou le distributeur d'un bien commercialisé en France transmet au consommateur qui en fait la demande et qui a connaissance d'éléments sérieux mettant en doute le fait que ce bien a été fabriqué dans des conditions respectueuses des conventions internat"
+      },
+      {
+        "key": "c10",
+        "title": "Article R5124-3",
+        "snippet": "Les fabricants, les importateurs, les exploitants, les dépositaires, les grossistes-répartiteurs, les distributeurs en gros de produits pharmaceutiques autres que les médicaments, les distributeurs en gros de plantes médicinales, les distributeurs en gros de gaz à usage médical, "
+      },
+      {
+        "key": "c11",
+        "title": "Article 8",
+        "snippet": "I. - A titre transitoire, les produits insecticides et acaricides dont l'autorisation de mise sur le marché comporte, à la date d'entrée en vigueur du présent arrêté, l'une des mentions suivantes : « - emploi autorisé durant la floraison, en dehors de la présence d'abeilles » ; «"
+      },
+      {
+        "key": "c12",
+        "title": "Article 4",
+        "snippet": "I. - Les produits dont la première mise sur le marché intervient dans les dix-huit mois suivant la publication d'une modification de l'annexe 2 peuvent être distribués et utilisés jusqu'à épuisement des stocks, sans modification des étiquettes au regard de cette modification. II."
+      },
+      {
+        "key": "c13",
+        "title": "Article 5",
+        "snippet": "Le bénéficiaire d'une autorisation de production désirant se procurer le matériel végétal nécessaire au lancement de sa production est tenu de le faire soit auprès d'un autre producteur autorisé, soit par importation, soit par prélèvement autorisés par le ministre chargé de la pr"
+      },
+      {
+        "key": "c14",
+        "title": "Article 7",
+        "snippet": "Tout détenteur d'un procédé d'isolation par injection de mousse urée-formol doit disposer d'une autorisation du ministre chargé de l'industrie. L'acte accordant cette autorisation précise la durée de celle-ci. L'autorisation peut être retirée à tout moment par décision motivée du"
+      },
+      {
+        "key": "c15",
+        "title": "Article Annexe II",
+        "snippet": "Liste des pièces à joindre à la demande d'autorisation de produire et de vendre des produits explosifs : A toute demande d'autorisation de produire et de vendre des produits explosifs doit être joint, selon le cas, tout ou partie des pièces énumérées ci-après : - statuts, s'il s'"
+      },
+      {
+        "key": "c16",
+        "title": "Article R2352-17",
+        "snippet": "Dans les cas de retrait énumérés à l'article R. 2352-16, l'intéressé dispose, pour liquider le stock de produits explosifs destinés à un usage militaire faisant l'objet du retrait, d'un délai qui lui est fixé lors de la notification de la décision de retrait. Dans la limite de ce"
+      },
+      {
+        "key": "c17",
+        "title": "Article 6",
+        "snippet": "Le bénéficiaire d'une autorisation de production est tenu d'avoir un registre, coté et paraphé par le maire ou le commissaire de police, où sont mentionnés au jour le jour le nombre de spécimens entrés ou sortis de son établissement ainsi que leur provenance ou leur destinataire."
+      },
+      {
+        "key": "c18",
+        "title": "Article 1",
+        "snippet": "Sur demande d'une section du Comité technique permanent de la sélection (C.T.P.S.) des plantes cultivées et pour les espèces dont elle a la charge, il peut être institué une liste de variétés à usages industriels réservés. Sont éligibles sur cette liste les variétés qui, du fait "
+      },
+      {
+        "key": "c19",
+        "title": "Article R5124-10",
+        "snippet": "I.-Sont soumises à autorisation, en raison de leur caractère substantiel, les modifications de l'autorisation d'ouverture d'un établissement pharmaceutique, prévue à l'article L. 5124-3, qui ont trait à l'un des éléments suivants : 1° La fabrication ou l'importation d'une nouvell"
+      },
+      {
+        "key": "c20",
+        "title": "Article 3",
+        "snippet": "I. - Le catalogue est publié au Bulletin officiel du ministère chargé de l'agriculture et tenu à jour. II. - Les demandes d'AMM et de permis indiquent le numéro de référence et le libellé des usages conformément à ce catalogue. III. - Au plus tard six mois après la publication d'"
+      },
+      {
+        "key": "c21",
+        "title": "Article 2",
+        "snippet": "I. - Les lots de produits dont la première mise sur le marché intervient dans les douze mois suivant la notification de la décision de reclassement administratif peuvent être distribués et utilisés jusqu'à épuisement des stocks, sans obligation de mise à jour des étiquettes au re"
+      }
+    ]
+  },
+  {
+    "question_id": "s06-authored",
+    "question": "Quand on demande l'autorisation de vendre un produit pour les cultures, faut-il appliquer tout de suite la nouvelle liste officielle des usages ou y a-t-il un délai ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 2",
+        "snippet": "I. - Pour l'application du présent arrêté et du catalogue national des usages phytopharmaceutiques, ci-après désigné comme le catalogue, on entend par portée de l'usage : - la culture ou le groupe cultural identifié dans le libellé de l'usage (culture « de référence ») ; - les cu"
+      },
+      {
+        "key": "c02",
+        "title": "Article 3",
+        "snippet": "Si la variété remplit les conditions précisées à l'article 2, son inscription sur cette liste est proposée par le C.T.P.S. Les dispositions des contrats visés à l'article 1er relatives à l'organisation de la production agricole de la variété et de la livraison des récoltes, à l'e"
+      },
+      {
+        "key": "c03",
+        "title": "Article 2",
+        "snippet": "Autorisation de mise sur le marché d'un produit telle que définie à l'article 130, point I (7°), de la loi n° 2006-1666 du 21 décembre 2006 de finances pour 2007 (générique), à l'exclusion, pour le produit, de la soumission de nouvelles études ou évaluations de risque et, pour la"
+      },
+      {
+        "key": "c04",
+        "title": "Article R2352-17",
+        "snippet": "Dans les cas de retrait énumérés à l'article R. 2352-16, l'intéressé dispose, pour liquider le stock de produits explosifs destinés à un usage militaire faisant l'objet du retrait, d'un délai qui lui est fixé lors de la notification de la décision de retrait. Dans la limite de ce"
+      },
+      {
+        "key": "c05",
+        "title": "Article R5121-107-14",
+        "snippet": "Lorsque, à la suite de l'établissement d'une nouvelle monographie communautaire de plantes médicinales, de la révision d'une monographie existante ou de la révision de la liste établie par la Commission européenne en application de l'article 16 septies de la directive 2001/83/ CE"
+      },
+      {
+        "key": "c06",
+        "title": "Article 4",
+        "snippet": "A réception du dossier de demande d'autorisation comprenant le formulaire rempli et signé ainsi que les justificatifs requis, un accusé de réception est adressé au demandeur dans les dix jours ouvrables. Cet accusé de réception ne vaut pas acceptation de la demande. Après étude d"
+      },
+      {
+        "key": "c07",
+        "title": "Article 2",
+        "snippet": "I. - Les lots de produits dont la première mise sur le marché intervient dans les douze mois suivant la notification de la décision de reclassement administratif peuvent être distribués et utilisés jusqu'à épuisement des stocks, sans obligation de mise à jour des étiquettes au re"
+      },
+      {
+        "key": "c08",
+        "title": "Article 3",
+        "snippet": "La demande d'autorisation est accompagnée d'un dossier permettant de justifier de l'intérêt du projet par rapport aux enjeux environnementaux, et de démontrer sa compatibilité avec la protection de la santé humaine et animale ainsi que de l'environnement. Le contenu du dossier re"
+      },
+      {
+        "key": "c09",
+        "title": "Article 1",
+        "snippet": "Toute demande d'autorisation d'exploitation de cultures marines est présentée par écrit sur un imprimé réglementaire au directeur départemental des territoires et de la mer sur le littoral dans le ressort duquel est situé l'établissement sollicité. Il est accusé réception de cett"
+      },
+      {
+        "key": "c10",
+        "title": "Article R2352-115",
+        "snippet": "Tout changement d'exploitant ne peut prendre effet qu'à la suite de la délivrance d'une autorisation individuelle au nouvel exploitant dans les conditions prévues aux articles R. 2352-111 à R. 2352-113. Le nouvel exploitant joint à sa demande d'autorisation un document dans leque"
+      },
+      {
+        "key": "c11",
+        "title": "Article D232-77",
+        "snippet": "L'autorisation d'usage à des fins thérapeutiques précise la substance, sa posologie et sa voie d'administration, ou la méthode à laquelle elle se rapporte. Toute modification d'un de ces éléments est sollicitée auprès du président de l'agence qui détermine s'il est nécessaire de "
+      },
+      {
+        "key": "c12",
+        "title": "Article 8",
+        "snippet": "I. - A titre transitoire, les produits insecticides et acaricides dont l'autorisation de mise sur le marché comporte, à la date d'entrée en vigueur du présent arrêté, l'une des mentions suivantes : « - emploi autorisé durant la floraison, en dehors de la présence d'abeilles » ; «"
+      },
+      {
+        "key": "c13",
+        "title": "Article 4",
+        "snippet": "I. - Les produits dont la première mise sur le marché intervient dans les dix-huit mois suivant la publication d'une modification de l'annexe 2 peuvent être distribués et utilisés jusqu'à épuisement des stocks, sans modification des étiquettes au regard de cette modification. II."
+      },
+      {
+        "key": "c14",
+        "title": "Article 10",
+        "snippet": "Le bénéfice de l'autorisation provisoire de vente ou de l'homologation implique, pour le demandeur, l'engagement de ne vendre, sous le nom commercial indiqué, qu'une spécialité définie : 1. Par son nom commercial ; 2. Par le nom du demandeur responsable de la mise sur le marché f"
+      },
+      {
+        "key": "c15",
+        "title": "Article R612-14",
+        "snippet": "Dans le cas prévu à l'article L. 612-5, deuxième alinéa, la culture est déposée au plus tard à la date de dépôt de la demande de brevet et la description précise : 1° Les informations dont dispose le demandeur sur les caractéristiques du micro-organisme ; 2° L'organisme habilité "
+      },
+      {
+        "key": "c16",
+        "title": "Article Annexe (suite)",
+        "snippet": "Pour cette date, les Etats membres vérifient aussi si le détenteur de l'autorisation possède un dossier, ou a accès à un dossier, satisfaisant aux exigences de l'annexe II de la directive 91/414/CEE, conformément aux conditions de l'article 13 de cette directive. b) Pour tous les"
+      },
+      {
+        "key": "c17",
+        "title": "Article LEGIARTI000030955676",
+        "snippet": "INFORMATIONS À SOUMETTRE À L'ANSES DANS LE CADRE DE LA MISE EN ŒUVRE DE L'ÉVALUATION COMPARATIVE DES PRODUITS PHYTOPHARMACEUTIQUES EN APPLICATION DE L'ARTICLE 50 DU RÈGLEMENT (CE) NO 1107/2009 Informations sur le produit et sur la substance active Produit concerné Substance (s) a"
+      },
+      {
+        "key": "c18",
+        "title": "Article 3",
+        "snippet": "I. - Le catalogue est publié au Bulletin officiel du ministère chargé de l'agriculture et tenu à jour. II. - Les demandes d'AMM et de permis indiquent le numéro de référence et le libellé des usages conformément à ce catalogue. III. - Au plus tard six mois après la publication d'"
+      },
+      {
+        "key": "c19",
+        "title": "Article 2",
+        "snippet": "Le ministre de l'agriculture notifie ces propositions à chaque détenteur d'une autorisation de vente pour la spécialité concernée. Celui-ci, dans un délai de deux mois après notification, peut déposer les demandes d'extension d'emploi pour sa spécialité suivant la procédure défin"
+      },
+      {
+        "key": "c20",
+        "title": "Article Annexe II",
+        "snippet": "Liste des pièces à joindre à la demande d'autorisation de produire et de vendre des produits explosifs : A toute demande d'autorisation de produire et de vendre des produits explosifs doit être joint, selon le cas, tout ou partie des pièces énumérées ci-après : - statuts, s'il s'"
+      }
+    ]
+  },
+  {
+    "question_id": "s07-codex",
+    "question": "Pour ce concours d'entrée, après l'examen du dossier, quelles épreuves orales les candidats retenus doivent-ils passer ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 4",
+        "snippet": "Le concours interne comporte une épreuve écrite d'admissibilité et une épreuve orale d'admission. 1° L'épreuve d'admissibilité consiste en une étude de cas pratique avec une mise en situation à partir d'un dossier documentaire technique remis au candidat pouvant comporter des gra"
+      },
+      {
+        "key": "c02",
+        "title": "Article 4",
+        "snippet": "Le concours interne comporte une épreuve écrite d'admissibilité et deux épreuves orales d'admission. I. ― L'épreuve écrite d'admissibilité est la suivante : Une épreuve de cas pratique avec une mise en situation à partir d'un dossier documentaire remis au candidat pouvant comport"
+      },
+      {
+        "key": "c03",
+        "title": "Article 4",
+        "snippet": "En vue de l'épreuve orale d'admission des concours interne et troisième concours, le candidat établit un dossier de reconnaissance des acquis de l'expérience professionnelle, comportant les rubriques mentionnées en annexe au présent arrêté, qu'il remet au service organisateur à u"
+      },
+      {
+        "key": "c04",
+        "title": "Article 7",
+        "snippet": "L'épreuve orale d'admission consiste en une discussion avec les membres du jury, à partir d'un dossier présentant leur parcours professionnel, constitué par les candidats lors de leur inscription et accompagné d'une lettre de motivation (durée de l'épreuve : trente minutes ; coef"
+      },
+      {
+        "key": "c05",
+        "title": "Article 8",
+        "snippet": "Les candidats aux concours B passent les épreuves orales d'admissibilité spécifiques à l'établissement. Chaque candidat admissible présente un dossier selon les modalités fixées par le jury. Après examen de ce dossier, le jury propose la liste des candidats admis. Les candidats a"
+      },
+      {
+        "key": "c06",
+        "title": "Article 5",
+        "snippet": "Les concours comportent les épreuves suivantes : A. ― Concours externe et troisième concours 1° L'épreuve d'admissibilité : L'épreuve écrite d'admissibilité consiste en une série de six à neuf questions à réponse courte portant sur l'un des deux thèmes suivants soumis au choix du"
+      },
+      {
+        "key": "c07",
+        "title": "Article Annexe VIII",
+        "snippet": "La voie C2 du concours comporte les épreuves ci-après, affectées des coefficients suivants : Admissibilité sur dossier La voie C2 comporte un examen de dossier et des épreuves orales d'admission. Il est attribué au dossier une note variant de 0 à 20. A l'issue de l'examen du doss"
+      },
+      {
+        "key": "c08",
+        "title": "Article 4",
+        "snippet": "Le concours interne comporte une épreuve écrite d'admissibilité et deux épreuves orales d'admission. I. ― L'épreuve d'admissibilité consiste en une étude de cas pratique avec une mise en situation à partir d'un dossier documentaire technique remis au candidat pouvant comporter de"
+      },
+      {
+        "key": "c09",
+        "title": "Article 7",
+        "snippet": "La sélection des candidats repose sur une phase d'admissibilité et une épreuve orale d'admission : 1° La phase d'admissibilité consiste en l'examen par le jury du dossier mentionné au 3° de l'article 4 du présent arrêté. A l'issue de cet examen, le jury établit une présélection d"
+      },
+      {
+        "key": "c10",
+        "title": "Article 4",
+        "snippet": "I. - Le concours d'entrée en formation initiale consiste, après examen du dossier du candidat, en un entretien devant un jury permettant d'apprécier sa motivation. II. - L'examen d'entrée en formation continue comprend une épreuve pratique de jeu suivie d'une épreuve orale. L'épr"
+      },
+      {
+        "key": "c11",
+        "title": "Article 5",
+        "snippet": "Le concours interne et le troisième concours d'accès au grade des techniciens de classe normale des systèmes d'information et de communication comportent une épreuve écrite d'admissibilité et une épreuve orale d'admission. I. - Epreuve d'admissibilité L'épreuve écrite d'admissibi"
+      },
+      {
+        "key": "c12",
+        "title": "Article 3",
+        "snippet": "Les trois épreuves orales d'admission consistent en : 1. Une épreuve d'entretien avec le jury visant à apprécier les qualités de réflexion, les aptitudes et les motivations du candidat (durée : trente minutes, dont dix minutes au plus d'exposé ; coefficient 9) : Le jury dispose c"
+      },
+      {
+        "key": "c13",
+        "title": "Article 19",
+        "snippet": "A l'issue des épreuves orales, le nombre total des points obtenus au concours Mines-Télécom s'obtient en additionnant le nombre total de points obtenus aux épreuves écrites et le nombre de point obtenus aux épreuves orales. Une nouvelle bonification de 15 points est accordée au c"
+      },
+      {
+        "key": "c14",
+        "title": "Article 5",
+        "snippet": "Les épreuves orales d'admission des concours mentionnés à l'article 1er comprennent les épreuves obligatoires suivantes : 1° Concours externe : a) Epreuve n° 1 : une épreuve d'entretien permettant d'apprécier les qualités et aptitudes notamment managériales, le savoir-être et la "
+      },
+      {
+        "key": "c15",
+        "title": "Article 5",
+        "snippet": "Le concours interne et le troisième concours comportent une phase de sélection sur dossier et une épreuve orale d'admission. Les épreuves du concours interne et du troisième concours relevant de la spécialité choisie requièrent un niveau de connaissances équivalent à un diplôme s"
+      },
+      {
+        "key": "c16",
+        "title": "Article 6",
+        "snippet": "L'examen professionnel comporte une épreuve écrite d'admissibilité et deux épreuves orales d'admission. I. ― L'épreuve écrite d'admissibilité est la suivante : Une épreuve de cas pratique avec une mise en situation à partir d'un dossier documentaire technique remis au candidat po"
+      },
+      {
+        "key": "c17",
+        "title": "Article 6",
+        "snippet": "Les épreuves orales d'admission des concours externe, interne et du troisième concours sont les suivantes : 1° a) Concours externe : entretien avec le jury, à partir d'une question tirée au sort, visant à apprécier les aptitudes, la personnalité et les motivations du candidat (du"
+      },
+      {
+        "key": "c18",
+        "title": "Article 8",
+        "snippet": "Le concours D comporte un examen des dossiers des candidats et des épreuves orales d'admission. Il est attribué au dossier une note numérique variant de 0 à 20. A l'issue de l'examen des dossiers, le jury établit par ordre alphabétique la liste des candidats autorisés à subir les"
+      },
+      {
+        "key": "c19",
+        "title": "Article 1",
+        "snippet": "L'examen professionnel prévu au 1° du I de l'article 25 du décret du 11 novembre 2009 susvisé pour l'avancement au grade d'assistant d'administration de l'aviation civile de classe supérieure est organisé conformément aux dispositions prévues au présent arrêté. L'examen professio"
+      },
+      {
+        "key": "c20",
+        "title": "Article 2",
+        "snippet": "Les concours d'admission en cycle master sont organisés dans les conditions d'épreuves et selon les coefficients suivants. Les épreuves orales d'admission peuvent se dérouler à distance. 2C_Mathématiques Pré-admissibilité sur la base d'un examen du dossier du candidat. Epreuves é"
+      },
+      {
+        "key": "c21",
+        "title": "Article 12",
+        "snippet": "L'examen professionnel comporte les épreuves suivantes : 1. Une note sur le parcours professionnel du candidat attribuée par le jury au vu des différents documents constituant le dossier de candidature (coefficient 2) ; Les candidats qui obtiendront moins de 5 sur 20 à cette épre"
+      }
+    ]
+  },
+  {
+    "question_id": "s07-authored",
+    "question": "Quelles épreuves orales un candidat passe-t-il à un concours administratif une fois admissible ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 2",
+        "snippet": "L'examen oral pour le recrutement de greffiers en chef des services judiciaires réservé aux candidats déclarés admissibles au concours d'accès à l'Ecole nationale de la magistrature comporte trois épreuves orales obligatoires."
+      },
+      {
+        "key": "c02",
+        "title": "Article 8",
+        "snippet": "1. Les candidats, déclarés admissibles au concours commun SPE et non admissibles ou non inscrits au concours commun Mines-Ponts, passent les épreuves orales dont la liste est fixée à l'article 9. Ils sont référencés dans la suite de l'arrêté par la voie concours banque Mines-Pont"
+      },
+      {
+        "key": "c03",
+        "title": "Article 1",
+        "snippet": "Le concours prévu au I de l'article 5 du décret du 18 novembre 1994 susvisé comporte deux épreuves écrites d'admissibilité et une épreuve orale d'admission. Les épreuves écrites sont les suivantes : 1° Une épreuve de cas pratique avec une mise en situation à partir d'un dossier d"
+      },
+      {
+        "key": "c04",
+        "title": "Article 5",
+        "snippet": "Il est attribué à chacune des épreuves une note de 0 à 20. Chaque note est multipliée par le coefficient attribué à l'épreuve. Nul ne peut être déclaré admissible ou admis s'il lui a été attribué pour l'une des épreuves une note inférieure à 5 sur 20. Peuvent être déclarés admiss"
+      },
+      {
+        "key": "c05",
+        "title": "Article 6",
+        "snippet": "L'arrêté du 29 avril 1985 relatif aux épreuves orales du concours externe pour l'accès au corps des secrétaires adjoints des affaires étrangères (cadre général) réservées aux candidats admissibles à l'Ecole nationale d'administration est abrogé."
+      },
+      {
+        "key": "c06",
+        "title": "Article 6",
+        "snippet": "Pour chacun des concours, le jury prononce l'admissibilité aux épreuves orales à la suite des épreuves écrites. Sont déclarés admissibles les candidats qui ont obtenu un nombre de points égal ou supérieur à celui fixé par le jury et qui constitue la barre d'admissibilité du conco"
+      },
+      {
+        "key": "c07",
+        "title": "Article 9",
+        "snippet": "Les candidats déclarés admissibles sont convoqués individuellement pour les épreuves orales par la direction de l'administration générale et des gens de mer à la marine marchande. Les épreuves orales sont notées de 0 à 20, les notes attribuées pouvant comporter des décimales s'il"
+      },
+      {
+        "key": "c08",
+        "title": "Article 11",
+        "snippet": "A l'issue des épreuves écrites d'admissibilité, pour chacun des concours, le jury établit par ordre alphabétique la liste des candidats autorisés à prendre part aux épreuves orales d'admission et, le cas échéant, à l'épreuve orale facultative du concours interne. Nul ne peut être"
+      },
+      {
+        "key": "c09",
+        "title": "Article 2",
+        "snippet": "Le concours prévu au II de l'article 5 du décret du 18 novembre 1994 susvisé comporte une épreuve écrite d'admissibilité et une épreuve orale d'admission. L'épreuve d'admissibilité consiste en un cas pratique avec une mise en situation à partir d'un dossier documentaire remis au "
+      },
+      {
+        "key": "c10",
+        "title": "Article 3",
+        "snippet": "Le concours prévu au 3° de l'article 4 du décret du 18 novembre 1994 susvisé comporte une épreuve orale d'admission. L'épreuve d'admission consiste en un entretien avec le jury visant à apprécier la personnalité, les aptitudes du candidat ainsi que sa motivation et à reconnaître "
+      },
+      {
+        "key": "c11",
+        "title": "Article 3",
+        "snippet": "Le programme des épreuves d'admissibilité consistant, d'une part, en des questions portant sur des sujets juridiques, institutionnels ou administratifs et, d'autre part, en une note administrative portant sur la résolution d'un cas pratique posant des questions juridiques ainsi q"
+      },
+      {
+        "key": "c12",
+        "title": "Article 1",
+        "snippet": "L'examen oral prévu à l'article 19 du décret du 6 mars 1969 susvisé et auquel sont soumis les candidats admissibles à l'un des concours d'entrée à l'Institut national du service public qui ne remplissent pas les conditions requises pour se présenter au concours suivant comprend l"
+      },
+      {
+        "key": "c13",
+        "title": "Article R233-11",
+        "snippet": "Les concours prévus par le 2° de l'article L. 233-2 comportent trois épreuves écrites d'admissibilité et deux épreuves orales d'admission. 1° Epreuves d'admissibilité : a) Une épreuve consistant en l'étude d'un dossier de contentieux administratif (durée : quatre heures ; coeffic"
+      },
+      {
+        "key": "c14",
+        "title": "Article 4",
+        "snippet": "Pour les concours externe et interne, à l'issue des épreuves d'admissibilité, le jury établit la liste des candidats autorisés à prendre part à l'épreuve orale, après péréquation des notes attribuées aux candidats aux différentes épreuves d'admissibilité. Pour les mêmes concours,"
+      },
+      {
+        "key": "c15",
+        "title": "Article 8",
+        "snippet": "Seuls peuvent être admis à participer aux épreuves orales d'admission les candidats ayant obtenu, après application des coefficients, un total de points aux épreuves écrites d'admissibilité fixé par le jury et qui ne peut être inférieur à 160. Le jury établit, par section et par "
+      },
+      {
+        "key": "c16",
+        "title": "Article 19",
+        "snippet": "A l'issue des épreuves orales, le nombre total des points obtenus au concours Mines-Télécom s'obtient en additionnant le nombre total de points obtenus aux épreuves écrites et le nombre de point obtenus aux épreuves orales. Une nouvelle bonification de 15 points est accordée au c"
+      },
+      {
+        "key": "c17",
+        "title": "Article 3",
+        "snippet": "Les épreuves écrites d'admissibilité sont notées de 0 à 20. Toute note égale ou inférieure à 8 sur 20 à l'une des épreuves d'admissibilité est éliminatoire. Nul ne peut être déclaré admissible s'il n'a pas passé l'ensemble des épreuves écrites d'admissibilité. Pour être déclarés "
+      },
+      {
+        "key": "c18",
+        "title": "Article 2",
+        "snippet": "L'admissibilité comprend les épreuves obligatoires suivantes : Concours externe : Epreuve n 1 : une épreuve écrite qui consiste à partir d'un texte d'ordre général d'une page au maximum ou de 300 à 350 mots en la réponse à 6 à 8 questions destinées à vérifier les capacités de com"
+      },
+      {
+        "key": "c19",
+        "title": "Article 4",
+        "snippet": "Le ministère des affaires étrangères arrête la liste des candidats autorisés à subir l'examen oral prévu à l'article 19 du décret du 6 mars 1969 précité. La liste des candidats autorisés à subir l'examen oral prévu à l'article 1er ci-dessus sera portée en annexe de la liste des c"
+      },
+      {
+        "key": "c20",
+        "title": "Article 1",
+        "snippet": "Le concours prévu au I de l'article 6 du décret du 19 mars 2010 susvisé comporte deux épreuves écrites d'admissibilité et une épreuve orale d'admission. Les épreuves écrites sont les suivantes : 1° Une épreuve de cas pratique avec une mise en situation à partir d'un dossier docum"
+      },
+      {
+        "key": "c21",
+        "title": "Article 3",
+        "snippet": "Le concours prévu au II de l'article 6 du décret du 11 novembre 2009 précité comporte une épreuve orale d'admission. L'épreuve d'admission consiste en un entretien avec le jury visant à apprécier la personnalité et les aptitudes du candidat ainsi que sa motivation, et à reconnaît"
+      }
+    ]
+  },
+  {
+    "question_id": "s08-codex",
+    "question": "Quels ministres sont chargés de faire appliquer ce texte et où doit-il être publié ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 21",
+        "snippet": "Le Premier ministre, la ministre de la transition écologique, le ministre de l'intérieur, le ministre des outre-mer, le ministre de la cohésion des territoires et des relations avec les collectivités territoriales, le garde des sceaux, ministre de la justice, et le ministre des s"
+      },
+      {
+        "key": "c02",
+        "title": "Article 294",
+        "snippet": "Le Premier ministre, le ministre de l'économie et des finances et le ministre délégué auprès du ministre de l'économie et des finances, chargé du budget, sont responsables, chacun en ce qui le concerne, de l'application du présent décret, qui sera publié au Journal officiel de la"
+      },
+      {
+        "key": "c03",
+        "title": "Article 16",
+        "snippet": "Le Premier ministre, le ministre d'Etat, ministre de la transition écologique et solidaire, la garde des sceaux, ministre de la justice, le ministre de l'économie et des finances, la ministre du travail et la ministre des outre-mer sont responsables, chacun en ce qui le concerne,"
+      },
+      {
+        "key": "c04",
+        "title": "Article 10",
+        "snippet": "Le Premier ministre, le ministre de l'économie, des finances et de la relance et le ministre des outre-mer sont responsables, chacun en ce qui le concerne, de l'application de la présente ordonnance, qui sera publiée au Journal officiel de la République française."
+      },
+      {
+        "key": "c05",
+        "title": "Article 9",
+        "snippet": "Le Premier ministre, le ministre de l'économie et des finances, la garde des sceaux, ministre de la justice, et la ministre des outre-mer sont chargés, chacun en ce qui le concerne, de l'application de la présente ordonnance, qui sera publiée au Journal officiel de la République "
+      },
+      {
+        "key": "c06",
+        "title": "Article ANNEXE",
+        "snippet": "ou de renouvellement La durée de l'autorisation est fixée à dix ans, comptés à partir de la date de publication de l'arrêté d'autorisation. Si l'exploitant souhaite voir prolonger cette durée, il doit en faire la demande au ministre chargé des télécommunications deux ans au moins"
+      },
+      {
+        "key": "c07",
+        "title": "Article 5",
+        "snippet": "Le ministre d'Etat, ministre de l'économie, des finances et du budget, et le ministre de l'agriculture et de la forêt sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c08",
+        "title": "Article 18",
+        "snippet": "Chaque candidat ne peut faire envoyer aux électeurs, avant chaque tour de scrutin, qu'un texte de ses déclarations sur feuillet double, répondant aux normes fixées par les articles R. 27, premier alinéa, et R. 29 du code électoral. Ce texte doit être uniforme pour l'ensemble du t"
+      },
+      {
+        "key": "c09",
+        "title": "Article 4",
+        "snippet": "Le Premier ministre et le ministre du travail, de l'emploi et de la santé sont responsables, chacun en ce qui le concerne, de l'application du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c10",
+        "title": "Article 9",
+        "snippet": "La Première ministre, le ministre de l'économie, des finances et de la souveraineté industrielle et numérique et le ministre de l'intérieur et des outre-mer sont responsables, chacun en ce qui le concerne, de l'application du présent décret, qui sera publié au Journal officiel de"
+      },
+      {
+        "key": "c11",
+        "title": "Article 3",
+        "snippet": "Le ministre d'Etat, ministre de la transition écologique et solidaire, et la ministre auprès du ministre d'Etat, ministre de la transition écologique et solidaire, chargée des transports, sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publi"
+      },
+      {
+        "key": "c12",
+        "title": "Article 7",
+        "snippet": "TEXTE L'observateur doit avoir soin de tenir constamment nettoyé et en parfait état : ... Il devra notamment : ... Si l'instrument semble en mauvais état, il doit avertir le chef du service chargé de gérer la station de ... afin que la réparation puisse se faire dans le plus bref"
+      },
+      {
+        "key": "c13",
+        "title": "Article ANNEXE",
+        "snippet": "La durée de l'autorisation est fixée à dix ans, comptés à partir de la date de publication de l'arrêté d'autorisation. Si l'exploitant souhaite voir prolonger cette durée, il doit en faire la demande au ministre chargé des télécommunications deux ans au moins avant la date d'expi"
+      },
+      {
+        "key": "c14",
+        "title": "Article ANNEXE",
+        "snippet": "La durée de l'autorisation est fixée à dix ans, comptés à partir de la date de publication de l'arrêté d'autorisation. Si l'exploitant souhaite voir prolonger cette durée, il doit en faire la demande au ministre chargé des télécommunications deux ans au moins avant la date d'expi"
+      },
+      {
+        "key": "c15",
+        "title": "Article 45",
+        "snippet": "Le décret n° 45-2268 du 4 octobre 1945, les textes qui l'ont modifié et le décret n° 49-1620 du 28 décembre 1949 sont abrogés. Les textes ayant institué en faveur des personnels visés au deuxième alinéa de l'article premier des régimes forfaitaires de déplacement ou des régimes p"
+      },
+      {
+        "key": "c16",
+        "title": "Article 7",
+        "snippet": "Le ministre de l'économie, des finances et de la relance, le ministre des solidarités et de la santé et le ministre de l'agriculture et de l'alimentation sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la Républ"
+      },
+      {
+        "key": "c17",
+        "title": "Article R811-94",
+        "snippet": "Le conseil d'administration des établissements d'enseignement agricole jouissant de la personnalité civile agit en qualité d'organe délibérant de l'école considérée comme établissement public et, s'il y a lieu, en qualité de conseil chargé de fournir au directeur toutes instructi"
+      },
+      {
+        "key": "c18",
+        "title": "Article 17",
+        "snippet": "Si, au moment de la déclaration ou postérieurement, le déclarant veut obtenir la modification de certaines des prescriptions applicables à l'installation, il en fait la demande aux ministres chargés de l'industrie et de l'environnement, qui consultent le ministre chargé de la san"
+      },
+      {
+        "key": "c19",
+        "title": "Article 2",
+        "snippet": "Le ministre de l'intérieur et des outre-mer, la ministre de l'enseignement supérieur et de la recherche et la ministre de la santé et de la prévention sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la Républiqu"
+      },
+      {
+        "key": "c20",
+        "title": "Article 40",
+        "snippet": "Le ministre d'Etat, ministre de la transition écologique et solidaire, le ministre de l'économie et des finances et la ministre des outre-mer sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la République françai"
+      },
+      {
+        "key": "c21",
+        "title": "Article ANNEXE",
+        "snippet": "3.5. Durée, conditions de cessation ou de renouvellement La durée de l'autorisation est fixée à dix ans, comptés à partir de la date de publication de l'arrêté d'autorisation. Si l'exploitant souhaite voir prolonger cette durée, il doit en faire la demande au ministre chargé des "
+      }
+    ]
+  },
+  {
+    "question_id": "s08-authored",
+    "question": "Quels ministres sont chargés d'appliquer un décret et où est-il publié ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 2",
+        "snippet": "Le ministre des armées, le ministre de l'éducation nationale et de la jeunesse et la secrétaire d'État auprès du ministre des armées et du ministre de l'éducation nationale et de la jeunesse, chargée de la jeunesse et du service national universel, sont chargés, chacun en ce qui "
+      },
+      {
+        "key": "c02",
+        "title": "Article 3",
+        "snippet": "Le ministre de l'intérieur est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c03",
+        "title": "Article 5",
+        "snippet": "Le ministre auprès du ministre de l'écologie, du développement durable, des transports et du logement, chargé des transports, est chargé de l'application du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c04",
+        "title": "Article 2",
+        "snippet": "Le ministre de l'économie, des finances et du budget, le ministre de l'industrie et de la recherche, le secrétaire d'Etat auprès du Premier ministre, chargé de l'environnement et de la qualité de la vie, le secrétaire d'Etat auprès du ministre de l'économie, des finances et du bu"
+      },
+      {
+        "key": "c05",
+        "title": "Article 2",
+        "snippet": "Le Premier ministre, la ministre d'État, ministre de l'éducation nationale, de l'enseignement supérieur et de la recherche, et le ministre d'État, garde des sceaux, ministre de la justice, sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publ"
+      },
+      {
+        "key": "c06",
+        "title": "Article 2",
+        "snippet": "La ministre de l'économie, de l'industrie et de l'emploi et le ministre du budget, des comptes publics, de la fonction publique et de la réforme de l'Etat sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la Répub"
+      },
+      {
+        "key": "c07",
+        "title": "Article 4",
+        "snippet": "Le Premier ministre, le ministre d'Etat, ministre de l'intérieur, et la ministre auprès du ministre d'Etat, ministre de l'intérieur, sont responsables, chacun en ce qui le concerne, de l'application du présent décret, qui sera publié au Journal officiel de la République française"
+      },
+      {
+        "key": "c08",
+        "title": "Article 2",
+        "snippet": "Le ministre d'État, garde des sceaux, ministre de la justice, est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c09",
+        "title": "Article 2",
+        "snippet": "La Première ministre est chargée de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c10",
+        "title": "Article 2",
+        "snippet": "La ministre d'État, ministre de l'éducation nationale, de l'enseignement supérieur et de la recherche, et le ministre auprès de la ministre d'État, ministre de l'éducation nationale, de l'enseignement supérieur et de la recherche, chargé de l'enseignement supérieur et de la reche"
+      },
+      {
+        "key": "c11",
+        "title": "Article 2",
+        "snippet": "Le ministre d'État, ministre de l'intérieur, et le ministre auprès du ministre d'État, ministre de l'intérieur, sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c12",
+        "title": "Article 7",
+        "snippet": "Le ministre d'Etat, ministre de l'intérieur, est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c13",
+        "title": "Article 2",
+        "snippet": "Le ministre délégué auprès du Premier ministre, chargé des relations avec le Parlement, est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c14",
+        "title": "Article 2",
+        "snippet": "Le ministre d'État, ministre des outre-mer, est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c15",
+        "title": "Article 7",
+        "snippet": "La ministre d'Etat, garde des sceaux, ministre de la justice et des libertés, le ministre du travail, de la solidarité et de la fonction publique et le ministre du budget, des comptes publics et de la réforme de l'Etat sont chargés, chacun en ce qui le concerne, de l'exécution du"
+      },
+      {
+        "key": "c16",
+        "title": "Article 3",
+        "snippet": "Le ministre d'Etat, ministre de l'économie, des finances et de la privatisation, le ministre de l'agriculture, le ministre délégué auprès du Premier ministre, chargé de la fonction publique et du Plan, et le ministre délégué auprès du ministre de l'économie, des finances et de la"
+      },
+      {
+        "key": "c17",
+        "title": "Article 5",
+        "snippet": "Le ministre de la défense, Le ministre de l'économie et le ministre du budget sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c18",
+        "title": "Article 6",
+        "snippet": "Le ministre d'Etat, ministre de la transition écologique et solidaire, est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c19",
+        "title": "Article 22",
+        "snippet": "Le Premier ministre, le ministre de l'intérieur, la ministre de la décentralisation et de la fonction publique et la secrétaire d'Etat chargée de la réforme de l'Etat et de la simplification sont responsables, chacun en ce qui le concerne, de l'application du présent décret, qui "
+      },
+      {
+        "key": "c20",
+        "title": "Article 3",
+        "snippet": "Le ministre des finances et des comptes publics, le ministre de l'intérieur et le secrétaire d'Etat chargé du budget sont chargés, chacun en ce qui le concerne, de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c21",
+        "title": "Article 2",
+        "snippet": "La ministre déléguée auprès du Premier ministre, chargée de l'égalité entre les femmes et les hommes et de la lutte contre les discriminations, est chargée de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c22",
+        "title": "Article 2",
+        "snippet": "Le ministre de l'éducation nationale, de l'enseignement supérieur et de la recherche est chargé de l'exécution du présent décret, qui sera publié au Journal officiel de la République française."
+      }
+    ]
+  },
+  {
+    "question_id": "s09-codex",
+    "question": "Pour cet examen professionnel dans l'animation territoriale, en quoi consistent l'écrit et l'oral, et combien de temps durent-ils ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport à partir des éléments d'un dossier portant sur les missions, les compétences et moyens d'action des collectivités territoriales, assorti de propositions opérationnelles (durée trois heures ; coefficient 1). L'épreuve orale co"
+      },
+      {
+        "key": "c02",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport, assorti de propositions opérationnelles, à partir des éléments d'un dossier portant sur l'organisation des activités physiques et sportives dans les collectivités territoriales (durée : 3 heures ; coefficient 1). L'épreuve o"
+      },
+      {
+        "key": "c03",
+        "title": "Article 5",
+        "snippet": "Le jury comprend au moins : a) Un fonctionnaire territorial de catégorie A ou B et un fonctionnaire désigné dans les conditions prévues à l'article 14 du décret du 20 novembre 1985 susvisé ; b) Deux personnalités qualifiées ; c) Deux élus locaux. L'arrêté de nomination des membre"
+      },
+      {
+        "key": "c04",
+        "title": "Article 5",
+        "snippet": "Le jury comprend au moins : a) Un fonctionnaire territorial de catégorie A ou B et un fonctionnaire désigné dans les conditions prévues à l'article 14 du décret du 20 novembre 1985 susvisé ; b) Deux personnalités qualifiées ; c) Deux élus locaux. L'arrêté de nomination des membre"
+      },
+      {
+        "key": "c05",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport à partir des éléments d'un dossier portant sur l'animation sociale, socio-éducative ou culturelle dans les collectivités territoriales assorti de propositions opérationnelles (durée : 3 heures ; coefficient 1). L'épreuve oral"
+      },
+      {
+        "key": "c06",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'une note, à l'aide des éléments d'un dossier portant sur la spécialité au titre de laquelle le candidat concourt (durée : trois heures ; coefficient 1). L'épreuve orale consiste en un entretien ayant pour point de départ un exposé du ca"
+      },
+      {
+        "key": "c07",
+        "title": "Article 1",
+        "snippet": "L'examen professionnel d'accès au grade d'animateur principal territorial de 1re classe, prévu par le III de l'article 16 du décret du 20 mai 2011 susvisé, comporte une épreuve écrite et une épreuve orale."
+      },
+      {
+        "key": "c08",
+        "title": "Article 2",
+        "snippet": "L'épreuve d'admissibilité consiste en la rédaction d'un rapport à partir des éléments d'un dossier portant sur l'animation sociale, socio-éducative ou culturelle dans les collectivités territoriales, assorti de propositions opérationnelles (durée : trois heures ; coefficient 1). "
+      },
+      {
+        "key": "c09",
+        "title": "Article 1",
+        "snippet": "L'examen professionnel d'accès au grade d'animateur-chef mentionné à l'article 19 du décret du 31 mai 1997 susvisé comporte deux épreuves professionnelles : 1° Une épreuve écrite consistant en la rédaction d'une note à partir d'un dossier relatif au secteur de l'animation dans le"
+      },
+      {
+        "key": "c10",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport, assorti de propositions opérationnelles, à partir des éléments d'un dossier portant sur l'organisation des activités physiques et sportives dans les collectivités territoriales (durée : 3 heures ; coefficient 1). L'épreuve o"
+      },
+      {
+        "key": "c11",
+        "title": "Article Annexe V",
+        "snippet": "RÉFÉRENTIEL DE CERTIFICATION Modalités de certification du DC 1-Intervention professionnelle en travail social Bloc de compétences n° 1 : Intervention sociale individuelle Objectifs de l'épreuve Intitulé de l'épreuve Définition de l'épreuve Organisation et cadre de l'épreuve Duré"
+      },
+      {
+        "key": "c12",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport à partir des éléments d'un dossier portant sur l'animation sociale, socio-éducative ou culturelle dans les collectivités territoriales assorti de propositions opérationnelles (durée : trois heures ; coefficient 1). L'épreuve "
+      },
+      {
+        "key": "c13",
+        "title": "Article 4",
+        "snippet": "Le concours interne pour le recrutement en qualité d'adjoint territorial du patrimoine principal de 2e classe comprend une épreuve d'admissibilité et deux épreuves d'admission. A.-Epreuve d'admissibilité : L'épreuve consiste en la résolution écrite d'un cas pratique à partir des "
+      },
+      {
+        "key": "c14",
+        "title": "Article 6",
+        "snippet": "Il est attribué à chaque épreuve une note de 0 à 20. Chaque note est multipliée par le coefficient correspondant. Ne peuvent participer à l'épreuve orale que les candidats ayant obtenu une note au moins égale à 5 sur 20 à l'épreuve écrite. Toute note inférieure à 5 sur 20 à l'épr"
+      },
+      {
+        "key": "c15",
+        "title": "Article 11",
+        "snippet": "L'examen professionnel de rattrapage comporte une épreuve écrite et une épreuve orale notées de 0 à 20. Le directeur de l'école fixe les conditions d'organisation de cet examen. Il désigne également les membres du jury chargés d'apprécier les épreuves. Ces épreuves consistent : 1"
+      },
+      {
+        "key": "c16",
+        "title": "Article 1",
+        "snippet": "L'examen professionnel d'accès au grade d'animateur principal territorial de 2e classe, prévu au II de l'article 16 du décret du 20 mai 2011 susvisé, comporte une épreuve écrite et une épreuve orale."
+      },
+      {
+        "key": "c17",
+        "title": "Article 6",
+        "snippet": "Il est attribué à chaque épreuve une note de 0 à 20. Chaque note est multipliée par le coefficient correspondant. Ne peuvent participer à l'épreuve orale que les candidats ayant obtenu une note au moins égale à 5 sur 20 à l'épreuve écrite. Toute note inférieure à 5 sur 20 à l'épr"
+      },
+      {
+        "key": "c18",
+        "title": "Article 1",
+        "snippet": "Les examens professionnels pour le recrutement en qualité d'adjoint territorial d'animation de 1re classe prévus aux articles 10 et 21 du décret du 22 décembre 2006 susvisé comportent les épreuves suivantes : 1° Une épreuve écrite à caractère professionnel portant sur les mission"
+      },
+      {
+        "key": "c19",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport à partir des éléments d'un dossier portant sur les missions, compétences et moyens d'action des collectivités territoriales, assorti de propositions opérationnelles (durée : trois heures ; coefficient 1). L'épreuve orale cons"
+      }
+    ]
+  },
+  {
+    "question_id": "s09-authored",
+    "question": "En quoi consistent l'écrit et l'oral d'un examen professionnel dans l'animation, et combien de temps durent-ils ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 1",
+        "snippet": "L'examen professionnel d'accès au grade d'animateur principal territorial de 2e classe, prévu au II de l'article 16 du décret du 20 mai 2011 susvisé, comporte une épreuve écrite et une épreuve orale."
+      },
+      {
+        "key": "c02",
+        "title": "Article LEGIARTI000051883669",
+        "snippet": "Annexe II c - RÈGLEMENT D'EXAMEN BTS Management commercial opérationnel Voie scolaire dans un établissement public ou privé sous contrat, CFA ou section d'apprentissage habilité. Formation professionnelle continue dans les établissements publics habilités Formation professionnell"
+      },
+      {
+        "key": "c03",
+        "title": "Article LEGIARTI000049288365",
+        "snippet": "Ce dossier est mis à la disposition de la commission d'évaluation, qui doit disposer du temps nécessaire pour en prendre connaissance avant le début de l'interrogation, selon les modalités fixées par les autorités académiques. En l'absence de dossier, le candidat ne peut pas être"
+      },
+      {
+        "key": "c04",
+        "title": "Article 2",
+        "snippet": "L'examen professionnel est une épreuve orale d'une durée de trente minutes environ comportant un exposé du candidat suivi d'un entretien avec le jury. Dans son exposé, le candidat présente les études et réalisations techniques qu'il a été amené à effectuer au cours de sa carrière"
+      },
+      {
+        "key": "c05",
+        "title": "Article LEGIARTI000050676414",
+        "snippet": "Ce document constitue le support de l'entretien qui permet de vérifier l'acquisition des compétences constitutives du bloc de compétences commun 3 (BC3). L'entretien d'une durée de trente minutes au maximum comprend : - une présentation orale par le candidat à l'aide du support n"
+      },
+      {
+        "key": "c06",
+        "title": "Article ANNEXE IV",
+        "snippet": "-l'aptitude à mobiliser ses acquis en connaissances des publics et caractéristiques de l'intervention en vie quotidienne -la capacité à concevoir et réaliser une démarche de projet en réponse aux besoins d'un public Contenu de l'épreuve L'épreuve consiste en une soutenance orale "
+      },
+      {
+        "key": "c07",
+        "title": "Article 11",
+        "snippet": "L'examen professionnel de rattrapage comporte une épreuve écrite et une épreuve orale notées de 0 à 20. Le directeur de l'école fixe les conditions d'organisation de cet examen. Il désigne également les membres du jury chargés d'apprécier les épreuves. Ces épreuves consistent : 1"
+      },
+      {
+        "key": "c08",
+        "title": "Article 1",
+        "snippet": "L'examen professionnel d'accès au grade d'animateur-chef mentionné à l'article 19 du décret du 31 mai 1997 susvisé comporte deux épreuves professionnelles : 1° Une épreuve écrite consistant en la rédaction d'une note à partir d'un dossier relatif au secteur de l'animation dans le"
+      },
+      {
+        "key": "c09",
+        "title": "Article 3",
+        "snippet": "Le concours interne de recrutement de délégués au permis de conduire et à la sécurité routière prévu à l'article 5 du décret du 30 octobre 1997 modifié susvisé, comporte une épreuve écrite d'admissibilité et deux épreuves orales d'admission. 1° L'épreuve écrite d'admissibilité co"
+      },
+      {
+        "key": "c10",
+        "title": "Article 1",
+        "snippet": "Les examens spéciaux prévus aux articles 9 et 10 de l'arrêté du 15 juillet 1981 susvisé comportent les épreuves suivantes : A - Pour l'intégration dans l'emploi de rédacteur. Epreuve écrite : Composition sur un sujet d'ordre général permettant d'apprécier la culture et les connai"
+      },
+      {
+        "key": "c11",
+        "title": "Article LEGIARTI000050676413",
+        "snippet": "- il adapte le déroulement de l'activité au regard des publics notamment ceux en situation de handicap et des aléas rencontrés Le candidat fait un bilan de sa séance d'activités en vue d'améliorer ses prochaines séances : - il utilise des outils d'évaluation choisis en fonction d"
+      },
+      {
+        "key": "c12",
+        "title": "Article ANNEXE II",
+        "snippet": "Elle prend appui sur les investigations et les analyses effectuées au préalable par le candidat au cours de travaux pratiques relatifs à un système technique ou à un processus. La séquence de formation s'inscrit dans les programmes de lycée professionnel dans la discipline consid"
+      },
+      {
+        "key": "c13",
+        "title": "Article LEGIARTI000042085010",
+        "snippet": "La seconde partie vise à évaluer la compétence du candidat à interagir en langue vivante étrangère. A la suite de l'exposé du candidat, l'évaluateur amorce avec ce dernier un échange oral d'une durée maximale de 5 minutes. Déroulement Cet échange oral commence par prendre appui s"
+      },
+      {
+        "key": "c14",
+        "title": "Article Annexe II",
+        "snippet": "- et de l'entretien, chacune des parties ayant le même coefficient. Les appréciations et propositions de note sont portées sur la fiche individuelle de notation. La commission d'évaluation est composée d'un enseignant de spécialité et d'un professionnel de l'animation. ÉPREUVE E3"
+      },
+      {
+        "key": "c15",
+        "title": "Article 2",
+        "snippet": "L'épreuve écrite consiste en la rédaction d'un rapport à partir des éléments d'un dossier portant sur l'animation sociale, socio-éducative ou culturelle dans les collectivités territoriales assorti de propositions opérationnelles (durée : 3 heures ; coefficient 1). L'épreuve oral"
+      },
+      {
+        "key": "c16",
+        "title": "Article LEGIARTI000051459441",
+        "snippet": "Il anime ensuite, en organisme de formation, la séance préparée, en sécurité, pendant trente minutes minimum à quarante-cinq minutes maximum. Le public de huit pratiquants ne peut pas être constitué de stagiaires en formation conduisant à une certification professionnelle relevan"
+      },
+      {
+        "key": "c17",
+        "title": "Article LEGIARTI000050676426",
+        "snippet": "ANNEXE II SITUATION D'ÉVALUATION CERTIFICATIVE DES BLOCS DE COMPÉTENCES DU BREVET PROFESSIONNEL DE LA JEUNESSE, DE L'ÉDUCATION POPULAIRE ET DU SPORT SPÉCIALITÉ « ANIMATEUR » MENTION « ANIMATION SOCIO-ÉDUCATIVE OU CULTURELLE » Situation d'évaluation certificative du bloc de compét"
+      },
+      {
+        "key": "c18",
+        "title": "Article 1",
+        "snippet": "Les examens professionnels pour le recrutement en qualité d'adjoint territorial d'animation de 1re classe prévus aux articles 10 et 21 du décret du 22 décembre 2006 susvisé comportent les épreuves suivantes : 1° Une épreuve écrite à caractère professionnel portant sur les mission"
+      },
+      {
+        "key": "c19",
+        "title": "Article 3",
+        "snippet": "Tous les candidats passent l'oral de présentation suivi de questions pour une durée globale de dix minutes, avec répartition indicative de 5 minutes de présentation et 5 minutes de questions, devant une commission d'évaluation. Pour la présentation orale, le candidat peut, pour a"
+      },
+      {
+        "key": "c20",
+        "title": "Article Annexe II b",
+        "snippet": "RÈGLEMENT D'EXAMEN DE LA SPÉCIALITÉ SERVICES AUX PERSONNES ET ANIMATION DANS LES TERRITOIRES DU BACCALAURÉAT PROFESSIONNEL BACCALAUREAT PROFESSIONNEL Spécialité : \" services aux personnes et animation dans les territoires \" Candidats de la voie scolaire dans un établissement publ"
+      },
+      {
+        "key": "c21",
+        "title": "Article 3",
+        "snippet": "L'examen comporte des épreuves théoriques (écrites et orales) et des épreuves pratiques. I. - Epreuves théoriques Les épreuves écrites précèdent les épreuves orales. 1. Epreuves écrites : Les épreuves écrites sont anonymes. Elles consistent en : a) Une composition sur une questio"
+      },
+      {
+        "key": "c22",
+        "title": "Article Annexe V",
+        "snippet": "-niveau attendu en référence à l'échelle de niveaux du CECRL : A2 ; -durée : une heure, sans préparation ; partie 1 : dix minutes maximum ; partie 2 et partie 3 : 25 minutes maximum chacune. Partie 1 : compréhension de l'oral La première partie vise à évaluer les compétences de c"
+      }
+    ]
+  },
+  {
+    "question_id": "s10-codex",
+    "question": "Si un adjoint d'enseignement n'est pas d'accord avec son évaluation finale, quels délais a-t-il pour demander qu'elle soit revue ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 3",
+        "snippet": "I. ― Les fonctionnaires appartenant au corps des adjoints administratifs d'administration centrale et ceux appartenant au corps des adjoints administratifs des services déconcentrés du ministère de l'éducation nationale détachés dans l'autre de ces deux corps sont intégrés dans l"
+      },
+      {
+        "key": "c02",
+        "title": "Article 9",
+        "snippet": "Les personnels de direction peuvent saisir les autorités mentionnées au troisième alinéa de l'article 6 d'une demande de révision du compte rendu de l'entretien professionnel. Ce recours hiérarchique est exercé dans un délai de quinze jours francs suivant la notification à l'agen"
+      },
+      {
+        "key": "c03",
+        "title": "Article 11",
+        "snippet": "La réalisation du projet financé, en conformité avec la demande et la décision attributive d'aide, constitue une des conditions de versement et de maintien des aides accordées. Il appartient à l'autorité de gestion, en particulier lors du dépôt des demandes de paiement des acompt"
+      },
+      {
+        "key": "c04",
+        "title": "Article 11",
+        "snippet": "- pour chaque partie du marché entreprise, après accord du maître d'ouvrage, une fraction de la quotité correspondante, égale au pourcentage d'exécution des prestations de la partie en cause. 11.5. Remise de la demande de paiement : La remise d'une demande de paiement intervient "
+      },
+      {
+        "key": "c05",
+        "title": "Article 3",
+        "snippet": "L'appréciation générale, le rapport d'inspection pédagogique et le compte rendu d'évaluation professionnelle sont notifiés au maître délégué, qui les signe pour attester qu'il en a pris connaissance, et le cas échéant les complète de ses observations, puis les retourne au recteur"
+      },
+      {
+        "key": "c06",
+        "title": "Article D588",
+        "snippet": "La commission se réunit en séances ordinaires au moins une fois tous les deux mois sur convocation de son président comportant l'ordre du jour de la séance fixé par le président Une question est inscrite de droit à l'ordre du jour si sept membres de la commission au moins en font"
+      },
+      {
+        "key": "c07",
+        "title": "Article 5-4",
+        "snippet": "L'adjoint d'enseignement peut saisir le recteur d'académie d'une demande de révision de l'appréciation finale de la valeur professionnelle dans un délai de 30 jours francs suivant sa notification. Le recteur d'académie dispose d'un délai de 30 jours francs pour réviser l'apprécia"
+      },
+      {
+        "key": "c08",
+        "title": "Article 23-6",
+        "snippet": "L'enseignant peut saisir le recteur d'académie d'une demande de révision de l'appréciation finale de la valeur professionnelle dans un délai de 30 jours francs suivant sa notification. Le recteur d'académie dispose d'un délai de 30 jours francs pour réviser l'appréciation finale "
+      },
+      {
+        "key": "c09",
+        "title": "Article 20-7",
+        "snippet": "Le professeur de lycée professionnel peut saisir l'autorité compétente d'une demande de révision de l'appréciation finale de la valeur professionnelle dans un délai de 30 jours francs suivant sa notification. L'autorité compétente dispose d'un délai de 30 jours francs pour révise"
+      },
+      {
+        "key": "c10",
+        "title": "Article 4",
+        "snippet": "Il est constitué un jury académique de cinq à huit membres nommés par le recteur. Le recteur ou son représentant préside le jury. A la demande de son président, le jury peut se constituer en groupes d'examinateurs en fonction des effectifs. Le vice-président et les autres membres"
+      },
+      {
+        "key": "c11",
+        "title": "Article 5-1",
+        "snippet": "L'adjoint d'enseignement bénéficie de deux rendez-vous de carrière dont l'objectif est d'apprécier la valeur professionnelle de l'intéressé. Ils ont lieu lorsque au 31 août de l'année scolaire en cours : Pour le premier rendez-vous, l'adjoint d'enseignement est dans la deuxième a"
+      },
+      {
+        "key": "c12",
+        "title": "Article LEGIARTI000043084305",
+        "snippet": "C10.4 Prévenir les risques professionnels. Les principes généraux de prévention sont appliqués dès la conception : - à l'ouvrage ; - à l'environnement ; - aux modes opératoires ; - aux équipements ; - aux matériaux. Des mesures de prévention sont proposées au moyen d'une synthèse"
+      },
+      {
+        "key": "c13",
+        "title": "Article 10-6",
+        "snippet": "L'adjoint d'enseignement peut saisir l'autorité académique d'une demande de révision de l'appréciation finale de la valeur professionnelle dans un délai de quarante-cinq jours francs suivant sa notification. L'autorité académique dispose d'un délai de quinze jours francs pour rév"
+      },
+      {
+        "key": "c14",
+        "title": "Article LEGIARTI000043083292",
+        "snippet": "ÉPREUVE U51 Études descriptive et économique C9 Participer à un travail collaboratif C9-1 Échanger avec les parties concernées C9-2 Suivre un protocole de collaboration BIM C10 Définir les ouvrages C10-1 Choisir des solutions techniques C10-2 Délimiter l'action des entreprises C1"
+      },
+      {
+        "key": "c15",
+        "title": "Article 12",
+        "snippet": "Les dispositions du présent décret prennent effet au 1er janvier 2009."
+      },
+      {
+        "key": "c16",
+        "title": "Article 9-3-4",
+        "snippet": "Le conseiller principal d'éducation peut saisir le chef du service d'affectation d'une demande de révision de l'appréciation finale de la valeur professionnelle dans un délai de quarante-cinq jours francs suivant sa notification. Le chef du service d'affectation dispose d'un déla"
+      },
+      {
+        "key": "c17",
+        "title": "Article L123-7-1",
+        "snippet": "Les établissements publics à caractère scientifique, culturel et professionnel contractent librement avec les institutions étrangères ou internationales, universitaires ou non. Tout projet d'accord est transmis au ministre chargé de l'enseignement supérieur et au ministre des aff"
+      },
+      {
+        "key": "c18",
+        "title": "Article 10-2-5",
+        "snippet": "Le conseiller principal d'éducation peut saisir l'autorité compétente d'une demande de révision de l'appréciation finale de la valeur professionnelle dans un délai de 30 jours francs suivant sa notification. L'autorité compétente dispose d'un délai de 30 jours francs pour réviser"
+      },
+      {
+        "key": "c19",
+        "title": "Article 6",
+        "snippet": "I.-La durée du temps passé dans chacun des échelons du corps des adjoints d'enseignement est fixée, sous réserve des dispositions du II, ainsi qu'il suit : ÉCHELON DURÉE 11e échelon - 10e échelon 4 ans 6 mois 9e échelon 3 ans 6 mois 8e échelon 3 ans 6 mois 7e échelon 3 ans 6e éch"
+      }
+    ]
+  },
+  {
+    "question_id": "s10-authored",
+    "question": "Comment contester une évaluation professionnelle jugée injuste dans la fonction publique, et sous quels délais ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article R912-143",
+        "snippet": "Dans les cinq jours de l'affichage des résultats prévu à l'article R. 912-142, les opérations réalisées en vue de l'élection du conseil d'un comité régional de la conchyliculture peuvent être contestées devant le préfet de département dans le ressort duquel est située la circonsc"
+      },
+      {
+        "key": "c02",
+        "title": "Article LEGIARTI000042687720",
+        "snippet": "V. - Notification du compte rendu de l'entretien professionnel Observations de l'agent évalué Visa de l'autorité investie du pouvoir de nomination ou son représentant Nom, Prénom : Fonction exercée : Observations éventuelles : Date : Visa : Signature de l'agent évalué J'atteste a"
+      },
+      {
+        "key": "c03",
+        "title": "Article 5",
+        "snippet": "L'autorité hiérarchique peut être saisie par le fonctionnaire d'une demande de révision du compte rendu de l'entretien professionnel. Ce recours hiérarchique est exercé dans un délai de quinze jours francs suivant la notification à l'agent du compte rendu d'entretien. L'autorité "
+      },
+      {
+        "key": "c04",
+        "title": "Article 8",
+        "snippet": "Le fonctionnaire peut saisir l'autorité hiérarchique d'une demande de révision du compte rendu dans un délai de quinze jours francs à compter de la date de notification de ce compte rendu. L'autorité hiérarchique dispose alors d'un délai de quinze jours francs pour notifier sa ré"
+      },
+      {
+        "key": "c05",
+        "title": "Article R211-234",
+        "snippet": "Lorsque la recevabilité d'une des listes mentionnées à l'article R. 211-233 n'est pas reconnue par l'administration, la procédure décrite ci-dessus est mise en œuvre dans un délai de trois jours à compter de la notification du jugement du tribunal administratif lorsque celui-ci e"
+      },
+      {
+        "key": "c06",
+        "title": "Article R211-218",
+        "snippet": "Lorsque la recevabilité d'une des listes n'est pas reconnue par l'autorité territoriale, la procédure décrite à l'article R. 211-217 est mise en œuvre dans un délai de trois jours francs à compter de la notification du jugement du tribunal administratif lorsque celui-ci est saisi"
+      },
+      {
+        "key": "c07",
+        "title": "Article 7",
+        "snippet": "L'agent dispose d'un délai de quinze jours francs à compter de la date de notification du compte rendu de l'entretien pour former un recours hiérarchique. L'autorité hiérarchique notifie sa réponse dans le délai de quinze jours francs à compter de la date de réception du recours."
+      },
+      {
+        "key": "c08",
+        "title": "Article L2315-86",
+        "snippet": "Sauf dans le cas prévu à l'article L. 1233-35-1, l'employeur saisit le juge judiciaire dans un délai fixé par décret en Conseil d'Etat de : 1° La délibération du comité social et économique décidant le recours à l'expertise s'il entend contester la nécessité de l'expertise ; 2° L"
+      },
+      {
+        "key": "c09",
+        "title": "Article 14",
+        "snippet": "Un recours individuel sur l'évaluation peut être présenté par les personnels de direction ou les directeurs des soins auprès du directeur général du Centre national de gestion dans un délai de quinze jours à compter de la notification à l'agent du compte rendu de l'entretien. La "
+      },
+      {
+        "key": "c10",
+        "title": "Article R211-355",
+        "snippet": "Lorsque la recevabilité d'une des listes de candidats n'est pas reconnue par l'autorité territoriale, la procédure fixée par l'article R. 211-354 est mise en œuvre dans un délai de trois jours francs à compter de la notification du jugement du tribunal administratif lorsque celui"
+      },
+      {
+        "key": "c11",
+        "title": "Article 6",
+        "snippet": "Les contestations relatives aux résultats des opérations électorales sont examinées et jugées dans les formes et délais prévus par le code électoral en ce qui concerne les élections municipales."
+      },
+      {
+        "key": "c12",
+        "title": "Article LEGIARTI000027002718",
+        "snippet": "L'exercice de ce recours hiérarchique est un préalable obligatoire à la saisine de la commission administrative paritaire (CAP) ou commission consultative paritaire (CCP) compétente, dans un délai d'un mois à compter de la date de notification de la réponse de l'autorité hiérarch"
+      },
+      {
+        "key": "c13",
+        "title": "Article R912-100",
+        "snippet": "Dans les cinq jours de l'affichage des résultats des élections aux conseils des comités départementaux, interdépartementaux et régionaux des pêches maritimes et des élevages marins prévu à l'article R. 912-95, les opérations électorales peuvent être contestées devant le préfet du"
+      },
+      {
+        "key": "c14",
+        "title": "Article 6",
+        "snippet": "L'agent peut saisir l'autorité hiérarchique d'une demande de révision du compte rendu dans un délai de quinze jours francs à compter de la date de notification. L'autorité hiérarchique doit notifier sa réponse dans un délai de quinze jours francs à compter de la date de réception"
+      },
+      {
+        "key": "c15",
+        "title": "Article R211-202",
+        "snippet": "Lorsque la recevabilité d'une des listes n'est pas reconnue par l'administration, la procédure décrite à l'article R. 211-201 est mise en œuvre dans un délai de trois jours à compter de la notification du jugement du tribunal administratif lorsque celui-ci est saisi d'une contest"
+      },
+      {
+        "key": "c16",
+        "title": "Article 4-1",
+        "snippet": "L'autorité hiérarchique peut être saisie par l'agent d'une demande de révision du compte rendu de l'entretien professionnel. Ce recours hiérarchique est exercé dans un délai de quinze jours francs à compter de la date de notification à l'agent du compte rendu de l'entretien. L'au"
+      },
+      {
+        "key": "c17",
+        "title": "Article 7",
+        "snippet": "L'autorité investie du pouvoir de nomination peut être saisie par l'agent d'une demande de révision du compte rendu de l'entretien professionnel. Ce recours est exercé dans un délai de quinze jours francs à compter de la date de notification à l'agent du compte rendu de l'entreti"
+      },
+      {
+        "key": "c18",
+        "title": "Article 6",
+        "snippet": "L'autorité hiérarchique peut être saisie par le fonctionnaire d'une demande de révision du compte rendu de l'entretien professionnel. Ce recours hiérarchique est exercé dans un délai de quinze jours francs à compter de la date de notification à l'agent du compte rendu de l'entret"
+      },
+      {
+        "key": "c19",
+        "title": "Article R211-480",
+        "snippet": "Lorsque la recevabilité d'une des candidatures n'est pas reconnue par le directeur général du centre, la procédure décrite aux articles R. 211-478 et R. 211-479 est mise en œuvre dans un délai de trois jours à compter de la notification du jugement du tribunal administratif lorsq"
+      }
+    ]
+  },
+  {
+    "question_id": "s11-codex",
+    "question": "Quelles opérations sont prévues pour fermer définitivement un laboratoire contenant des matières nucléaires et enlever les risques radioactifs des locaux ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 5",
+        "snippet": "Les opérations de mise à l'arrêt définitif et de démantèlement devront conduire à l'évacuation des matériaux et des équipements de l'installation dont la radioactivité est significative. Pour les parties restantes, la radioactivité fixée des locaux et des équipements de l'install"
+      },
+      {
+        "key": "c02",
+        "title": "Article 3",
+        "snippet": "Les colis contenant des matières radioactives faisant l'objet d'un transport sur la voie publique font l'objet de contrôles d'absence de contamination et de contrôles de débit de dose à leur réception sur le site et avant leur expédition hors du site. S'agissant des transferts en"
+      },
+      {
+        "key": "c03",
+        "title": "Article 1",
+        "snippet": "Les dispositions prévues dans les documents énumérés ci-après : - la note de synthèse définissant l'état final à atteindre pour l'installation et les étapes envisagées ; - le dossier préliminaire au déclassement (rapport de sûreté) applicable aux opérations de mise à l'arrêt défi"
+      },
+      {
+        "key": "c04",
+        "title": "Article 3",
+        "snippet": "Le Commissariat à l'énergie atomique respectera les prescriptions techniques énoncées ci-après : 3.1. Assurance de la qualité En application de l'arrêté du 10 août 1984 relatif à la qualité de la conception et de l'exploitation des installations nucléaires de base, l'exploitant v"
+      },
+      {
+        "key": "c05",
+        "title": "Article 4",
+        "snippet": "L'exploitant s'efforce de réduire le volume des déchets produits. Les déchets seront triés par nature et par catégorie de nuisance chimique ou radioactive en vue de faciliter leur traitement, leur valorisation par réemploi ou recyclage, leur conditionnement et leur stockage ultér"
+      },
+      {
+        "key": "c06",
+        "title": "Article 3",
+        "snippet": "- s'efforcer de réduire le volume des déchets produits dans son installation et optimisera leur gestion en veillant à faciliter leur valorisation par réemploi ou recyclage ou à les traiter chaque fois que cela sera possible ; - trier par nature et par catégories de nuisance chimi"
+      },
+      {
+        "key": "c07",
+        "title": "Article 3",
+        "snippet": "Le personnel affecté aux opérations de mise à l'arrêt définitif et de démantèlement possède les aptitudes professionnelles et la formation particulière requises en matière de sûreté nucléaire et de radioprotection. III-2. Les dispositions relatives aux manutentions. Les opération"
+      },
+      {
+        "key": "c08",
+        "title": "Article 3",
+        "snippet": "Le personnel affecté aux opérations de mise à l'arrêt définitif et de démantèlement possède les aptitudes professionnelles et la formation particulière requises en matière de sûreté nucléaire et de radioprotection. III-2. Les dispositions relatives aux manutentions. Les opération"
+      },
+      {
+        "key": "c09",
+        "title": "Article LEGIARTI000050090476",
+        "snippet": "Lorsqu'un appareil électrique émettant des rayonnements X n'est plus en situation de fonctionnement, il est soit cédé à un tiers dûment enregistré ou autorisé, soit rendu définitivement hors d'usage avant la valorisation ou l'élimination de ses différents composants dans des fili"
+      },
+      {
+        "key": "c10",
+        "title": "Article 4",
+        "snippet": "L'exploitant assume la responsabilité de l'ensemble des déchets radioactifs et non radioactifs produits pendant la phase d'exploitation. Il s'efforce de réduire le volume, de limiter les quantités et l'activité des déchets solides de procédés produits dans son installation. L'exp"
+      },
+      {
+        "key": "c11",
+        "title": "Article 3",
+        "snippet": "I. ― Le confinement des substances radioactives ou toxiques. Le confinement des substances radioactives ou toxiques est conçu et réalisé de façon que tout événement conduisant à leur dissémination involontaire à l'intérieur de l'installation ou dans son environnement soit prévenu"
+      },
+      {
+        "key": "c12",
+        "title": "Article 3",
+        "snippet": "I. ― Le confinement des substances radioactives ou toxiques. Le confinement des substances radioactives ou toxiques est conçu et réalisé de façon à prévenir tout événement conduisant à leur dissémination involontaire à l'intérieur de l'installation ou dans son environnement. Ce c"
+      },
+      {
+        "key": "c13",
+        "title": "Article 2",
+        "snippet": "I. ― Les étapes du démantèlement. Les opérations autorisées par le présent décret sont divisées en six étapes, dont certaines peuvent se dérouler concomitamment : ― étape 1 : dépose de la première barrière de confinement, à l'intérieur de laquelle était mise en œuvre la matière n"
+      },
+      {
+        "key": "c14",
+        "title": "Article 5",
+        "snippet": "I. ― Le confinement des substances dangereuses est conçu et réalisé de façon à prévenir tout événement conduisant à leur dissémination involontaire à l'intérieur de l'installation ou dans son environnement ; il tient compte de la forme physico-chimique de ces substances. Dans les"
+      },
+      {
+        "key": "c15",
+        "title": "Article 3",
+        "snippet": "Les alarmes importantes pour la sûreté sont reportées dans des locaux où une permanence est assurée. Dans l'installation et en des lieux connus des services d'intervention, des informations détaillées permettent de localiser l'événement détecté et d'agir efficacement. Le personne"
+      },
+      {
+        "key": "c16",
+        "title": "Article 4",
+        "snippet": "Les opérations de mise à l'arrêt définitif devront conduire à l'évacuation des matériaux et des équipements de l'installation dont la radioactivité est significative et, pour ce qui concerne les parties restantes, à une contamination en dessous du seuil nécessitant des précaution"
+      }
+    ]
+  },
+  {
+    "question_id": "s11-authored",
+    "question": "Quelles opérations pour fermer définitivement un laboratoire contenant des matières nucléaires et supprimer les risques radioactifs ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 3",
+        "snippet": "Le Commissariat à l'énergie atomique respectera les prescriptions techniques énoncées ci-après : 3.1. Assurance de la qualité En application de l'arrêté du 10 août 1984 relatif à la qualité de la conception et de l'exploitation des installations nucléaires de base, l'exploitant v"
+      },
+      {
+        "key": "c02",
+        "title": "Article 3",
+        "snippet": "L'exploitant respectera les prescriptions techniques générales énoncées ci-après : 3.1. Obligations préalables aux opérations de mise à l'arrêt définitif et de démantèlement Préalablement à l'ouverture du chantier, l'exploitant : - définira les périmètres d'intervention, les circ"
+      },
+      {
+        "key": "c03",
+        "title": "Article 3",
+        "snippet": "L'exploitant respectera les prescriptions techniques générales énumérées ci-après : 3.1. Obligations préalables aux opérations de mise à l'arrêt définitif et de démantèlement Préalablement à l'ouverture d'un chantier relatif aux opérations de mise à l'arrêt définitif et de démant"
+      },
+      {
+        "key": "c04",
+        "title": "Article 3",
+        "snippet": "- s'efforcer de réduire le volume des déchets produits dans son installation et optimisera leur gestion en veillant à faciliter leur valorisation par réemploi ou recyclage ou à les traiter chaque fois que cela sera possible ; - trier par nature et par catégories de nuisance chimi"
+      },
+      {
+        "key": "c05",
+        "title": "Article 4",
+        "snippet": "Les opérations de mise à l'arrêt définitif devront conduire à l'évacuation des matériaux et des équipements de l'installation dont la radioactivité est significative et, pour ce qui concerne les parties restantes, à une contamination en dessous du seuil nécessitant des précaution"
+      },
+      {
+        "key": "c06",
+        "title": "Article 3",
+        "snippet": "Sans préjudice de l'application du code de la santé publique, les déchets résultant des opérations susmentionnées sont triés par nature et par catégorie de nuisance chimique ou radioactive en vue de faciliter leur traitement, leur valorisation par réemploi ou recyclage, leur cond"
+      },
+      {
+        "key": "c07",
+        "title": "Article 3",
+        "snippet": "L'exploitant s'efforce de réduire le volume des déchets produits lors des opérations de mise à l'arrêt définitif et de démantèlement et optimise leur gestion en veillant à les valoriser ou à les traiter chaque fois que cela est possible, le stockage définitif devant être réservé "
+      },
+      {
+        "key": "c08",
+        "title": "Article 1",
+        "snippet": "Les dispositions prévues dans les documents énumérés ci-après : - la note de synthèse définissant l'état final à atteindre pour l'installation et les étapes envisagées ; - le dossier préliminaire au déclassement (rapport de sûreté) applicable aux opérations de mise à l'arrêt défi"
+      },
+      {
+        "key": "c09",
+        "title": "Article 3",
+        "snippet": "Le personnel affecté aux opérations de mise à l'arrêt définitif et de démantèlement possède les aptitudes professionnelles et la formation particulière requises en matière de sûreté nucléaire et de radioprotection. III-2. Les dispositions relatives aux manutentions. Les opération"
+      },
+      {
+        "key": "c10",
+        "title": "Article 5",
+        "snippet": "Les opérations de mise à l'arrêt définitif et de démantèlement devront conduire à l'évacuation des matériaux et des équipements de l'installation dont la radioactivité est significative. Pour les parties restantes, la radioactivité fixée des locaux et des équipements de l'install"
+      },
+      {
+        "key": "c11",
+        "title": "Article 3",
+        "snippet": "Le personnel affecté aux opérations de mise à l'arrêt définitif et de démantèlement possède les aptitudes professionnelles et la formation particulière requises en matière de sûreté nucléaire et de radioprotection. III-2. Les dispositions relatives aux manutentions. Les opération"
+      },
+      {
+        "key": "c12",
+        "title": "Article 4",
+        "snippet": "L'exploitant assume la responsabilité de l'ensemble des déchets radioactifs et non radioactifs produits pendant la phase d'exploitation. Il s'efforce de réduire le volume, de limiter les quantités et l'activité des déchets solides de procédés produits dans son installation. L'exp"
+      },
+      {
+        "key": "c13",
+        "title": "Article 3",
+        "snippet": "Les colis contenant des matières radioactives faisant l'objet d'un transport sur la voie publique font l'objet de contrôles d'absence de contamination et de contrôles de débit de dose à leur réception sur le site et avant leur expédition hors du site. S'agissant des transferts en"
+      },
+      {
+        "key": "c14",
+        "title": "Article 2",
+        "snippet": "I. ― Les opérations de démantèlement. Les opérations de démantèlement sont des opérations : 1° De démantèlement des équipements électromécaniques ; 2° D'assainissement des structures ; 3° De déconstruction de structures et de génie civil. II. ― Les points de rendez-vous. Les opér"
+      },
+      {
+        "key": "c15",
+        "title": "Article 3",
+        "snippet": "I. ― Le confinement des substances radioactives ou toxiques. Le confinement des substances radioactives ou toxiques est conçu et réalisé de façon à prévenir tout événement conduisant à leur dissémination involontaire à l'intérieur de l'installation ou dans son environnement. Ce c"
+      },
+      {
+        "key": "c16",
+        "title": "Article 3",
+        "snippet": "L'exploitant respecte les prescriptions techniques générales énumérées ci-après : 3.1. Obligations préalables aux opérations de mise à l'arrêt définitif et de démantèlement Préalablement à l'ouverture d'un chantier relatif aux opérations de mise à l'arrêt définitif et de démantèl"
+      },
+      {
+        "key": "c17",
+        "title": "Article 3",
+        "snippet": "Les alarmes importantes pour la sûreté sont reportées dans des locaux où une permanence est assurée. Dans l'installation et en des lieux connus des services d'intervention, des informations détaillées permettent de localiser l'événement détecté et d'agir efficacement. Le personne"
+      },
+      {
+        "key": "c18",
+        "title": "Article 3",
+        "snippet": "I. ― Le confinement des substances radioactives ou toxiques. Le confinement des substances radioactives ou toxiques est conçu et réalisé de façon que tout événement conduisant à leur dissémination involontaire à l'intérieur de l'installation ou dans son environnement soit prévenu"
+      }
+    ]
+  },
+  {
+    "question_id": "s12-codex",
+    "question": "Les produits destinés à tuer les rats et les souris dans les cultures peuvent-ils être vendus et utilisés librement ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 8",
+        "snippet": "I. - A titre transitoire, les produits insecticides et acaricides dont l'autorisation de mise sur le marché comporte, à la date d'entrée en vigueur du présent arrêté, l'une des mentions suivantes : « - emploi autorisé durant la floraison, en dehors de la présence d'abeilles » ; «"
+      },
+      {
+        "key": "c02",
+        "title": "Article 11-1",
+        "snippet": "Pour les produits composés en tout ou partie d'organismes génétiquement modifiés destinés à entrer dans la composition des produits utilisés pour le nettoyage des matériaux et objets destinés à entrer en contact avec des denrées, produits et boissons pour l'alimentation de l'homm"
+      },
+      {
+        "key": "c03",
+        "title": "Article 6",
+        "snippet": "Les spécialités contenant les substances énumérées aux articles 1er et 5 du présent arrêté doivent être conformes à la loi modifiée du 2 novembre 1943 susvisée. Les emballages et étiquetages doivent porter les mentions prévues à l'article 7 de la loi du 2 novembre 1943 précitée. "
+      },
+      {
+        "key": "c04",
+        "title": "Article 5",
+        "snippet": "Les appâts ne peuvent être utilisés que dans les lieux ou abris couverts et, en cas de nécessité, à leurs abords immédiats, dans les installations d'élimination de déchets, les dépôts de déchets, produits ou matériaux et sur les berges des cours d'eau pour la lutte contre les esp"
+      },
+      {
+        "key": "c05",
+        "title": "Article 9",
+        "snippet": "Le directeur général de la concurrence, de la consommation et de la répression des fraudes et le directeur général de l'alimentation sont chargés, chacun en ce qui le concerne, de l'exécution du présent arrêté, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c06",
+        "title": "Article 5",
+        "snippet": "Produits rodenticides autorisés pour le grand public. I. – Les usages ou types de conditionnement d'un produit rodenticide destiné à une utilisation par le grand public pour lesquels les conclusions de l'évaluation des risques de ce produit réalisée au titre de l'article 30 du rè"
+      },
+      {
+        "key": "c07",
+        "title": "Article 13",
+        "snippet": "Les produits de nettoyage des matériaux et objets destinés à être mis au contact des denrées alimentaires ne peuvent être détenus en vue de la vente, mis en vente ou vendus que s'ils comportent sur l'emballage ou sur une étiquette : a) Leur dénomination générique ; b) L'indicatio"
+      },
+      {
+        "key": "c08",
+        "title": "Article 4",
+        "snippet": "1. Sans préjudice des dispositions spécifiques éventuellement prévues à l'article 5, les appâts destinés à la lutte contre les souris et les rats (rats noirs et surmulots) ne doivent pas être utilisés en dehors des lieux ou abris couverts. Toutefois, en cas de nécessité et dans l"
+      },
+      {
+        "key": "c09",
+        "title": "Article 2",
+        "snippet": "Sans préjudice des dispositions de l'article R. 5167 du code de la santé publique, les substances énumérées à l'article 1er destinées à la confection d'appâts empoisonnés pour la lutte contre les souris et les rats (rats noirs et surmulots) doivent être additionnées d'une matière"
+      },
+      {
+        "key": "c10",
+        "title": "Article 7",
+        "snippet": "Lorsqu'un emballage conforme à l'article 6 ci-dessus contient des conditionnements qui ne sont pas destinés à être vendus séparément, ceux-ci peuvent ne comporter que les mentions suivantes : - nom et adresse du détenteur de l'homologation ; - symbole et indication de danger le c"
+      },
+      {
+        "key": "c11",
+        "title": "Article 1",
+        "snippet": "Les dispositions prévues par le présent arrêté concernent la lutte contre les souris et les rats (rats noirs et surmulots). Elles s'appliquent sans préjudice des décisions d'homologation relatives, le cas échéant, à la lutte contre les autres vertébrés nuisibles aux cultures et a"
+      },
+      {
+        "key": "c12",
+        "title": "Article 1",
+        "snippet": "Il est interdit de détenir en vue de la vente, de mettre en vente ou de vendre des denrées et des boissons destinées à l'alimentation humaine ou animale contenant une teneur en résidus de produits utilisés en agriculture et en élevage présentant un danger pour la santé humaine, m"
+      },
+      {
+        "key": "c13",
+        "title": "Article 8",
+        "snippet": "Un délai d'un an est accordé au détenteur de l'homologation pour mettre l'étiquetage en conformité avec les dispositions des articles 6 et 7 du présent arrêté à compter de la date de sa publication au Journal officiel."
+      },
+      {
+        "key": "c14",
+        "title": "Article Annexe V",
+        "snippet": "Produits utilisés pour lutter contre les poissons ; ces produits ne comprennent pas les produits destinés au traitement des maladies des poissons. Type de produits 18 : insecticides, acaricides et produits utilisés pour lutter contre les autres arthropodes. Produits utilisés pour"
+      },
+      {
+        "key": "c15",
+        "title": "Article ANNEXE",
+        "snippet": "CONDITIONS DE MISE EN OEUVRE DE LA LUTTE CHIMIQUE MENTIONNÉE À L'ARTICLE 6 I.-Seuls peuvent être utilisés pour la lutte chimique les produits régulièrement autorisés au titre des articles L. 253-1 à L. 253-17 du code rural et de la pêche maritime, contenant de la bromadiolone pou"
+      }
+    ]
+  },
+  {
+    "question_id": "s12-authored",
+    "question": "Peut-on vendre et utiliser librement un poison contre les rats et les souris en agriculture ?",
+    "candidates": [
+      {
+        "key": "c01",
+        "title": "Article 5",
+        "snippet": "Produits rodenticides autorisés pour le grand public. I. – Les usages ou types de conditionnement d'un produit rodenticide destiné à une utilisation par le grand public pour lesquels les conclusions de l'évaluation des risques de ce produit réalisée au titre de l'article 30 du rè"
+      },
+      {
+        "key": "c02",
+        "title": "Article Annexe I",
+        "snippet": "II. - Pour les produits contenant du fluorure de sulfuryle comme substance active associée à une ou plusieurs substances actives listées à l'annexe II du règlement (CE) n° 1451/2007 et qui ne sont pas inscrites au 1er juillet 2011 : les délais pour la mise en conformité des produ"
+      },
+      {
+        "key": "c03",
+        "title": "Article 9",
+        "snippet": "Le directeur général de la concurrence, de la consommation et de la répression des fraudes et le directeur général de l'alimentation sont chargés, chacun en ce qui le concerne, de l'exécution du présent arrêté, qui sera publié au Journal officiel de la République française."
+      },
+      {
+        "key": "c04",
+        "title": "Article 6",
+        "snippet": "L'emploi de produits visés aux articles L. 253-1 du code rural et de la pêche maritime et R. 427-10 du code de l'environnement pour lutter contre le ragondin et le rat musqué ne peut être autorisé qu'à titre exceptionnel et seulement jusqu'au 31 mai 2009. Une telle autorisation n"
+      },
+      {
+        "key": "c05",
+        "title": "Article 4",
+        "snippet": "Pour la lutte contre les souris, la concentration maximale dans les appâts est fixée à 10 p. 100. Ces appâts doivent être utilisés dans les conditions fixées par les articles 2 à 4 et 6 de l'arrêté du 26 avril 1988 susvisé."
+      },
+      {
+        "key": "c06",
+        "title": "Article 1",
+        "snippet": "La vente, la mise en vente, la distribution à titre gratuit et l'emploi du dinosèbe, ses acétates et ses sels, et du binapacryl sont interdits en agriculture à la date de publication du présent arrêté."
+      },
+      {
+        "key": "c07",
+        "title": "Article 1",
+        "snippet": "La détention en vue de la vente, la mise en vente, la vente, la distribution à titre gratuit et l'emploi des substances actives, insecticides et nématicides du sol énumérées à l'article 5 ne sont autorisés que dans les conditions fixées par le présent arrêté."
+      },
+      {
+        "key": "c08",
+        "title": "Article 6",
+        "snippet": "Les spécialités contenant les substances énumérées aux articles 1er et 5 du présent arrêté doivent être conformes à la loi modifiée du 2 novembre 1943 susvisée. Les emballages et étiquetages doivent porter les mentions prévues à l'article 7 de la loi du 2 novembre 1943 précitée. "
+      },
+      {
+        "key": "c09",
+        "title": "Article 8",
+        "snippet": "Un délai d'un an est accordé au détenteur de l'homologation pour mettre l'étiquetage en conformité avec les dispositions des articles 6 et 7 du présent arrêté à compter de la date de sa publication au Journal officiel."
+      },
+      {
+        "key": "c10",
+        "title": "Article 5",
+        "snippet": "Les appâts ne peuvent être utilisés que dans les lieux ou abris couverts et, en cas de nécessité, à leurs abords immédiats, dans les installations d'élimination de déchets, les dépôts de déchets, produits ou matériaux et sur les berges des cours d'eau pour la lutte contre les esp"
+      },
+      {
+        "key": "c11",
+        "title": "Article 7",
+        "snippet": "Lorsqu'un emballage conforme à l'article 6 ci-dessus contient des conditionnements qui ne sont pas destinés à être vendus séparément, ceux-ci peuvent ne comporter que les mentions suivantes : - nom et adresse du détenteur de l'homologation ; - symbole et indication de danger le c"
+      },
+      {
+        "key": "c12",
+        "title": "Article 1",
+        "snippet": "Il est interdit de détenir en vue de la vente, de mettre en vente ou de vendre des denrées et des boissons destinées à l'alimentation humaine ou animale contenant une teneur en résidus de produits utilisés en agriculture et en élevage présentant un danger pour la santé humaine, m"
+      },
+      {
+        "key": "c13",
+        "title": "Article 4",
+        "snippet": "1. Sans préjudice des dispositions spécifiques éventuellement prévues à l'article 5, les appâts destinés à la lutte contre les souris et les rats (rats noirs et surmulots) ne doivent pas être utilisés en dehors des lieux ou abris couverts. Toutefois, en cas de nécessité et dans l"
+      },
+      {
+        "key": "c14",
+        "title": "Article 2",
+        "snippet": "Sans préjudice des dispositions de l'article R. 5167 du code de la santé publique, les substances énumérées à l'article 1er destinées à la confection d'appâts empoisonnés pour la lutte contre les souris et les rats (rats noirs et surmulots) doivent être additionnées d'une matière"
+      },
+      {
+        "key": "c15",
+        "title": "Article ANNEXE",
+        "snippet": "CONDITIONS DE MISE EN OEUVRE DE LA LUTTE CHIMIQUE MENTIONNÉE À L'ARTICLE 6 I.-Seuls peuvent être utilisés pour la lutte chimique les produits régulièrement autorisés au titre des articles L. 253-1 à L. 253-17 du code rural et de la pêche maritime, contenant de la bromadiolone pou"
+      },
+      {
+        "key": "c16",
+        "title": "Article 1",
+        "snippet": "Les dispositions prévues par le présent arrêté concernent la lutte contre les souris et les rats (rats noirs et surmulots). Elles s'appliquent sans préjudice des décisions d'homologation relatives, le cas échéant, à la lutte contre les autres vertébrés nuisibles aux cultures et a"
+      }
+    ]
+  }
+]
