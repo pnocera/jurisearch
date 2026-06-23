@@ -5,9 +5,10 @@ use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestErrorInput, IngestMemberInput, IngestMemberStatus,
         IngestResumeAction, IngestRunInput, IngestRunStatus, ReplaySnapshotMode, finish_ingest_run,
-        ingest_resume_decision, load_ingest_embedding_coverage, load_ingest_health,
+        ingest_resume_decision, invalidate_cached_query_readiness, load_cached_query_readiness,
+        load_ingest_embedding_coverage, load_ingest_health,
         load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness, record_ingest_error,
-        record_ingest_member, start_ingest_run, update_ingest_member_status,
+        record_ingest_member, start_ingest_run, store_query_readiness, update_ingest_member_status,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -324,6 +325,84 @@ fn ingest_accounting_records_members_errors_and_resume_decisions() -> Result<(),
     assert_eq!(repaired_embedding_readiness.embedding_coverage.total, 2);
     assert!(health.recovery_warnings.is_empty());
 
+    Ok(())
+}
+
+#[test]
+fn query_readiness_cache_round_trips_and_invalidates() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("query readiness cache")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-readiness-cache.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    insert_ready_fixture(&postgres)?;
+
+    // Cold: no cached entry.
+    assert!(load_cached_query_readiness(&postgres)?.is_none());
+
+    // Store the live readiness report and read it back unchanged.
+    let readiness = load_ingest_readiness(&postgres)?;
+    assert_eq!(readiness.projection_coverage.covered, 1);
+    assert_eq!(readiness.projection_coverage.total, 1);
+    assert_eq!(readiness.embedding_coverage.covered, 1);
+    assert_eq!(readiness.embedding_coverage.total, 1);
+    store_query_readiness(&postgres, &readiness)?;
+    let cached = load_cached_query_readiness(&postgres)?.expect("cache present after store");
+    assert_eq!(cached, readiness);
+
+    // Explicit invalidation drops the entry.
+    invalidate_cached_query_readiness(&postgres)?;
+    assert!(load_cached_query_readiness(&postgres)?.is_none());
+
+    // Starting an ingest run also invalidates the cache.
+    store_query_readiness(&postgres, &readiness)?;
+    assert!(load_cached_query_readiness(&postgres)?.is_some());
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "readiness-run",
+            source: "legi",
+            parser_version: "legi-parser:v1",
+            schema_version: "canonical:v1",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: None,
+        },
+    )?;
+    assert!(load_cached_query_readiness(&postgres)?.is_none());
+
+    Ok(())
+}
+
+/// Minimal fully-ready index: one document, one chunk, one matching embedding.
+fn insert_ready_fixture(postgres: &ManagedPostgres) -> Result<(), StorageError> {
+    postgres.execute_sql(&format!(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, citation, title, body, \
+            valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+           ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+            'LEGIARTI000006419320', 'Code civil article 1240', \
+            'Article 1240', 'Tout fait quelconque de l''homme...', '1804-02-21', \
+            'sha256:article-1240', '{{\"official\":true}}'); \
+         INSERT INTO chunks \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+            chunk_builder_version, embedding_fingerprint) \
+         VALUES \
+           ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+            'responsabilite civile article 1240', \
+            'Code civil > Article 1240\nresponsabilite civile article 1240', \
+            'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true'); \
+         INSERT INTO chunk_embeddings \
+           (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES \
+           ('chunk:1240:0', 'bge-m3:1024:normalize:true', '{}', 'bge-m3', 1024);",
+        vector_literal(0)
+    ))?;
     Ok(())
 }
 

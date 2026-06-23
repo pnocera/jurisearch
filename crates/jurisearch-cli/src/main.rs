@@ -52,8 +52,8 @@ use jurisearch_storage::{
         CoverageMetric, IngestCompatibility, IngestErrorInput, IngestHealthReport,
         IngestMemberInput, IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
         ReplaySnapshotMode, ReplaySnapshotReport, finish_ingest_run_with_client,
-        ingest_resume_decision_with_client, load_ingest_embedding_coverage,
-        load_ingest_health_with_replay_snapshot_mode, load_ingest_projection_coverage,
+        ingest_resume_decision_with_client, invalidate_cached_query_readiness,
+        load_ingest_health_with_replay_snapshot_mode, load_or_compute_query_readiness,
         record_ingest_error_with_client, record_ingest_member_with_client, refresh_replay_snapshot,
         start_ingest_run_with_client, update_ingest_member_status_with_client,
         update_ingest_run_manifest_with_client,
@@ -2542,6 +2542,9 @@ fn embed_chunks_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    // Re-embedding changes embedding coverage; drop the readiness cache up front so the next query
+    // recomputes (it is repopulated only when the index is fully ready again).
+    invalidate_cached_query_readiness(&postgres).map_err(storage_error_object)?;
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
     ensure_embedding_runtime_ready(&embedding_config, false)?;
@@ -5003,11 +5006,15 @@ fn ensure_query_readiness(
     postgres: &ManagedPostgres,
     gate: QueryReadinessGate,
 ) -> Result<(), ErrorObject> {
-    let projection_coverage =
-        load_ingest_projection_coverage(postgres).map_err(storage_error_object)?;
-    let projection_ready =
-        coverage_complete(projection_coverage.covered, projection_coverage.total);
-    if !projection_ready {
+    // One round-trip on the hot path: a manifest cache hit skips the full-corpus coverage
+    // aggregations (a count(DISTINCT) over ~1.74M documents plus a count over ~1.85M chunks). The
+    // cache is only populated when the index is fully ready and is invalidated by ingest/embed runs.
+    let (readiness, _from_cache) =
+        load_or_compute_query_readiness(postgres).map_err(storage_error_object)?;
+    let projection_coverage = readiness.projection_coverage;
+    let embedding_coverage = readiness.embedding_coverage;
+
+    if !coverage_complete(projection_coverage.covered, projection_coverage.total) {
         return Err(index_not_query_ready(
             gate,
             "projection coverage gate is incomplete",
@@ -5023,10 +5030,9 @@ fn ensure_query_readiness(
         return Ok(());
     }
 
-    let embedding_coverage =
-        load_ingest_embedding_coverage(postgres).map_err(storage_error_object)?;
-    let embedding_ready = coverage_complete(embedding_coverage.covered, embedding_coverage.total);
-    if matches!(gate, QueryReadinessGate::Search) && !embedding_ready {
+    if matches!(gate, QueryReadinessGate::Search)
+        && !coverage_complete(embedding_coverage.covered, embedding_coverage.total)
+    {
         return Err(index_not_query_ready(
             gate,
             "embedding coverage gate is incomplete",
