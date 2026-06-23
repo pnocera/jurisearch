@@ -665,6 +665,9 @@ fn eval_france_legi_payload(
     let top_k = FRANCE_LEGI_GATE_TOP_K as usize;
     let overfetch = FRANCE_LEGI_GATE_TOP_K.saturating_mul(4);
 
+    // Build the query embedder once for the whole sweep (the runner always uses hybrid/dense).
+    let embedder = PreparedQueryEmbedder::from_env()?;
+
     // known-item and temporal: gold is an exact version document_id; as_of is pinned per qrel.
     let mut known_hits = 0usize;
     let mut known_done = 0usize;
@@ -676,7 +679,7 @@ fn eval_france_legi_payload(
         ) else {
             continue;
         };
-        let docs = france_legi_search_documents(&postgres, query, as_of, overfetch)?;
+        let docs = france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
         known_done += 1;
         if docs.iter().take(top_k).any(|doc| doc == gold_id) {
             known_hits += 1;
@@ -693,7 +696,7 @@ fn eval_france_legi_payload(
         ) else {
             continue;
         };
-        let docs = france_legi_search_documents(&postgres, query, as_of, overfetch)?;
+        let docs = france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
         temporal_done += 1;
         if docs.iter().take(top_k).any(|doc| doc == gold_id) {
             temporal_hits += 1;
@@ -723,7 +726,7 @@ fn eval_france_legi_payload(
         let as_of = legi_document_as_of(query_doc)
             .map(str::to_owned)
             .unwrap_or_else(today_utc);
-        let docs = france_legi_search_documents(&postgres, query, &as_of, overfetch)?;
+        let docs = france_legi_search_documents(&postgres, &embedder, query, &as_of, overfetch)?;
         let top_uids: std::collections::HashSet<&str> = docs
             .iter()
             .take(top_k)
@@ -840,6 +843,7 @@ fn france_legi_artifact(
 /// document IDs. A `no_results` outcome is an empty list (a miss), not an error.
 fn france_legi_search_documents(
     postgres: &ManagedPostgres,
+    embedder: &PreparedQueryEmbedder,
     query: &str,
     as_of: &str,
     top_k: u32,
@@ -866,6 +870,8 @@ fn france_legi_search_documents(
         LegalKind::Code,
         // The runner verifies query readiness once before the loop, so skip the per-query check.
         false,
+        // Reuse the embedder built once by the runner instead of rebuilding it per query.
+        Some(embedder),
     ) {
         Ok(response) => response,
         Err(error) if error.code == ErrorCode::NoResults => return Ok(Vec::new()),
@@ -1113,6 +1119,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
         &query_text,
         kind,
         true,
+        None,
     )
 }
 
@@ -1122,6 +1129,44 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
 /// `search_payload` to preserve error precedence (an unsearchable query reports `bad_input`
 /// before any index check).
 #[allow(clippy::too_many_arguments)]
+/// A query-embedding client built once and reused across many searches. Building an
+/// `OpenAiCompatibleClient` loads a tokenizer and a fresh HTTP agent, and `ensure_embedding_runtime_ready`
+/// is a network probe — paying both per query in a batch sweep (the France-LEGI runner issues up to
+/// ~192 queries) is wasteful. The index is static during a run, so one prepared embedder serves all.
+struct PreparedQueryEmbedder {
+    client: OpenAiCompatibleClient,
+    expected_fingerprint: EmbeddingFingerprint,
+    storage_fingerprint: String,
+}
+
+impl PreparedQueryEmbedder {
+    fn from_env() -> Result<Self, ErrorObject> {
+        let embedding_config = embedding_config_from_env();
+        ensure_embedding_runtime_ready(&embedding_config, false)?;
+        let expected_fingerprint = embedding_config.fingerprint();
+        let storage_fingerprint = embedding_config.storage_embedding_fingerprint();
+        let client =
+            OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
+        Ok(Self {
+            client,
+            expected_fingerprint,
+            storage_fingerprint,
+        })
+    }
+
+    /// Returns `(pgvector_literal, storage_fingerprint)` for the query.
+    fn embed(&self, query: &str) -> Result<(String, String), ErrorObject> {
+        let embedding = self
+            .client
+            .embed_query(query, &self.expected_fingerprint)
+            .map_err(embedding_error_object)?;
+        Ok((
+            pgvector_literal(&embedding.values),
+            self.storage_fingerprint.clone(),
+        ))
+    }
+}
+
 fn search_with_postgres(
     postgres: &ManagedPostgres,
     args: &SearchArgs,
@@ -1134,6 +1179,8 @@ fn search_with_postgres(
     // pass `true`; a batch caller that already verified readiness once can pass `false` to avoid
     // re-counting coverage on every query.
     verify_readiness: bool,
+    // A reused query embedder for batch callers. `None` builds a fresh one inline (one-shot path).
+    embedder: Option<&PreparedQueryEmbedder>,
 ) -> Result<Value, ErrorObject> {
     if verify_readiness {
         let readiness_gate = if retrieval_mode.uses_dense() {
@@ -1144,19 +1191,11 @@ fn search_with_postgres(
         ensure_query_readiness(postgres, readiness_gate)?;
     }
     let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
-        let embedding_config = embedding_config_from_env();
-        ensure_embedding_runtime_ready(&embedding_config, false)?;
-        let expected_fingerprint = embedding_config.fingerprint();
-        let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
-        let client =
-            OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
-        let embedding = client
-            .embed_query(args.query.as_str(), &expected_fingerprint)
-            .map_err(embedding_error_object)?;
-        (
-            Some(pgvector_literal(&embedding.values)),
-            Some(embedding_fingerprint),
-        )
+        let (literal, fingerprint) = match embedder {
+            Some(prepared) => prepared.embed(args.query.as_str())?,
+            None => PreparedQueryEmbedder::from_env()?.embed(args.query.as_str())?,
+        };
+        (Some(literal), Some(fingerprint))
     } else {
         (None, None)
     };
