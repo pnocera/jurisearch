@@ -3325,6 +3325,93 @@ fn cite_free_text_matches_ingested_legi_article_citation() -> Result<(), Box<dyn
 }
 
 #[test]
+fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(_pg_config) = discover_pg_config("CLI cite decision")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-cite-decision.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-cite-decision-archives.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_cass_global_20250101-000000.tar.gz");
+    write_tar_gz(
+        archive_path.as_path(),
+        &[(
+            "juri/cass/JURITEXT000051824029.xml",
+            cass_decision_fixture("JURITEXT000051824029", "23-14999").as_slice(),
+        )],
+    )?;
+
+    let ingest = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-cite-decision"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ingest: Value = serde_json::from_slice(&ingest)?;
+    assert_eq!(ingest["run_status"], "completed");
+    assert_eq!(ingest["inserted_documents"], 1);
+
+    let cite = |target: &str| -> Value {
+        let output = Command::cargo_bin("jurisearch")
+            .unwrap()
+            .arg("--index-dir")
+            .arg(index.path())
+            .args(["cite", target])
+            .assert()
+            .success()
+            .stderr(predicate::str::is_empty())
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
+
+    // Source-native UID.
+    let by_uid = cite("JURITEXT000051824029");
+    assert_eq!(by_uid["input_class"], "decision_id");
+    assert_eq!(by_uid["state"], "exact");
+    assert_eq!(by_uid["match_count"], 1);
+    assert_eq!(by_uid["matches"][0]["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(by_uid["matches"][0]["kind"], "decision");
+
+    // ECLI (case-insensitive).
+    let by_ecli = cite("ecli:fr:ccass:2025:so00111");
+    assert_eq!(by_ecli["input_class"], "ecli");
+    assert_eq!(by_ecli["state"], "exact");
+    assert_eq!(by_ecli["matches"][0]["document_id"], "cass:JURITEXT000051824029");
+
+    // Pourvoi / numéro d'affaire (dotted input normalizes to the stored 23-14999).
+    let by_pourvoi = cite("23-14.999");
+    assert_eq!(by_pourvoi["input_class"], "pourvoi");
+    assert_eq!(by_pourvoi["state"], "normalized");
+    assert_eq!(by_pourvoi["matches"][0]["document_id"], "cass:JURITEXT000051824029");
+
+    // Decision document_id.
+    let by_doc = cite("cass:JURITEXT000051824029");
+    assert_eq!(by_doc["input_class"], "document_id");
+    assert_eq!(by_doc["state"], "exact");
+
+    // Unknown decision -> not_found.
+    let missing = cite("JURITEXT000000000000");
+    assert_eq!(missing["input_class"], "decision_id");
+    assert_eq!(missing["state"], "not_found");
+    assert_eq!(missing["match_count"], 0);
+
+    Ok(())
+}
+
+#[test]
 fn context_returns_hierarchy_and_siblings_from_existing_index() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI context existing index")? else {
         return Ok(());

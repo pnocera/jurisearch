@@ -7964,6 +7964,9 @@ enum ParsedCitationTarget {
         article_number: String,
         code_hint: Option<String>,
     },
+    DecisionSourceUid(String),
+    DecisionEcli(String),
+    DecisionPourvoi(String),
     Malformed {
         normalized: String,
     },
@@ -7994,6 +7997,11 @@ impl ParsedCitationTarget {
                 article_number,
                 code_hint: code_hint.as_deref(),
             }),
+            Self::DecisionSourceUid(source_uid) => {
+                Some(CitationLookup::DecisionSourceUid(source_uid))
+            }
+            Self::DecisionEcli(ecli) => Some(CitationLookup::DecisionEcli(ecli)),
+            Self::DecisionPourvoi(pourvoi) => Some(CitationLookup::DecisionPourvoi(pourvoi)),
             Self::Malformed { .. } => None,
         }
     }
@@ -8006,6 +8014,9 @@ impl ParsedCitationTarget {
             Self::SectionSourceUid(_) => "legiscta",
             Self::Nor(_) => "nor",
             Self::FreeTextArticle { .. } => "free_text_article",
+            Self::DecisionSourceUid(_) => "decision_id",
+            Self::DecisionEcli(_) => "ecli",
+            Self::DecisionPourvoi(_) => "pourvoi",
             Self::Malformed { .. } => "malformed",
         }
     }
@@ -8016,7 +8027,10 @@ impl ParsedCitationTarget {
             Self::ArticleSourceUid(source_uid)
             | Self::TextSourceUid(source_uid)
             | Self::SectionSourceUid(source_uid)
-            | Self::Nor(source_uid) => Some(source_uid),
+            | Self::Nor(source_uid)
+            | Self::DecisionSourceUid(source_uid)
+            | Self::DecisionEcli(source_uid)
+            | Self::DecisionPourvoi(source_uid) => Some(source_uid),
             Self::FreeTextArticle { article_number, .. } => Some(article_number),
             Self::Malformed { normalized } if !normalized.is_empty() => Some(normalized),
             Self::Malformed { .. } => None,
@@ -8033,6 +8047,17 @@ fn parse_citation_target(input: &str) -> ParsedCitationTarget {
             source_uid: extract_known_source_uid(trimmed, "LEGIARTI"),
         };
     }
+    // Decision document_id (e.g. `cass:JURITEXT…`, `jade:CETATEXT…`).
+    if let Some((prefix, _)) = trimmed.split_once(':')
+        && matches!(prefix, "cass" | "capp" | "inca" | "jade")
+    {
+        let source_uid = extract_known_source_uid(trimmed, "JURITEXT")
+            .or_else(|| extract_known_source_uid(trimmed, "CETATEXT"));
+        return ParsedCitationTarget::DocumentId {
+            document_id: trimmed.to_owned(),
+            source_uid,
+        };
+    }
     if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGIARTI") {
         return ParsedCitationTarget::ArticleSourceUid(source_uid);
     }
@@ -8042,12 +8067,26 @@ fn parse_citation_target(input: &str) -> ParsedCitationTarget {
     if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGISCTA") {
         return ParsedCitationTarget::SectionSourceUid(source_uid);
     }
+    // Bare decision source-native UID.
+    if let Some(source_uid) = extract_known_source_uid(trimmed, "JURITEXT")
+        .or_else(|| extract_known_source_uid(trimmed, "CETATEXT"))
+    {
+        return ParsedCitationTarget::DecisionSourceUid(source_uid);
+    }
+    // ECLI (e.g. `ECLI:FR:CCASS:2025:AP00683`).
+    if trimmed.to_ascii_uppercase().starts_with("ECLI:") {
+        return ParsedCitationTarget::DecisionEcli(trimmed.to_ascii_uppercase());
+    }
     let normalized = normalize_citation_text(trimmed);
     if let Some(article_number) = parse_article_number(&normalized) {
         return ParsedCitationTarget::FreeTextArticle {
             article_number,
             code_hint: detect_code_hint(&normalized),
         };
+    }
+    // Pourvoi / numéro d'affaire (e.g. `22-21.812` or `22-21812`).
+    if let Some(pourvoi) = parse_pourvoi(trimmed) {
+        return ParsedCitationTarget::DecisionPourvoi(pourvoi);
     }
     let compact_upper = trimmed
         .chars()
@@ -8224,7 +8263,40 @@ fn classify_citation_state(
             1 => CitationState::Exact,
             _ => CitationState::Ambiguous,
         },
+        // Decisions are dated, not versioned: existence (raw match count), not as-of validity,
+        // determines the state. A decision is not "stale" — it either exists in the corpus or not.
+        ParsedCitationTarget::DecisionSourceUid(_) | ParsedCitationTarget::DecisionEcli(_) => {
+            match matches.len() {
+                0 => CitationState::NotFound,
+                1 => CitationState::Exact,
+                _ => CitationState::Ambiguous,
+            }
+        }
+        ParsedCitationTarget::DecisionPourvoi(_) => match matches.len() {
+            0 => CitationState::NotFound,
+            1 => CitationState::Normalized,
+            _ => CitationState::Ambiguous,
+        },
         ParsedCitationTarget::Malformed { .. } => CitationState::NotFound,
+    }
+}
+
+/// Detect a pourvoi / `NUMERO_AFFAIRE` shape (`NN-NNNNN`, optionally dotted as `NN-NN.NNN`) and
+/// return it normalized (dots/spaces removed). Conservative to avoid false positives.
+fn parse_pourvoi(input: &str) -> Option<String> {
+    let compact: String = input
+        .chars()
+        .filter(|character| !matches!(character, '.' | ' '))
+        .collect();
+    let (left, right) = compact.split_once('-')?;
+    if left.len() == 2
+        && left.bytes().all(|byte| byte.is_ascii_digit())
+        && (4..=6).contains(&right.len())
+        && right.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Some(compact)
+    } else {
+        None
     }
 }
 
@@ -8561,6 +8633,51 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn parse_pourvoi_accepts_dotted_and_plain_forms() {
+        assert_eq!(parse_pourvoi("22-21.812").as_deref(), Some("22-21812"));
+        assert_eq!(parse_pourvoi("22-21812").as_deref(), Some("22-21812"));
+        assert_eq!(parse_pourvoi("57-10.110").as_deref(), Some("57-10110"));
+        // Too few/many digits or wrong shape are rejected (conservative).
+        assert_eq!(parse_pourvoi("1-2"), None);
+        assert_eq!(parse_pourvoi("article 1240"), None);
+        assert_eq!(parse_pourvoi("2024-01-01"), None); // date-like, right group too long
+    }
+
+    #[test]
+    fn parse_citation_target_detects_decision_identifiers() {
+        assert!(matches!(
+            parse_citation_target("JURITEXT000051824029"),
+            ParsedCitationTarget::DecisionSourceUid(uid) if uid == "JURITEXT000051824029"
+        ));
+        assert!(matches!(
+            parse_citation_target("CETATEXT000051549953"),
+            ParsedCitationTarget::DecisionSourceUid(uid) if uid == "CETATEXT000051549953"
+        ));
+        assert!(matches!(
+            parse_citation_target("cass:JURITEXT000051824029"),
+            ParsedCitationTarget::DocumentId { source_uid: Some(uid), .. }
+                if uid == "JURITEXT000051824029"
+        ));
+        assert!(matches!(
+            parse_citation_target("ECLI:FR:CCASS:2025:AP00683"),
+            ParsedCitationTarget::DecisionEcli(ecli) if ecli == "ECLI:FR:CCASS:2025:AP00683"
+        ));
+        assert!(matches!(
+            parse_citation_target("ecli:fr:ccass:2025:ap00683"),
+            ParsedCitationTarget::DecisionEcli(ecli) if ecli == "ECLI:FR:CCASS:2025:AP00683"
+        ));
+        assert!(matches!(
+            parse_citation_target("22-21.812"),
+            ParsedCitationTarget::DecisionPourvoi(p) if p == "22-21812"
+        ));
+        // A statutory citation still routes to the article path, not a decision path.
+        assert!(matches!(
+            parse_citation_target("article 1240 du code civil"),
+            ParsedCitationTarget::FreeTextArticle { .. }
+        ));
+    }
 
     /// Full command-matrix help guard (T0.1): every subcommand path must have an `about`, and every
     /// user-facing argument must have help text. Walks the entire clap tree so a new command/flag

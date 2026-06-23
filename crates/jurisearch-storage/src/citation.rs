@@ -20,6 +20,12 @@ pub enum CitationLookup<'a> {
         article_number: &'a str,
         code_hint: Option<&'a str>,
     },
+    /// A jurisprudence decision's source-native UID (`JURITEXT…` / `CETATEXT…`).
+    DecisionSourceUid(&'a str),
+    /// A decision ECLI (case-insensitive exact match against the canonical record).
+    DecisionEcli(&'a str),
+    /// A decision pourvoi / `NUMERO_AFFAIRE` (compared with dots/spaces normalized away).
+    DecisionPourvoi(&'a str),
 }
 
 pub fn citation_lookup_json(
@@ -61,6 +67,39 @@ pub fn citation_lookup_json(
             article_number,
             code_hint,
         } => free_text_article_lookup_sql(article_number, code_hint),
+        CitationLookup::DecisionSourceUid(source_uid) => {
+            let literal = sql_string_literal(source_uid);
+            document_lookup_sql(
+                &format!("d.kind = 'decision' AND d.source_uid = {literal}"),
+                &format!("d.source_uid = {literal}"),
+            )
+        }
+        CitationLookup::DecisionEcli(ecli) => {
+            let literal = sql_string_literal(&ecli.to_ascii_uppercase());
+            document_lookup_sql(
+                &format!(
+                    "d.kind = 'decision' AND upper(d.canonical_json->>'ecli') = {literal}"
+                ),
+                &format!("upper(d.canonical_json->>'ecli') = {literal}"),
+            )
+        }
+        CitationLookup::DecisionPourvoi(pourvoi) => {
+            // Compare with dots/spaces removed so "22-21.812" matches the stored "22-21812".
+            let normalized: String = pourvoi
+                .chars()
+                .filter(|character| !matches!(character, '.' | ' '))
+                .collect();
+            let literal = sql_string_literal(&normalized);
+            let predicate = format!(
+                "d.kind = 'decision' AND EXISTS ( \
+                    SELECT 1 FROM jsonb_array_elements_text( \
+                        coalesce(d.canonical_json->'case_numbers', '[]'::jsonb) \
+                    ) AS cn \
+                    WHERE replace(replace(cn, '.', ''), ' ', '') = {literal} \
+                 )"
+            );
+            document_lookup_sql(&predicate, "TRUE")
+        }
     };
 
     postgres.execute_sql(&format!(
