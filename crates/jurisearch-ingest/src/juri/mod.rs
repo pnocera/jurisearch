@@ -93,6 +93,19 @@ impl JuriFamily {
             JuriFamily::Administrative => "CETATEXT",
         }
     }
+
+    /// The jurisprudence family each bulk dataset belongs to (`None` for non-jurisprudence sources).
+    /// `cass/capp/inca → TEXTE_JURI_JUDI`, `jade → TEXTE_JURI_ADMIN`.
+    #[must_use]
+    pub fn for_source(source: ArchiveSource) -> Option<JuriFamily> {
+        match source {
+            ArchiveSource::Cass | ArchiveSource::Capp | ArchiveSource::Inca => {
+                Some(JuriFamily::Judicial)
+            }
+            ArchiveSource::Jade => Some(JuriFamily::Administrative),
+            ArchiveSource::Legi => None,
+        }
+    }
 }
 
 /// One `SOMMAIRE` titrage/résumé pair (`SCT` heading + matching `ANA` abstract).
@@ -157,12 +170,26 @@ impl CanonicalDecision {
                 kind: self.kind.clone(),
             });
         }
-        let is_jurisprudence_source = ArchiveSource::from_token(&self.source)
-            .map(ArchiveSource::is_jurisprudence)
-            .unwrap_or(false);
-        if !is_jurisprudence_source {
-            return Err(DecisionValidationError::InvalidSource {
-                dataset: self.source.clone(),
+        // The source token must be a jurisprudence dataset AND its family must match the record's
+        // declared `source_family` (so a `jade:JURITEXT…` cross-family record cannot pass — WARN 4).
+        match ArchiveSource::from_token(&self.source).and_then(JuriFamily::for_source) {
+            Some(family) if family == self.source_family => {}
+            _ => {
+                return Err(DecisionValidationError::InvalidSource {
+                    dataset: self.source.clone(),
+                });
+            }
+        }
+        // Bulk DILA records are never zone-accurate: enforce honest provenance so a hand-built or
+        // mutated record cannot claim zone/structural quality by assertion (WARN 2 / ADR).
+        if self.chunking_provenance != "heuristic" {
+            return Err(DecisionValidationError::InvalidChunkingProvenance {
+                chunking_provenance: self.chunking_provenance.clone(),
+            });
+        }
+        if self.canonical_version != JURI_DECISION_CANONICAL_VERSION {
+            return Err(DecisionValidationError::InvalidCanonicalVersion {
+                canonical_version: self.canonical_version.clone(),
             });
         }
         if !self.source_uid.starts_with(self.source_family.uid_prefix()) {
@@ -231,6 +258,14 @@ impl CanonicalDecision {
                 message: "bulk decision chunking must be `heuristic`".to_owned(),
             });
         }
+        if chunk.chunk_builder_version != JURI_DECISION_CHUNK_BUILDER_VERSION {
+            return Err(DecisionValidationError::InvalidChunk {
+                chunk_id: chunk.chunk_id.clone(),
+                message: format!(
+                    "chunk_builder_version must be `{JURI_DECISION_CHUNK_BUILDER_VERSION}`"
+                ),
+            });
+        }
         if !chunk.source_payload_hash.starts_with("sha256:") {
             return Err(DecisionValidationError::InvalidChunk {
                 chunk_id: chunk.chunk_id.clone(),
@@ -245,8 +280,14 @@ impl CanonicalDecision {
 pub enum DecisionValidationError {
     #[error("canonical decision kind must be `decision`, got `{kind}`")]
     InvalidKind { kind: String },
-    #[error("canonical decision source must be a jurisprudence dataset, got `{dataset}`")]
+    #[error(
+        "canonical decision source must be a jurisprudence dataset whose family matches the record, got `{dataset}`"
+    )]
     InvalidSource { dataset: String },
+    #[error("bulk decision chunking_provenance must be `heuristic`, got `{chunking_provenance}`")]
+    InvalidChunkingProvenance { chunking_provenance: String },
+    #[error("canonical decision canonical_version must be `juri_decision:v1`, got `{canonical_version}`")]
+    InvalidCanonicalVersion { canonical_version: String },
     #[error("canonical decision source_uid `{source_uid}` must start with `{expected_prefix}`")]
     InvalidSourceUid {
         source_uid: String,
@@ -287,6 +328,11 @@ pub enum JuriParseError {
     NotUtf8 { member: String, message: String },
     #[error("unknown jurisprudence source `{dataset}`")]
     UnknownSource { dataset: String },
+    #[error("jurisprudence source `{dataset}` does not match XML root family `{root}`")]
+    SourceFamilyMismatch {
+        dataset: String,
+        root: &'static str,
+    },
 }
 
 /// Parse a bulk jurisprudence archive member into a canonical decision (or an unsupported-root
@@ -319,6 +365,14 @@ pub fn parse_juri_xml(
         ROOT_ADMIN => JuriFamily::Administrative,
         _ => return Ok(ParsedJuriXml::UnsupportedRoot { root }),
     };
+    // Reject archive-source/root-family mismatches (e.g. a judicial JURITEXT XML handed to the JADE
+    // source) so a record is never misclassified as the wrong official dataset (WARN 4).
+    if JuriFamily::for_source(source) != Some(family) {
+        return Err(JuriParseError::SourceFamilyMismatch {
+            dataset: source.as_str().to_owned(),
+            root: family.root_element(),
+        });
+    }
     let decision = parse_decision(source, family, xml, provenance)?;
     Ok(ParsedJuriXml::Decision(Box::new(decision)))
 }
@@ -346,7 +400,8 @@ fn detect_root(xml: &str) -> Result<String, JuriParseError> {
 struct RawDecision {
     fields: BTreeMap<String, String>,
     case_numbers: Vec<String>,
-    body: BodyAccumulator,
+    /// Body text accumulated with inline whitespace collapsed and `\n` at block boundaries.
+    body: String,
     summaries: Vec<DecisionSummary>,
     current_summary: Option<DecisionSummary>,
     links: Vec<RawLink>,
@@ -415,21 +470,30 @@ fn parse_decision(
                     }),
                     // The common shape is the self-closing `<PUBLI_BULL publie="oui"/>`.
                     "PUBLI_BULL" => capture_publi_bull(&mut raw, &start),
-                    "br" | "BR" => raw.body.push_break(&stack),
+                    // Self-closing block tag (`<br/>`, rarely `<P/>`) inside the body → paragraph
+                    // boundary. Gate on the body context exactly like text capture.
+                    block if is_body_block_boundary(block) && in_body_context(&stack) => {
+                        append_block_boundary(&mut raw.body);
+                    }
                     _ => {}
                 }
             }
             Ok(Event::End(_)) => {
-                if let Some(name) = stack.last()
-                    && matches!(name.as_str(), "SCT" | "ANA")
-                    && let Some(summary) = raw.current_summary.take()
-                {
-                    let trimmed = collapse_ws(&summary.text);
-                    if !trimmed.is_empty() {
-                        raw.summaries.push(DecisionSummary {
-                            text: trimmed,
-                            ..summary
-                        });
+                if let Some(name) = stack.last() {
+                    // Closing a block element (`</P>`, `</li>`, …) inside the body ends a paragraph.
+                    if is_body_block_boundary(name.as_str()) && in_body_context(&stack) {
+                        append_block_boundary(&mut raw.body);
+                    }
+                    if matches!(name.as_str(), "SCT" | "ANA")
+                        && let Some(summary) = raw.current_summary.take()
+                    {
+                        let trimmed = collapse_ws(&summary.text);
+                        if !trimmed.is_empty() {
+                            raw.summaries.push(DecisionSummary {
+                                text: trimmed,
+                                ..summary
+                            });
+                        }
                     }
                 }
                 stack.pop();
@@ -493,6 +557,13 @@ fn is_scalar_metadata_tag(name: &str) -> bool {
 }
 
 fn assign_text(raw: &mut RawDecision, stack: &[String], value: &str) {
+    // CONTENU body text lives under BLOC_TEXTUEL/CONTENU and may be wrapped in inline/block tags;
+    // capture it with inline whitespace collapsing (block boundaries are added on tag start/end).
+    if in_body_context(stack) {
+        append_xml_content(&mut raw.body, value);
+        return;
+    }
+
     let Some(current) = stack.last() else {
         return;
     };
@@ -520,12 +591,13 @@ fn assign_text(raw: &mut RawDecision, stack: &[String], value: &str) {
         }
         _ => {}
     }
-    // CONTENU body text lives under BLOC_TEXTUEL/CONTENU; capture regardless of inline tags.
-    if stack.iter().any(|tag| tag == "CONTENU")
-        && stack.iter().any(|tag| tag == "BLOC_TEXTUEL")
-    {
-        raw.body.push_text(value);
-    }
+}
+
+/// Whether the current element stack is inside the decision's main text body
+/// (`…/BLOC_TEXTUEL/CONTENU/…`). Mirrors the text-capture and `<br/>` guard exactly so they never
+/// diverge (NIT 1). `SOMMAIRE` and `CITATION_JP/CONTENU` are excluded because they lack `BLOC_TEXTUEL`.
+fn in_body_context(stack: &[String]) -> bool {
+    path_contains(stack, &["BLOC_TEXTUEL", "CONTENU"])
 }
 
 impl RawDecision {
@@ -555,7 +627,7 @@ impl RawDecision {
             value
         };
 
-        let body = self.body.finish();
+        let body = finish_body(&self.body);
         let source_payload_hash = provenance
             .payload_hash
             .clone()
@@ -665,15 +737,14 @@ fn build_decision_chunks(decision: &CanonicalDecision) -> Vec<CanonicalChunk> {
         ));
     }
 
-    for body in split_body(&decision.body, JURI_DECISION_CHUNK_MAX_CHARS) {
-        let boundary = "paragraph";
+    for piece in split_body(&decision.body, JURI_DECISION_CHUNK_MAX_CHARS) {
         chunks.push(make_chunk(
             decision,
             &context,
             chunks.len(),
-            body,
+            piece.text,
             "decision_body",
-            boundary,
+            piece.boundary,
             vec!["TEXTE/BLOC_TEXTUEL/CONTENU".to_owned()],
         ));
     }
@@ -713,9 +784,17 @@ fn make_chunk(
     }
 }
 
+/// One body chunk plus an honest boundary marker distinguishing a natural paragraph pack from an
+/// emergency size-based split (WARN 5 / ADR fallback-quality case).
+struct BodyPiece {
+    text: String,
+    boundary: &'static str,
+}
+
 /// Split body text on paragraph boundaries, packing paragraphs into chunks under `max_chars`.
-/// A single over-long paragraph is hard-split on character count as a last resort.
-fn split_body(body: &str, max_chars: usize) -> Vec<String> {
+/// A single over-long paragraph is hard-split on character count as a last resort, and those pieces
+/// are labelled `hard_split` so downstream diagnostics can tell them from natural `paragraph` packs.
+fn split_body(body: &str, max_chars: usize) -> Vec<BodyPiece> {
     let paragraphs: Vec<&str> = body
         .split('\n')
         .map(str::trim)
@@ -725,15 +804,24 @@ fn split_body(body: &str, max_chars: usize) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut chunks = Vec::new();
+    let mut pieces = Vec::new();
     let mut current = String::new();
+    let flush = |current: &mut String, pieces: &mut Vec<BodyPiece>| {
+        if !current.is_empty() {
+            pieces.push(BodyPiece {
+                text: std::mem::take(current),
+                boundary: "paragraph",
+            });
+        }
+    };
     for paragraph in paragraphs {
         if paragraph.chars().count() > max_chars {
-            if !current.is_empty() {
-                chunks.push(std::mem::take(&mut current));
-            }
-            for piece in hard_split(paragraph, max_chars) {
-                chunks.push(piece);
+            flush(&mut current, &mut pieces);
+            for text in hard_split(paragraph, max_chars) {
+                pieces.push(BodyPiece {
+                    text,
+                    boundary: "hard_split",
+                });
             }
             continue;
         }
@@ -743,17 +831,15 @@ fn split_body(body: &str, max_chars: usize) -> Vec<String> {
             current.chars().count() + 1 + paragraph.chars().count()
         };
         if projected > max_chars && !current.is_empty() {
-            chunks.push(std::mem::take(&mut current));
+            flush(&mut current, &mut pieces);
         }
         if !current.is_empty() {
             current.push('\n');
         }
         current.push_str(paragraph);
     }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
+    flush(&mut current, &mut pieces);
+    pieces
 }
 
 fn hard_split(text: &str, max_chars: usize) -> Vec<String> {
@@ -840,44 +926,82 @@ fn decision_edge_id(
     format!("publisher-edge:{digest}")
 }
 
-// ----- small body accumulator -----------------------------------------------------------------
+// ----- body assembly (ported from the LEGI CONTENU helpers for identical semantics) ------------
 
-/// Accumulates CONTENU text, converting `<br/>` (and `<p>` boundaries via blank lines in the source)
-/// into paragraph newlines. Whitespace is collapsed at `finish`.
-#[derive(Default)]
-struct BodyAccumulator {
-    buffer: String,
-}
-
-impl BodyAccumulator {
-    fn push_text(&mut self, value: &str) {
-        self.buffer.push_str(value);
-    }
-
-    fn push_break(&mut self, stack: &[String]) {
-        if stack.iter().any(|tag| tag == "CONTENU") {
-            self.buffer.push('\n');
+/// Append decision body text, collapsing runs of whitespace to a single space and never emitting a
+/// leading space. Block boundaries are inserted separately by [`append_block_boundary`].
+fn append_xml_content(buffer: &mut String, value: &str) {
+    for character in value.chars() {
+        if character.is_whitespace() {
+            if !buffer.is_empty()
+                && !buffer
+                    .chars()
+                    .last()
+                    .is_some_and(|last| last.is_whitespace())
+            {
+                buffer.push(' ');
+            }
+        } else {
+            buffer.push(character);
         }
     }
+}
 
-    fn finish(self) -> String {
-        self.buffer
-            .split('\n')
-            .map(collapse_ws_owned)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
+/// End the current paragraph with a single `\n` (idempotent: never doubles newlines).
+fn append_block_boundary(buffer: &mut String) {
+    let trimmed_len = buffer.trim_end_matches(' ').len();
+    buffer.truncate(trimmed_len);
+    if !buffer.is_empty() && !buffer.ends_with('\n') {
+        buffer.push('\n');
     }
+}
+
+/// XHTML/DILA block tags whose start/end (or self-close) ends a paragraph inside the body.
+fn is_body_block_boundary(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "P"
+            | "br"
+            | "BR"
+            | "li"
+            | "LI"
+            | "div"
+            | "DIV"
+            | "blockquote"
+            | "BLOCKQUOTE"
+            | "tr"
+            | "TR"
+            | "td"
+            | "TD"
+            | "th"
+            | "TH"
+            | "table"
+            | "TABLE"
+    )
+}
+
+/// Finalize the accumulated body: trim, drop empty lines, and rejoin paragraphs with single `\n`.
+fn finish_body(buffer: &str) -> String {
+    buffer
+        .split('\n')
+        .map(collapse_ws)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn path_contains(stack: &[String], needle: &[&str]) -> bool {
+    !needle.is_empty()
+        && stack.len() >= needle.len()
+        && stack
+            .windows(needle.len())
+            .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
 }
 
 // ----- shared small helpers --------------------------------------------------------------------
 
 fn collapse_ws(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn collapse_ws_owned(value: &str) -> String {
-    collapse_ws(value)
 }
 
 fn local_name(name: &[u8]) -> String {
@@ -997,13 +1121,28 @@ fn validate_iso_date(value: &str) -> Result<(), ()> {
     if !valid_shape {
         return Err(());
     }
+    let year = value[0..4].parse::<u16>().unwrap_or_default();
     let month = value[5..7].parse::<u8>().unwrap_or_default();
     let day = value[8..10].parse::<u8>().unwrap_or_default();
-    if (1..=12).contains(&month) && (1..=31).contains(&day) {
+    if day > 0 && day <= days_in_month(year, month).unwrap_or_default() {
         Ok(())
     } else {
         Err(())
     }
+}
+
+fn days_in_month(year: u16, month: u8) -> Option<u8> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if is_leap_year(year) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+fn is_leap_year(year: u16) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 #[cfg(test)]

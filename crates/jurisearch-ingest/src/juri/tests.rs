@@ -290,3 +290,110 @@ fn validate_rejects_tampered_document_id() {
         DecisionValidationError::InvalidDocumentId { .. }
     ));
 }
+
+#[test]
+fn adjacent_block_elements_get_paragraph_boundaries() {
+    // WARN 1: `<P>Premier</P><P>Second</P>` must NOT concatenate to `PremierSecond`.
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        "<P>Premier motif</P><P>Second motif</P>",
+    );
+    let parsed = decision(ArchiveSource::Cass, &xml);
+    assert_eq!(parsed.body, "Premier motif\nSecond motif");
+    // Inline markup inside a paragraph stays continuous.
+    let xml2 = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        "<P>Texte avec <i>emphase</i> au milieu.</P>",
+    );
+    let parsed2 = decision(ArchiveSource::Cass, &xml2);
+    assert_eq!(parsed2.body, "Texte avec emphase au milieu.");
+}
+
+#[test]
+fn rejects_calendar_invalid_date_accepts_leap_day() {
+    // WARN 3: shape-valid but calendar-invalid dates must be rejected.
+    let invalid = JUDI_XML.replace("2025-06-27", "2025-02-31");
+    let error = parse_juri_xml(ArchiveSource::Cass, &invalid, provenance()).unwrap_err();
+    assert!(matches!(
+        error,
+        JuriParseError::InvalidDate {
+            field: "DATE_DEC",
+            ..
+        }
+    ));
+    // A real leap day is accepted.
+    let leap = JUDI_XML.replace("2025-06-27", "2024-02-29");
+    decision(ArchiveSource::Cass, &leap)
+        .validate()
+        .expect("leap day valid");
+}
+
+#[test]
+fn rejects_source_family_mismatch() {
+    // WARN 4: a judicial JURITEXT XML handed to the JADE (administrative) source is rejected.
+    let error = parse_juri_xml(ArchiveSource::Jade, JUDI_XML, provenance()).unwrap_err();
+    assert!(matches!(
+        error,
+        JuriParseError::SourceFamilyMismatch { .. }
+    ));
+    // And an administrative CETATEXT XML handed to a judicial source is rejected.
+    let error = parse_juri_xml(ArchiveSource::Cass, ADMIN_XML, provenance()).unwrap_err();
+    assert!(matches!(
+        error,
+        JuriParseError::SourceFamilyMismatch { .. }
+    ));
+}
+
+#[test]
+fn validate_rejects_cross_family_record() {
+    // WARN 4 mirror in validate(): a record whose source dataset family disagrees with
+    // source_family cannot pass projection validation.
+    let mut decision = decision(ArchiveSource::Cass, JUDI_XML);
+    decision.source = "jade".to_owned();
+    decision.document_id = "jade:JURITEXT000051824029".to_owned();
+    let error = decision.validate().unwrap_err();
+    assert!(matches!(error, DecisionValidationError::InvalidSource { .. }));
+}
+
+#[test]
+fn validate_rejects_dishonest_chunking_provenance() {
+    // WARN 2: bulk records must never claim zone/structural quality by assertion.
+    let mut decision = decision(ArchiveSource::Cass, JUDI_XML);
+    decision.chunking_provenance = "zone".to_owned();
+    let error = decision.validate().unwrap_err();
+    assert!(matches!(
+        error,
+        DecisionValidationError::InvalidChunkingProvenance { .. }
+    ));
+}
+
+#[test]
+fn over_long_paragraph_is_labelled_hard_split() {
+    // WARN 5: an over-long single paragraph splits into `hard_split` pieces, distinct from natural
+    // `paragraph` packs.
+    let paragraph = "a".repeat(JURI_DECISION_CHUNK_MAX_CHARS * 2 + 100);
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        &paragraph,
+    );
+    let decision = decision(ArchiveSource::Cass, &xml);
+    let hard_split: Vec<_> = decision
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.boundary == "hard_split")
+        .collect();
+    assert!(
+        hard_split.len() >= 2,
+        "expected hard_split pieces, got boundaries {:?}",
+        decision
+            .chunks
+            .iter()
+            .map(|chunk| chunk.boundary.as_str())
+            .collect::<Vec<_>>()
+    );
+    for chunk in &hard_split {
+        assert!(chunk.body.chars().count() <= JURI_DECISION_CHUNK_MAX_CHARS);
+        assert_eq!(chunk.chunking, "heuristic");
+    }
+    decision.validate().expect("valid decision with hard splits");
+}
