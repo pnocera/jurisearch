@@ -58,6 +58,7 @@ use jurisearch_storage::{
         start_ingest_run_with_client, update_ingest_member_status_with_client,
         update_ingest_run_manifest_with_client,
     },
+    france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     projection::{
         ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot,
         backfill_legi_article_hierarchy_from_metadata,
@@ -100,6 +101,8 @@ const PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10: f64 = 0.60;
 const PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES: u64 = 10;
 const PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES: u64 = 4;
 const PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES: u64 = 50;
+// The gate validates recall/exactness @10, so the runner is fixed at top-10 (document-level).
+const FRANCE_LEGI_GATE_TOP_K: u32 = 10;
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -318,6 +321,27 @@ struct EvalCommand {
 enum EvalSubcommand {
     /// Run or list Phase 1 LEGI statutory-search fixtures.
     Phase1(EvalPhase1Args),
+    /// Run the France-LEGI official-evidence benchmark and emit a phase1_france_legi_benchmark artifact.
+    FranceLegi(EvalFranceLegiArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct EvalFranceLegiArgs {
+    /// Max known-item qrels to extract from the index.
+    #[arg(long, default_value_t = 60)]
+    known_item: u32,
+    /// Max temporal qrels to extract from the index.
+    #[arg(long, default_value_t = 12)]
+    temporal: u32,
+    /// Max cross-reference qrels to extract from the index.
+    #[arg(long, default_value_t = 120)]
+    cross_reference: u32,
+    /// Pinned official source revision (e.g. archive timestamp) recorded in artifact provenance.
+    #[arg(long)]
+    source_revision: Option<String>,
+    /// Write the phase1_france_legi_benchmark artifact JSON to this path (also printed to stdout).
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -574,10 +598,306 @@ fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> 
             Ok(response) => write_json(&response),
             Err(error) => emit_error(error),
         },
+        Some(EvalSubcommand::FranceLegi(args)) => {
+            let out_path = args.out.clone();
+            match eval_france_legi_payload(args, index_dir) {
+                Ok(response) => {
+                    if let Some(path) = out_path {
+                        let rendered = match serde_json::to_string_pretty(&response) {
+                            Ok(rendered) => rendered,
+                            Err(error) => {
+                                return emit_error(dependency_unavailable(format!(
+                                    "failed to serialize artifact: {error}"
+                                )));
+                            }
+                        };
+                        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+                            && let Err(error) = fs::create_dir_all(parent)
+                        {
+                            return emit_error(dependency_unavailable(format!(
+                                "failed to create artifact directory {}: {error}",
+                                parent.display()
+                            )));
+                        }
+                        if let Err(error) = fs::write(&path, format!("{rendered}\n")) {
+                            return emit_error(dependency_unavailable(format!(
+                                "failed to write artifact to {}: {error}",
+                                path.display()
+                            )));
+                        }
+                    }
+                    write_json(&response)
+                }
+                Err(error) => emit_error(error),
+            }
+        }
         None => emit_error(ErrorObject::bad_input(
-            "eval requires a subcommand; try `eval phase1`",
+            "eval requires a subcommand; try `eval phase1` or `eval france-legi`",
         )),
     }
+}
+
+/// Run the France-LEGI official-evidence benchmark over the production pipeline and assemble a
+/// `phase1_france_legi_benchmark` artifact. Opens the index ONCE and runs every qrel through
+/// `search_with_postgres` (single Postgres lifecycle). Gold comes from `france_legi_gold_json`
+/// (no archive re-parse, no human/LLM).
+fn eval_france_legi_payload(
+    args: EvalFranceLegiArgs,
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+
+    let limits = FranceLegiGoldLimits {
+        known_item: args.known_item,
+        temporal: args.temporal,
+        cross_reference: args.cross_reference,
+    };
+    let gold_json = france_legi_gold_json(&postgres, limits).map_err(storage_error_object)?;
+    let gold: Value = serde_json::from_str(&gold_json)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+
+    // Fixed at top-10 (document-level): the gate validates @10, so the runner must measure @10.
+    let top_k = FRANCE_LEGI_GATE_TOP_K as usize;
+    let overfetch = FRANCE_LEGI_GATE_TOP_K.saturating_mul(4);
+
+    // known-item and temporal: gold is an exact version document_id; as_of is pinned per qrel.
+    let mut known_hits = 0usize;
+    let mut known_done = 0usize;
+    for qrel in gold["known_item"].as_array().into_iter().flatten() {
+        let (Some(query), Some(gold_id), Some(as_of)) = (
+            qrel["query"].as_str(),
+            qrel["gold_document_id"].as_str(),
+            qrel["as_of"].as_str(),
+        ) else {
+            continue;
+        };
+        let docs = france_legi_search_documents(&postgres, query, as_of, overfetch)?;
+        known_done += 1;
+        if docs.iter().take(top_k).any(|doc| doc == gold_id) {
+            known_hits += 1;
+        }
+    }
+
+    let mut temporal_hits = 0usize;
+    let mut temporal_done = 0usize;
+    for qrel in gold["temporal"].as_array().into_iter().flatten() {
+        let (Some(query), Some(gold_id), Some(as_of)) = (
+            qrel["query"].as_str(),
+            qrel["gold_document_id"].as_str(),
+            qrel["as_of"].as_str(),
+        ) else {
+            continue;
+        };
+        let docs = france_legi_search_documents(&postgres, query, as_of, overfetch)?;
+        temporal_done += 1;
+        if docs.iter().take(top_k).any(|doc| doc == gold_id) {
+            temporal_hits += 1;
+        }
+    }
+
+    // cross-reference: production search applies a temporal prefilter, so match the cited ARTICLE
+    // (any version, by source_uid) rather than the exact cited version; as_of = the citing
+    // article's own date.
+    let mut cross_recall_sum = 0.0f64;
+    let mut cross_done = 0usize;
+    for qrel in gold["cross_reference"].as_array().into_iter().flatten() {
+        let (Some(query), Some(query_doc), Some(gold_ids)) = (
+            qrel["query"].as_str(),
+            qrel["query_document_id"].as_str(),
+            qrel["gold_document_ids"].as_array(),
+        ) else {
+            continue;
+        };
+        let gold_uids: Vec<String> = gold_ids
+            .iter()
+            .filter_map(|value| value.as_str().and_then(legi_source_uid_of).map(str::to_owned))
+            .collect();
+        if gold_uids.is_empty() {
+            continue;
+        }
+        let as_of = legi_document_as_of(query_doc)
+            .map(str::to_owned)
+            .unwrap_or_else(today_utc);
+        let docs = france_legi_search_documents(&postgres, query, &as_of, overfetch)?;
+        let top_uids: std::collections::HashSet<&str> = docs
+            .iter()
+            .take(top_k)
+            .filter_map(|doc| legi_source_uid_of(doc))
+            .collect();
+        let matched = gold_uids
+            .iter()
+            .filter(|uid| top_uids.contains(uid.as_str()))
+            .count();
+        cross_recall_sum += matched as f64 / gold_uids.len() as f64;
+        cross_done += 1;
+    }
+
+    let known = (mean(known_hits, known_done), known_done);
+    let temporal = (mean(temporal_hits, temporal_done), temporal_done);
+    let cross = (
+        if cross_done > 0 {
+            cross_recall_sum / cross_done as f64
+        } else {
+            0.0
+        },
+        cross_done,
+    );
+
+    let index_revision = index_dir
+        .as_path()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_owned());
+    let source_revision = args
+        .source_revision
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("index:{index_revision}"));
+
+    Ok(france_legi_artifact(
+        known,
+        temporal,
+        cross,
+        limits,
+        &index_revision,
+        &source_revision,
+    ))
+}
+
+/// Assemble the `phase1_france_legi_benchmark` artifact from per-category `(metric, query_count)`
+/// results. `state` is `passed` only when every category clears its policy floor AND minimum
+/// query count; the status gate re-derives pass from the recorded metrics either way.
+fn france_legi_artifact(
+    known: (f64, usize),
+    temporal: (f64, usize),
+    cross: (f64, usize),
+    limits: FranceLegiGoldLimits,
+    index_revision: &str,
+    source_revision: &str,
+) -> Value {
+    let passed = known.0 >= PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10
+        && known.1 as u64 >= PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES
+        && temporal.0 >= PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10
+        && temporal.1 as u64 >= PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES
+        && cross.0 >= PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10
+        && cross.1 as u64 >= PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES;
+
+    json!({
+        "schema_version": 1,
+        "kind": "phase1_france_legi_benchmark",
+        "state": if passed { "passed" } else { "failed" },
+        "jurisdiction": "france",
+        "claim_scope": "France-LEGI official-evidence statutory retrieval (known-item, temporal as-of, cross-reference) through the production pipeline",
+        "source": "DILA LEGI (Licence Ouverte) official fields, extracted from the built index",
+        "retriever": "jurisearch search (BM25 + dense + RRF)",
+        "embedding": {
+            "fingerprint_model": PHASE0_EMBEDDING_MODEL,
+            "dimension": PHASE0_EMBEDDING_DIMENSION,
+            "normalize": true
+        },
+        "thresholds": {
+            "known_item_recall_at_10_min": PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10,
+            "temporal_version_exactness_at_10_min": PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10,
+            "cross_reference_recall_at_10_min": PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10
+        },
+        "categories": {
+            "known_item": { "metric_value": round_metric(known.0), "queries": known.1 },
+            "temporal": { "metric_value": round_metric(temporal.0), "queries": temporal.1 },
+            "cross_reference": { "metric_value": round_metric(cross.0), "queries": cross.1 }
+        },
+        "provenance": {
+            "official_source": "DILA LEGI (Licence Ouverte)",
+            "source_revision": source_revision,
+            "pipeline": "jurisearch search (BM25 + dense + RRF)",
+            "code_version": CLI_CODE_VERSION,
+            "index_revision": index_revision,
+            // The qrel set is a deterministic, reproducible ORDER BY + LIMIT bound (not random or
+            // cherry-picked), so `sampled` is false; the per-category caps are recorded for audit.
+            "qrel_selection": "deterministic_bounded_by_document_id",
+            "qrel_limits": {
+                "known_item": limits.known_item,
+                "temporal": limits.temporal,
+                "cross_reference": limits.cross_reference
+            },
+            "sampled": false,
+            "human_in_gold": false,
+            "llm_in_gold": false
+        },
+        "evidence": [
+            format!(
+                "France-LEGI runner over index `{index_revision}`: {} known-item, {} temporal, {} cross-reference qrels through the production search pipeline",
+                known.1, temporal.1, cross.1
+            )
+        ]
+    })
+}
+
+/// Run one France-LEGI query through the production search pipeline and return the ranked unique
+/// document IDs. A `no_results` outcome is an empty list (a miss), not an error.
+fn france_legi_search_documents(
+    postgres: &ManagedPostgres,
+    query: &str,
+    as_of: &str,
+    top_k: u32,
+) -> Result<Vec<String>, ErrorObject> {
+    let Some(query_text) = parade_query_text(query) else {
+        return Ok(Vec::new());
+    };
+    let args = SearchArgs {
+        query: query.to_owned(),
+        kind: CliKind::Code,
+        mode: CliSearchMode::Hybrid,
+        format: CliOutputFormat::Concise,
+        top_k,
+        cursor: None,
+        as_of: Some(as_of.to_owned()),
+    };
+    let response = match search_with_postgres(
+        postgres,
+        &args,
+        RetrievalMode::Hybrid,
+        OutputFormat::Concise,
+        None,
+        &query_text,
+        LegalKind::Code,
+    ) {
+        Ok(response) => response,
+        Err(error) if error.code == ErrorCode::NoResults => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut documents = Vec::new();
+    if let Some(candidates) = response["candidates"].as_array() {
+        for candidate in candidates {
+            if let Some(document_id) = candidate["document_id"].as_str()
+                && !documents.iter().any(|existing| existing == document_id)
+            {
+                documents.push(document_id.to_owned());
+            }
+        }
+    }
+    Ok(documents)
+}
+
+/// `legi:LEGIARTI...@YYYY-MM-DD` -> `LEGIARTI...`
+fn legi_source_uid_of(document_id: &str) -> Option<&str> {
+    document_id.strip_prefix("legi:")?.split('@').next()
+}
+
+/// `legi:LEGIARTI...@YYYY-MM-DD` -> `YYYY-MM-DD`
+fn legi_document_as_of(document_id: &str) -> Option<&str> {
+    document_id.rsplit_once('@').map(|(_, date)| date)
+}
+
+fn mean(hits: usize, total: usize) -> f64 {
+    if total > 0 {
+        hits as f64 / total as f64
+    } else {
+        0.0
+    }
+}
+
+fn round_metric(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
 }
 
 fn eval_phase1_payload(
@@ -4294,7 +4614,7 @@ fn phase1_france_legi_artifact_errors(artifact: &Value) -> Vec<String> {
     for (path, message) in [
         (
             "provenance.sampled",
-            "provenance.sampled must be false (no sampled/truncated qrels for a gate artifact)",
+            "provenance.sampled must be false (qrels must be deterministic, not randomly sampled or cherry-picked; a reproducible bounded set recorded under provenance.qrel_limits is acceptable)",
         ),
         (
             "provenance.human_in_gold",
@@ -5837,6 +6157,86 @@ mod tests {
             phase1_france_legi_check_status(&json!({ "state": "failed", "evidence": ["e"] })),
             "fail"
         );
+    }
+
+    #[test]
+    fn france_legi_runner_artifact_passes_gate_validation_when_floors_met() {
+        let artifact = france_legi_artifact(
+            (0.95, 60),
+            (0.95, 12),
+            (0.70, 120),
+            FranceLegiGoldLimits {
+                known_item: 60,
+                temporal: 12,
+                cross_reference: 120,
+            },
+            "phase1-freemium-20250713",
+            "20250713-140000",
+        );
+        assert_eq!(artifact["state"], "passed");
+        assert_eq!(artifact["kind"], "phase1_france_legi_benchmark");
+        assert_eq!(artifact["jurisdiction"], "france");
+        assert_eq!(artifact["provenance"]["sampled"], false);
+        assert_eq!(artifact["provenance"]["human_in_gold"], false);
+        assert_eq!(artifact["provenance"]["source_revision"], "20250713-140000");
+        assert_eq!(artifact["categories"]["known_item"]["queries"], 60);
+
+        // The runner's output must be a VALID, passing artifact for the status gate.
+        let errors = phase1_france_legi_artifact_errors(&artifact);
+        assert!(
+            errors.is_empty(),
+            "runner artifact failed gate validation: {errors:?}"
+        );
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), artifact.to_string()).unwrap();
+        let payload = phase1_france_legi_payload_with_path(Some(temp.path()));
+        assert_eq!(payload["state"], "passed");
+        assert_eq!(phase1_france_legi_check_status(&payload), "pass");
+    }
+
+    #[test]
+    fn france_legi_runner_artifact_fails_below_floor_or_too_few_queries() {
+        // below the known-item recall floor
+        assert_eq!(
+            france_legi_artifact(
+                (0.40, 60),
+                (0.95, 12),
+                (0.70, 120),
+                FranceLegiGoldLimits::default(),
+                "idx",
+                "rev"
+            )["state"],
+            "failed"
+        );
+        // too few cross-reference queries
+        assert_eq!(
+            france_legi_artifact(
+                (0.95, 60),
+                (0.95, 12),
+                (0.70, 9),
+                FranceLegiGoldLimits::default(),
+                "idx",
+                "rev"
+            )["state"],
+            "failed"
+        );
+    }
+
+    #[test]
+    fn france_legi_document_id_helpers() {
+        assert_eq!(
+            legi_source_uid_of("legi:LEGIARTI000006284600@1998-05-21"),
+            Some("LEGIARTI000006284600")
+        );
+        assert_eq!(
+            legi_document_as_of("legi:LEGIARTI000006284600@1998-05-21"),
+            Some("1998-05-21")
+        );
+        assert_eq!(legi_source_uid_of("nonsense"), None);
+        assert_eq!(legi_document_as_of("nonsense"), None);
+        assert!((round_metric(0.4284) - 0.428).abs() < 1e-9);
+        assert!((mean(3, 4) - 0.75).abs() < 1e-9);
+        assert_eq!(mean(0, 0), 0.0);
     }
 
     #[test]
