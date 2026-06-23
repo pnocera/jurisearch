@@ -2573,38 +2573,80 @@ fn embed_chunks_payload(
         )));
     }
 
-    let load_limit = limit.map(|value| value.saturating_add(1));
-    let inputs = load_chunk_embedding_inputs(
-        &postgres,
-        embedding_fingerprint.as_str(),
-        embedding_config.model.as_str(),
-        dimension,
-        load_limit,
-    )
-    .map_err(storage_error_object)?;
-    if let Some(limit) = limit {
-        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-        if inputs.len() > limit {
+    // Embedding upserts and dense finalization are separate recoverable steps: re-running the
+    // command converges before the manifest/index is advertised.
+    let embedding_run = if let Some(limit) = limit {
+        // --limit is a bounded smoke path on a small index: load the whole pending set (capped at
+        // limit + 1), refuse if it would leave chunks unembedded, then embed it in one pass.
+        let inputs = load_chunk_embedding_inputs(
+            &postgres,
+            embedding_fingerprint.as_str(),
+            embedding_config.model.as_str(),
+            dimension,
+            Some(limit.saturating_add(1)),
+        )
+        .map_err(storage_error_object)?;
+        if inputs.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
             return Err(ErrorObject::bad_input(
                 "ingest embed-chunks --limit would leave chunks unembedded; run on a smaller smoke index or omit --limit to finalize the full dense index",
             ));
         }
-    }
-    if inputs.is_empty() {
-        return Err(no_results("no chunks are available to embed"));
-    }
-
-    // Embedding upserts and dense finalization are separate recoverable steps:
-    // re-running the command converges before the manifest/index is advertised.
-    let embedding_run = embed_and_insert_chunks_with_pool(
-        &postgres,
-        inputs,
-        &endpoint_configs,
-        embedding_fingerprint.as_str(),
-        &embedding_config,
-        batch_size,
-        pool_concurrency,
-    )?;
+        if inputs.is_empty() {
+            return Err(no_results("no chunks are available to embed"));
+        }
+        embed_and_insert_chunks_with_pool(
+            &postgres,
+            inputs,
+            &endpoint_configs,
+            embedding_fingerprint.as_str(),
+            &embedding_config,
+            batch_size,
+            pool_concurrency,
+        )?
+    } else {
+        // Production path: stream pending chunks in bounded pages so peak memory is one page, not
+        // the full ~1.85M-chunk set (each input can hold up to ~6k chars of contextualized text).
+        // Each batch's embeddings are inserted as it completes, so an embedded chunk leaves the
+        // pending set and the next page query returns the next slice; a failed page aborts and is
+        // recoverable (re-running converges). Embedding generation (the HTTP round-trips) dominates
+        // runtime, so the repeated bounded page queries are negligible.
+        let mut run = EmbeddingPoolRun {
+            chunks_considered: 0,
+            embeddings_inserted: 0,
+            embedding_inputs_truncated: 0,
+            endpoint_stats: Vec::new(),
+        };
+        loop {
+            let page = load_chunk_embedding_inputs(
+                &postgres,
+                embedding_fingerprint.as_str(),
+                embedding_config.model.as_str(),
+                dimension,
+                Some(EMBED_STREAM_PAGE_SIZE),
+            )
+            .map_err(storage_error_object)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_run = embed_and_insert_chunks_with_pool(
+                &postgres,
+                page,
+                &endpoint_configs,
+                embedding_fingerprint.as_str(),
+                &embedding_config,
+                batch_size,
+                pool_concurrency,
+            )?;
+            run.chunks_considered += page_run.chunks_considered;
+            run.embeddings_inserted += page_run.embeddings_inserted;
+            run.embedding_inputs_truncated += page_run.embedding_inputs_truncated;
+            merge_embedding_endpoint_stats(&mut run.endpoint_stats, page_run.endpoint_stats);
+        }
+        if run.chunks_considered == 0 {
+            return Err(no_results("no chunks are available to embed"));
+        }
+        run
+    };
     let rebuild = finalize_dense_rebuild(
         &postgres,
         &DenseRebuildSpec {
@@ -2820,6 +2862,32 @@ fn dedupe_embedding_pool_endpoints(
         }
     }
     deduped
+}
+
+/// Number of pending chunks loaded per page when streaming the full embed run, bounding peak memory.
+const EMBED_STREAM_PAGE_SIZE: u32 = 20_000;
+
+/// Accumulate per-endpoint embedding stats across streamed pages, summing counters per `base_url`.
+fn merge_embedding_endpoint_stats(accumulator: &mut Vec<Value>, page: Vec<Value>) {
+    for stat in page {
+        let base_url = stat
+            .get("base_url")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let existing = accumulator.iter_mut().find(|entry| {
+            entry.get("base_url").and_then(Value::as_str).map(str::to_owned) == base_url
+        });
+        match existing {
+            Some(entry) => {
+                for field in ["requests", "chunks", "truncated_inputs", "failures"] {
+                    let sum = entry.get(field).and_then(Value::as_u64).unwrap_or(0)
+                        + stat.get(field).and_then(Value::as_u64).unwrap_or(0);
+                    entry[field] = json!(sum);
+                }
+            }
+            None => accumulator.push(stat),
+        }
+    }
 }
 
 fn embed_and_insert_chunks_with_pool(
@@ -5695,6 +5763,36 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn merge_embedding_endpoint_stats_sums_counters_per_base_url() {
+        let mut accumulator = vec![json!({
+            "base_url": "http://a", "request_model": "m",
+            "requests": 2, "chunks": 10, "truncated_inputs": 1, "failures": 0
+        })];
+        merge_embedding_endpoint_stats(
+            &mut accumulator,
+            vec![
+                json!({"base_url": "http://a", "request_model": "m", "requests": 3, "chunks": 15, "truncated_inputs": 0, "failures": 1}),
+                json!({"base_url": "http://b", "request_model": "m", "requests": 1, "chunks": 5, "truncated_inputs": 0, "failures": 0}),
+            ],
+        );
+        assert_eq!(accumulator.len(), 2);
+        let a = accumulator
+            .iter()
+            .find(|entry| entry["base_url"] == "http://a")
+            .expect("endpoint a present");
+        assert_eq!(a["requests"], 5);
+        assert_eq!(a["chunks"], 25);
+        assert_eq!(a["truncated_inputs"], 1);
+        assert_eq!(a["failures"], 1);
+        let b = accumulator
+            .iter()
+            .find(|entry| entry["base_url"] == "http://b")
+            .expect("endpoint b present");
+        assert_eq!(b["requests"], 1);
+        assert_eq!(b["chunks"], 5);
+    }
 
     fn locked_embedding_manifest_json() -> Value {
         json!({
