@@ -29,6 +29,19 @@ proven LEGI pipeline. **Judilibre PISTE remains required and first-class** for w
 zone-accurate enrichment of individual decisions. Full-corpus ingestion does **not** egress through
 the Judilibre API.
 
+**Update 2026-06-23 (user directive): the DILA bulk jurisprudence adapter is MANDATORY**, not the
+optional `2.2a` fallback — it is the required full-corpus path for judicial and administrative
+jurisprudence. `IMPLEMENTATION_PLAN.md §5` / `§2.2a` and the traceability matrix are updated to match.
+
+## Data staging
+
+The mandatory bulk archives + DTD bundle are staged at the canonical local location
+**`/mnt/models/opendata`** (copied from SMB `//192.168.1.120/files/opendata`; see its `README.md`):
+`CASS/` (18), `INCA/` (19), `CAPP/` (14), `JADE/` (109) `*.tar.gz`, with official DTDs under
+`DTD_LEGIFRANCE/extracted/dole_dtd_maj/LEGIFRANCE_20181018_dtd/{juri,jade}/`. The earlier working copy
+`/home/pierre/Apps/juridocs/opendata/{CASS,CAPP,INCA,JADE}` (+ `…/DTD/{juri,jade}/`) holds equivalent
+archives and remains valid for `ingest juri-archives --archives-dir …` and `sync`.
+
 This corrects the implementation route while preserving the spirit of §5: the authoritative build
 uses official sources, APIs are used for deltas/verification/enrichment, and the zone-accurate
 property is preserved as a real, additive quality upgrade rather than a blocker.

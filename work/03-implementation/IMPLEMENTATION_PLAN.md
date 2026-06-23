@@ -200,7 +200,7 @@ This matrix is authoritative for ownership. Phase tasks may run in parallel only
 | 1.7 Phase 1 eval/migration gate | W2/W5/W3 | 1.0 + 1.1–1.6 + 0.7 | Final gate before Phase 1 claim. |
 | 2.1 Judilibre ingestion | W4/W8 | 0.8 + Phase 1 schema/index | Feeds 2.3/2.4. |
 | 2.2 Justice administrative ingestion | W4 | Phase 1 schema/index | Can run alongside 2.1. |
-| 2.2a Optional DILA bulk jurisprudence adapter | W4 | 2.1 + 2.2 stable | Explicit scope decision; coverage fallback only, not a zone-accurate replacement. |
+| 2.2a DILA bulk jurisprudence adapter (MANDATORY) | W4 | 0.5a streaming reader | Mandatory full-corpus jurisprudence path from `/mnt/models/opendata`; heuristic chunking, not a zone-accurate replacement for Judilibre enrichment. |
 | 2.3 Graph layer | W3/W5/W6 | 2.1 + 2.2 relationship records | Feeds `related`. |
 | 2.4 Decision search/fetch/context/cite | W5/W6/W8 | 2.1 + 2.2 + 2.3 | Feeds Phase 2 eval. |
 | 2.5 Incremental sync | W8/W4/W3 | 0.8 + source-specific ingestion | Can run after ingestion paths exist. |
@@ -758,9 +758,9 @@ Current status (2026-06-22):
 
 Goal: add Judilibre and justice administrative so the product can claim best-in-class French juridic search across statutes and jurisprudence.
 
-Phase 2 scope note: DILA bulk jurisprudence XML (`cass`, `inca`, `capp`, `jade`; roots `TEXTE_JURI_JUDI` / `TEXTE_JURI_ADMIN`) is an explicit optional adapter, not a default equal source path. Judilibre and justice-administrative ingestion remain the required Phase 2 path. If DILA bulk is accepted, it is a flagged coverage fallback after 2.1 and 2.2 are stable; decisions without official publisher zones use heuristic/fallback chunking provenance and do not satisfy the official-zone chunking gate by themselves.
+Phase 2 scope decision (2026-06-23, accepted; codex GO; updated 2026-06-23 to make DILA **mandatory**): full-corpus jurisprudence ingestion is executed from **DILA bulk official XML** (CASS/CAPP/INCA `TEXTE_JURI_JUDI`, JADE `TEXTE_JURI_ADMIN`), mirroring the offline LEGI pipeline, because the locked architecture is official-source-first (not API-first) and the complete bulk corpus + DTDs are staged locally. **The DILA bulk jurisprudence adapter is MANDATORY Phase 2 input** (no longer the optional `2.2a` fallback): it is the required full-corpus path for both judicial (CASS/CAPP/INCA) and administrative (JADE) jurisprudence. **Judilibre PISTE remains required and first-class** for `cite --online` verification, `sync --since` deltas via `/transactionalhistory`, and zone-accurate enrichment — not full-corpus API egress. Source-family coverage and per-chunk zone quality (`zone`/`heuristic`/`structural`/`hard_split`) are reported independently; bulk-only records still use heuristic chunking provenance and never satisfy the official-zone chunking gate by assertion (that gate is met only by Judilibre zone enrichment).
 
-Phase 2 scope decision (2026-06-23, accepted; codex GO): full-corpus jurisprudence ingestion is executed from **DILA bulk official XML** (CASS/CAPP/INCA `TEXTE_JURI_JUDI`, JADE `TEXTE_JURI_ADMIN`), mirroring the offline LEGI pipeline, because the locked architecture is official-source-first (not API-first) and the complete bulk corpus + DTDs are available locally. **Judilibre PISTE remains required and first-class** for `cite --online` verification, `sync --since` deltas via `/transactionalhistory`, and zone-accurate enrichment — not full-corpus API egress. Source-family coverage and per-chunk zone quality (`zone`/`heuristic`/`structural`/`hard_split`) are reported independently; bulk-only records never satisfy the official-zone chunking gate by assertion. Full details and the canonical-decision schema/identifier/edge/pseudonymisation constraints: `work/03-implementation/02-evidence/2026-06-23-phase2-jurisprudence-ingestion-scope-decision.md`.
+Phase 2 data staging (canonical local location): the mandatory DILA bulk archives and DTD bundle are staged at **`/mnt/models/opendata`** (copied from SMB `//192.168.1.120/files/opendata`): `CASS/` (18), `INCA/` (19), `CAPP/` (14), `JADE/` (109) `*.tar.gz`, plus the official DTDs under `DTD_LEGIFRANCE/extracted/dole_dtd_maj/LEGIFRANCE_20181018_dtd/{juri,jade}/`. (The earlier working copy under `/home/pierre/Apps/juridocs/opendata` holds equivalent archives + `…/DTD/{juri,jade}/`.) Full details and the canonical-decision schema/identifier/edge/pseudonymisation constraints: `work/03-implementation/02-evidence/2026-06-23-phase2-jurisprudence-ingestion-scope-decision.md`.
 
 ### 2.1 Judilibre Ingestion
 
@@ -794,17 +794,19 @@ Acceptance:
 - Administrative decisions are searchable and citeable.
 - Coverage and freshness are reported by `status`.
 
-### 2.2a Optional DILA Bulk Jurisprudence Adapter
+### 2.2a DILA Bulk Jurisprudence Adapter (MANDATORY)
 
-Tasks, only if explicitly accepted:
+This adapter is the **mandatory** full-corpus jurisprudence ingestion path (promoted from optional, 2026-06-23). It is the required source for both judicial and administrative jurisprudence; Judilibre/justice-administrative API paths add zone-accurate enrichment + deltas on top of it.
 
-- Parse DILA bulk jurisprudence archives for `cass`, `inca`, `capp`, and `jade`.
+Tasks:
+
+- Parse DILA bulk jurisprudence archives for `cass`, `inca`, `capp`, and `jade` from `/mnt/models/opendata`.
 - Support `TEXTE_JURI_JUDI` and `TEXTE_JURI_ADMIN` roots.
 - Preserve `JURITEXT`, `CETATEXT`, ECLI, court/source metadata, decision date, title, solution, text, summaries, links, archive/member provenance, and correction/replay semantics.
 - Map records into the same canonical decision schema used by Judilibre and justice-administrative ingestion.
 - Mark chunking provenance as heuristic/fallback when official zones are absent.
 
-Acceptance, only if accepted:
+Acceptance:
 
 - DILA bulk records are clearly distinguishable in `status`, manifest, and provenance.
 - DILA bulk records cannot be mistaken for zone-accurate Judilibre records.
@@ -1006,7 +1008,7 @@ Acceptance:
 | Embedding/projection failure masks successful canonical ingestion | Medium | Separate canonical-ingestion states from embedding/index-projection states; retry/backfill derived work. |
 | Phase 1 ingestion omits publisher links and forces Phase 2 LEGI re-ingestion | Medium | Capture publisher links as canonical `GraphEdge` records during 1.1. |
 | Char-based chunk sizing overflows the embedding endpoint | Medium | Tokenizer or endpoint-specific preflight before embedding; conservative char guardrails only as fallback. |
-| DILA bulk jurisprudence is mistaken for zone-accurate Judilibre data | Medium | Keep DILA bulk as optional flagged fallback; Judilibre and justice-administrative sources remain primary for official zones. |
+| DILA bulk jurisprudence is mistaken for zone-accurate Judilibre data | Medium | DILA bulk is the mandatory full-corpus path but stays heuristic-chunked and flagged (`zone_accurate=false`); the official-zone gate is met only by Judilibre zone enrichment, kept distinguishable in status/manifest/provenance. |
 | Python helper leaks into runtime | Medium | Rust test proves canonical records index/search without Python. |
 | Agent contract drifts from help/schema | Medium | Generate help/schema from the same registry where possible; eval completeness. |
 | Derived datasets accidentally influence production index | Medium | Validator rejects non-authoritative source labels for production indexes. |
