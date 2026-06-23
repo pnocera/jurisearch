@@ -3399,7 +3399,7 @@ fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>
 
     // Decision document_id.
     let by_doc = cite("cass:JURITEXT000051824029");
-    assert_eq!(by_doc["input_class"], "document_id");
+    assert_eq!(by_doc["input_class"], "decision_document_id");
     assert_eq!(by_doc["state"], "exact");
 
     // Unknown decision -> not_found.
@@ -3407,6 +3407,52 @@ fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(missing["input_class"], "decision_id");
     assert_eq!(missing["state"], "not_found");
     assert_eq!(missing["match_count"], 0);
+
+    // --as-of BEFORE the decision date must NOT make an existing decision "stale_version":
+    // decisions are dated, not versioned. Existence-based -> exact, and --strict succeeds.
+    let as_of = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["cite", "cass:JURITEXT000051824029", "--as-of", "2024-01-01", "--strict"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let as_of: Value = serde_json::from_slice(&as_of)?;
+    assert_eq!(as_of["state"], "exact");
+
+    // --online for a decision must NOT probe the Légifrance statutory endpoint; it is an honest
+    // no-op note (Judilibre verification not wired) and the local state is preserved.
+    let online = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["cite", "JURITEXT000051824029", "--online"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let online: Value = serde_json::from_slice(&online)?;
+    assert_eq!(online["state"], "exact");
+    assert_eq!(online["online"]["checked"], false);
+    assert_eq!(online["online"]["provider"], "judilibre");
+
+    // --online for a MISSING decision stays not_found (not source_unavailable).
+    let online_missing = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["cite", "JURITEXT000000000000", "--online"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let online_missing: Value = serde_json::from_slice(&online_missing)?;
+    assert_eq!(online_missing["state"], "not_found");
 
     Ok(())
 }

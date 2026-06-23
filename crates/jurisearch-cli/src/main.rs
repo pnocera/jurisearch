@@ -2931,7 +2931,10 @@ fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, Error
         effective_as_of.as_str(),
         args.as_of.as_deref(),
     );
+    // Decision identifiers are not corroborated against the Légifrance statutory probe, so an empty
+    // decision lookup must stay `not_found` rather than being relabelled `source_unavailable`.
     let state = if args.online
+        && !parsed.is_decision()
         && !matches!(&parsed, ParsedCitationTarget::Malformed { .. })
         && lookup["matches"]
             .as_array()
@@ -2966,6 +2969,16 @@ fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, Error
             "checked": false,
             "state": citation_state_name(CitationState::NotFound),
             "note": "Malformed citations are classified locally and are not sent to the online Légifrance probe."
+        });
+    } else if args.online && parsed.is_decision() {
+        // The online probe targets Légifrance (statutes). Decision verification belongs to Judilibre,
+        // which is not yet wired here — never send a decision identifier to the statutory probe.
+        response["online"] = json!({
+            "requested": true,
+            "checked": false,
+            "provider": "judilibre",
+            "state": null,
+            "note": "Online decision verification uses the Judilibre API and is not yet wired; the state above is from the local index."
         });
     } else if args.online {
         apply_online_citation_confirmation(&mut response, &args.cite)?;
@@ -7964,6 +7977,12 @@ enum ParsedCitationTarget {
         article_number: String,
         code_hint: Option<String>,
     },
+    /// A decision's internal document id (`cass:JURITEXT…` / `jade:CETATEXT…`). Existence-based,
+    /// NOT version-validity-based: decisions are dated, not versioned.
+    DecisionDocumentId {
+        document_id: String,
+        source_uid: Option<String>,
+    },
     DecisionSourceUid(String),
     DecisionEcli(String),
     DecisionPourvoi(String),
@@ -7997,6 +8016,13 @@ impl ParsedCitationTarget {
                 article_number,
                 code_hint: code_hint.as_deref(),
             }),
+            Self::DecisionDocumentId {
+                document_id,
+                source_uid,
+            } => Some(CitationLookup::DocumentId {
+                document_id,
+                source_uid: source_uid.as_deref(),
+            }),
             Self::DecisionSourceUid(source_uid) => {
                 Some(CitationLookup::DecisionSourceUid(source_uid))
             }
@@ -8014,6 +8040,7 @@ impl ParsedCitationTarget {
             Self::SectionSourceUid(_) => "legiscta",
             Self::Nor(_) => "nor",
             Self::FreeTextArticle { .. } => "free_text_article",
+            Self::DecisionDocumentId { .. } => "decision_document_id",
             Self::DecisionSourceUid(_) => "decision_id",
             Self::DecisionEcli(_) => "ecli",
             Self::DecisionPourvoi(_) => "pourvoi",
@@ -8021,9 +8048,21 @@ impl ParsedCitationTarget {
         }
     }
 
+    /// Whether this target is a jurisprudence decision (existence-based, never version-validity).
+    fn is_decision(&self) -> bool {
+        matches!(
+            self,
+            Self::DecisionDocumentId { .. }
+                | Self::DecisionSourceUid(_)
+                | Self::DecisionEcli(_)
+                | Self::DecisionPourvoi(_)
+        )
+    }
+
     fn normalized_value(&self) -> Option<&str> {
         match self {
-            Self::DocumentId { document_id, .. } => Some(document_id),
+            Self::DocumentId { document_id, .. }
+            | Self::DecisionDocumentId { document_id, .. } => Some(document_id),
             Self::ArticleSourceUid(source_uid)
             | Self::TextSourceUid(source_uid)
             | Self::SectionSourceUid(source_uid)
@@ -8053,7 +8092,7 @@ fn parse_citation_target(input: &str) -> ParsedCitationTarget {
     {
         let source_uid = extract_known_source_uid(trimmed, "JURITEXT")
             .or_else(|| extract_known_source_uid(trimmed, "CETATEXT"));
-        return ParsedCitationTarget::DocumentId {
+        return ParsedCitationTarget::DecisionDocumentId {
             document_id: trimmed.to_owned(),
             source_uid,
         };
@@ -8265,13 +8304,13 @@ fn classify_citation_state(
         },
         // Decisions are dated, not versioned: existence (raw match count), not as-of validity,
         // determines the state. A decision is not "stale" — it either exists in the corpus or not.
-        ParsedCitationTarget::DecisionSourceUid(_) | ParsedCitationTarget::DecisionEcli(_) => {
-            match matches.len() {
-                0 => CitationState::NotFound,
-                1 => CitationState::Exact,
-                _ => CitationState::Ambiguous,
-            }
-        }
+        ParsedCitationTarget::DecisionDocumentId { .. }
+        | ParsedCitationTarget::DecisionSourceUid(_)
+        | ParsedCitationTarget::DecisionEcli(_) => match matches.len() {
+            0 => CitationState::NotFound,
+            1 => CitationState::Exact,
+            _ => CitationState::Ambiguous,
+        },
         ParsedCitationTarget::DecisionPourvoi(_) => match matches.len() {
             0 => CitationState::NotFound,
             1 => CitationState::Normalized,
@@ -8281,8 +8320,9 @@ fn classify_citation_state(
     }
 }
 
-/// Detect a pourvoi / `NUMERO_AFFAIRE` shape (`NN-NNNNN`, optionally dotted as `NN-NN.NNN`) and
-/// return it normalized (dots/spaces removed). Conservative to avoid false positives.
+/// Detect a pourvoi / `NUMERO_AFFAIRE` shape — two digits, a dash, then 4–6 digits (optionally
+/// dotted, e.g. `22-21.812`, `57-10.110`) — and return it normalized (dots/spaces removed).
+/// Conservative to avoid false positives (dates like `2024-01-01` and short forms are rejected).
 fn parse_pourvoi(input: &str) -> Option<String> {
     let compact: String = input
         .chars()
@@ -8657,7 +8697,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_citation_target("cass:JURITEXT000051824029"),
-            ParsedCitationTarget::DocumentId { source_uid: Some(uid), .. }
+            ParsedCitationTarget::DecisionDocumentId { source_uid: Some(uid), .. }
                 if uid == "JURITEXT000051824029"
         ));
         assert!(matches!(
