@@ -122,17 +122,33 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Return compact ranked candidates.
+    /// Return compact ranked candidates for a legal research query.
+    ///
+    /// Modes: `hybrid` (default) fuses BM25 + dense and auto-routes citation-shaped queries
+    /// (e.g. "Article 1240") through the structured citation resolver; `bm25` is lexical-only;
+    /// `dense` is vector-only and is strongest for conceptual/paraphrased queries. Output schema:
+    /// `SearchResponse` (see `help schema --json`). Example:
+    ///   jurisearch search "résiliation d'un bail d'habitation" --mode dense --top-k 10 --as-of 2026-06-23
     Search(SearchArgs),
-    /// Return full source text for selected stable IDs.
+    /// Return full source text for selected exact, version-pinned stable IDs.
+    ///
+    /// IDs are version-pinned (e.g. `legi:LEGIARTI000006850948@1994-08-21`). Output: `FetchResponse`.
+    /// Example:  jurisearch fetch legi:LEGIARTI000006850948@1994-08-21
     Fetch(FetchArgs),
-    /// Verify citations and identifiers.
+    /// Verify a citation or identifier and report its citation state.
+    ///
+    /// Output: `CiteResponse` (with `state` exact/normalized/ambiguous/stale_version/not_found).
+    /// Example:  jurisearch cite "article 1240 du code civil" --as-of 2026-06-23
     Cite(CiteArgs),
-    /// Return graph neighbours.
+    /// Return bounded graph neighbours for a document (STUB — not yet implemented).
     Related(RelatedArgs),
-    /// Return structural neighbourhood.
+    /// Return structural neighbourhood (ancestry, siblings) for a document.
+    ///
+    /// Output: `ContextResponse`. Example:  jurisearch context legi:LEGIARTI000006419298@2002-01-01 --siblings
     Context(ContextArgs),
-    /// Return legal-vocabulary expansions.
+    /// Return curated legal-vocabulary expansions for a query.
+    ///
+    /// Output: `ExpandResponse`. Example:  jurisearch expand "bail commercial"
     Expand(QueryArgs),
     /// Report corpus coverage, model fingerprints, and index health.
     Status(StatusArgs),
@@ -156,28 +172,32 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct SearchArgs {
+    /// Free-text research query (a topic, paraphrase, or citation like "Article 1240").
     query: String,
+    /// Corpus filter: `code` (statutes), `decision` (case law), or `all`.
     #[arg(long, default_value = "all")]
     kind: CliKind,
+    /// Retrieval mode: `hybrid` (BM25+dense, auto-routes citations), `bm25` (lexical), `dense` (vector).
     #[arg(long, default_value = "hybrid")]
     mode: CliSearchMode,
+    /// Output verbosity: `concise` (ranked candidates) or `detailed`.
     #[arg(long, default_value = "concise")]
     format: CliOutputFormat,
+    /// Maximum number of candidates to return.
     #[arg(long, default_value_t = 10)]
     top_k: u32,
+    /// Opaque pagination cursor from a previous response's `pagination.next_cursor`.
     #[arg(long)]
     cursor: Option<String>,
+    /// Pin temporal validity to this date (`YYYY-MM-DD`); only versions in force on that date match.
     #[arg(long)]
     as_of: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct FetchArgs {
+    /// One or more exact, version-pinned stable IDs (e.g. `legi:LEGIARTI000006850948@1994-08-21`).
     ids: Vec<String>,
-    #[arg(long)]
-    as_of: Option<String>,
-    #[arg(long)]
-    part: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,10 +222,6 @@ struct SessionSearchArgs {
 #[derive(Debug, Deserialize)]
 struct SessionFetchArgs {
     ids: Vec<String>,
-    #[serde(default)]
-    as_of: Option<String>,
-    #[serde(default)]
-    part: Option<String>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -236,6 +252,7 @@ struct SessionContextArgs {
 
 #[derive(Debug, Args)]
 struct StatusArgs {
+    /// Recompute and cache full replay-snapshot signatures (slower); default reads cached signatures.
     #[arg(long)]
     deep: bool,
 }
@@ -264,48 +281,62 @@ struct SessionEvalPhase1Args {
 
 #[derive(Debug, Args)]
 struct CiteArgs {
+    /// Citation or identifier to verify (e.g. "article 1240 du code civil" or a stable ID).
     cite: String,
+    /// Fail (exit 2) unless the citation resolves to an exact, valid match.
     #[arg(long)]
     strict: bool,
+    /// Also consult the official online source (network) to corroborate the local result.
     #[arg(long)]
     online: bool,
+    /// Pin temporal validity to this date (`YYYY-MM-DD`) when resolving the citation.
     #[arg(long)]
     as_of: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct RelatedArgs {
+    /// Stable ID of the document whose graph neighbours to return.
     id: String,
+    /// Edge-type filter (e.g. cites, cited_by, temporal, sibling). STUB — not yet applied.
     #[arg(long)]
     rel: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct ContextArgs {
+    /// Stable ID of the document whose structural neighbourhood to return.
     id: String,
+    /// Include sibling documents (same parent) in the response.
     #[arg(long)]
     siblings: bool,
+    /// Pin temporal validity to this date (`YYYY-MM-DD`).
     #[arg(long)]
     as_of: Option<String>,
 }
 
 #[derive(Debug, Args, Deserialize)]
 struct QueryArgs {
+    /// Query whose curated legal-vocabulary expansions to return.
     query: String,
 }
 
 #[derive(Debug, Args)]
 struct JsonlArgs {
+    /// Read newline-delimited JSON requests from stdin and write JSONL responses to stdout.
     #[arg(long)]
     jsonl: bool,
+    /// Treat a malformed request as fatal (exit non-zero) instead of replying with a JSONL error.
     #[arg(long)]
     fatal: bool,
 }
 
 #[derive(Debug, Args)]
 struct SyncArgs {
+    /// Official source to synchronize (e.g. `legi`). STUB — not yet implemented.
     #[arg(long)]
     source: Option<String>,
+    /// Only pull deltas since this revision/date. STUB — not yet implemented.
     #[arg(long)]
     since: Option<String>,
 }
@@ -367,8 +398,11 @@ struct EvalPhase1Args {
 
 #[derive(Debug, Subcommand)]
 enum ModelSubcommand {
+    /// Ensure a local in-process model is cached (never downloads implicitly during search).
     Fetch {
+        /// Model key to fetch; defaults to the configured embedding model when omitted.
         model: Option<String>,
+        /// Permit a network download if the model is not already cached.
         #[arg(long)]
         allow_download: bool,
     },
@@ -431,8 +465,11 @@ struct HelpCommand {
 
 #[derive(Debug, Subcommand)]
 enum HelpSubcommand {
+    /// Print the compiled agent-facing contract (commands, exit codes, session protocol).
     Agent,
+    /// Print machine-readable JSON schemas for command requests, responses, and errors.
     Schema {
+        /// Emit the schema as JSON (machine-readable).
         #[arg(long)]
         json: bool,
     },
@@ -1549,11 +1586,6 @@ fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
 }
 
 fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    if args.as_of.is_some() || args.part.is_some() {
-        return Err(ErrorObject::bad_input(
-            "fetch --as-of and --part are reserved for a later fetch slice and are not applied yet",
-        ));
-    }
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
@@ -1713,14 +1745,7 @@ fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
         ));
     }
     let index_dir = args.index_dir;
-    fetch_payload(
-        FetchArgs {
-            ids: args.ids,
-            as_of: args.as_of,
-            part: args.part,
-        },
-        index_dir.as_deref(),
-    )
+    fetch_payload(FetchArgs { ids: args.ids }, index_dir.as_deref())
 }
 
 fn session_cite_payload(args: Value) -> Result<Value, ErrorObject> {
@@ -6050,6 +6075,45 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    /// Session-parity invariant: the warm protocol must reject exactly the one-shot-only commands
+    /// with `not_implemented`, and must route (not reject) a handled command. Guards the dispatch
+    /// arm against drift relative to `SESSION_EXCLUDED_COMMANDS`.
+    #[test]
+    fn session_dispatch_matches_one_shot_only_set() {
+        for cmd in ["related", "ingest", "eval", "sync"] {
+            let request = SessionRequest {
+                id: None,
+                command: cmd.to_string(),
+                args: serde_json::json!({}),
+            };
+            let (response, exit) = dispatch_session_request(request);
+            assert!(!exit, "session command `{cmd}` must not terminate the session");
+            match response {
+                SessionResponse::Err { error, .. } => assert!(
+                    matches!(error.code, ErrorCode::NotImplemented),
+                    "`{cmd}` should be not_implemented in session, got {:?}",
+                    error.code
+                ),
+                SessionResponse::Ok { .. } => {
+                    panic!("session command `{cmd}` should be not_implemented, got Ok")
+                }
+            }
+        }
+        // A handled command is routed: empty args yield bad_input (missing query), NOT not_implemented.
+        let (response, _) = dispatch_session_request(SessionRequest {
+            id: None,
+            command: "search".to_string(),
+            args: serde_json::json!({}),
+        });
+        match response {
+            SessionResponse::Err { error, .. } => assert!(
+                !matches!(error.code, ErrorCode::NotImplemented),
+                "`search` must be routed, not not_implemented"
+            ),
+            SessionResponse::Ok { .. } => {}
+        }
+    }
 
     #[test]
     fn legi_citation_routing_parses_article_and_temporal_suffix() {

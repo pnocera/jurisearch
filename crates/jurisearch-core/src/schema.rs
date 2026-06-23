@@ -114,6 +114,16 @@ pub fn compiled_schema() -> Value {
                     },
                     "as_of": { "type": "string", "format": "date" },
                     "limit": { "type": "integer" },
+                    "routing": {
+                        "type": "object",
+                        "description": "Intent-routing audit: how the query was classified and which backend served it.",
+                        "properties": {
+                            "query_type": { "enum": ["citation", "semantic"] },
+                            "chosen_backend": { "enum": ["hybrid", "bm25", "dense", "structured_citation"] },
+                            "candidate_count": { "type": "integer" },
+                            "fallback_path": { "enum": ["none", "hybrid_fallback"] }
+                        }
+                    },
                     "pagination": {
                         "type": "object",
                         "properties": {
@@ -166,6 +176,16 @@ pub fn compiled_schema() -> Value {
                                 "cursor": { "type": "string" }
                             }
                         }
+                    }
+                }
+            },
+            "FetchRequest": {
+                "required": ["ids"],
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Exact, version-pinned stable IDs (e.g. legi:LEGIARTI...@YYYY-MM-DD)."
                     }
                 }
             },
@@ -556,7 +576,130 @@ pub fn compiled_schema() -> Value {
                     "plan": { "type": "object" },
                     "skipped": { "type": "array" }
                 }
+            },
+            "IngestRequest": {
+                "description": "Ingestion is one-shot CLI only (not available over the session protocol).",
+                "properties": {
+                    "subcommand": {
+                        "enum": ["plan-archives", "legi-archives", "embed-chunks", "backfill-legi-hierarchy"]
+                    },
+                    "args": { "type": "object" }
+                }
+            },
+            "RelatedRequest": {
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "rel": {
+                        "type": "string",
+                        "description": "Edge-type filter (e.g. cites, cited_by, temporal, sibling)."
+                    }
+                }
+            },
+            "RelatedResponse": {
+                "description": "STUB — not yet implemented; shape is provisional.",
+                "properties": {
+                    "id": { "type": "string" },
+                    "neighbours": { "type": "array", "items": { "type": "object" } }
+                }
+            },
+            "SyncRequest": {
+                "properties": {
+                    "source": { "type": ["string", "null"] },
+                    "since": { "type": ["string", "null"] }
+                }
+            },
+            "SyncResponse": {
+                "description": "STUB — not yet implemented.",
+                "properties": {
+                    "source": { "type": ["string", "null"] },
+                    "since": { "type": ["string", "null"] }
+                }
+            },
+            "SessionRequest": { "$ref": "#/session_envelope/request" },
+            "SessionResponse": {
+                "oneOf": [
+                    { "$ref": "#/session_envelope/success_response" },
+                    { "$ref": "#/session_envelope/error_response" }
+                ]
+            },
+            "HelpAgentRequest": { "properties": {} },
+            "HelpAgentResponse": {
+                "properties": {
+                    "text": { "type": "string", "description": "The compiled agent contract as Markdown." }
+                }
+            },
+            "HelpSchemaRequest": {
+                "properties": { "json": { "type": "boolean", "default": false } }
+            },
+            "HelpSchemaResponse": {
+                "description": "This document — the compiled schema (commands, exit_codes, error_object, session_envelope, common_enums, schemas)."
+            },
+            "EvalFranceLegiRequest": {
+                "properties": {
+                    "known_item": { "type": "integer", "minimum": 0, "default": 60 },
+                    "temporal": { "type": "integer", "minimum": 0, "default": 12 },
+                    "cross_reference": { "type": "integer", "minimum": 0, "default": 120 },
+                    "source_revision": { "type": ["string", "null"] },
+                    "out": {
+                        "type": ["string", "null"],
+                        "description": "Path to write the phase1_france_legi_benchmark artifact (also printed to stdout)."
+                    }
+                }
+            },
+            "EvalFranceLegiResponse": {
+                "description": "phase1_france_legi_benchmark artifact (also written to --out when given).",
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "command": { "const": "eval france-legi" },
+                    "state": { "enum": ["pending", "passed", "failed"] },
+                    "categories": { "type": "object" },
+                    "thresholds": { "type": "object" },
+                    "provenance": { "type": "object" }
+                }
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::COMMANDS;
+
+    /// Invariant: every request/response schema name advertised in the command contract resolves to
+    /// a schema body in `compiled_schema()`. Guards against an "implemented but unschema'd" command
+    /// (how `routing` and `eval france-legi` previously slipped through).
+    #[test]
+    fn every_command_schema_name_resolves() {
+        let schema = compiled_schema();
+        let schemas = schema["schemas"]
+            .as_object()
+            .expect("compiled_schema must have a `schemas` object");
+        let mut missing = Vec::new();
+        for command in COMMANDS {
+            for name in [command.request_schema, command.response_schema] {
+                if !schemas.contains_key(name) {
+                    missing.push(format!("{} -> {name}", command.name));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "command schema names with no schema body: {missing:?}"
+        );
+    }
+
+    /// The one-shot-only set must reference real command names (guards against typos/drift).
+    #[test]
+    fn session_excluded_commands_are_valid() {
+        use crate::contract::SESSION_EXCLUDED_COMMANDS;
+        let names: std::collections::HashSet<&str> = COMMANDS.iter().map(|c| c.name).collect();
+        for name in SESSION_EXCLUDED_COMMANDS {
+            assert!(
+                names.contains(name),
+                "SESSION_EXCLUDED_COMMANDS references unknown command: {name}"
+            );
+        }
+    }
 }

@@ -2878,19 +2878,10 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "no_results");
 
-    let output = Command::cargo_bin("jurisearch")
-        .unwrap()
-        .env("JURISEARCH_INDEX_DIR", root.path())
-        .args(["fetch", document_id, "--as-of", "2024-01-01"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::is_empty())
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "bad_input");
+    // `fetch --as-of` / `--part` were removed (T0.4): they only ever errored, so the flags no longer
+    // exist. fetch is exact, version-pinned retrieval; date-resolved fetch is deferred to a real
+    // feature (alongside `versions`/`diff`). A now-unknown `--as-of` is a clap usage error, not a
+    // JSON contract error, so there is nothing more to assert here.
     Ok(())
 }
 

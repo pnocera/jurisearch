@@ -156,6 +156,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "EvalPhase1Response",
     },
     CommandSpec {
+        name: "eval france-legi",
+        summary: "Run the France-LEGI official-evidence benchmark and emit a phase1_france_legi_benchmark artifact (one-shot CLI only).",
+        status: CommandStatus::Implemented,
+        request_schema: "EvalFranceLegiRequest",
+        response_schema: "EvalFranceLegiResponse",
+    },
+    CommandSpec {
         name: "sync",
         summary: "Synchronize official sources through deltas or transactional histories.",
         status: CommandStatus::Stub,
@@ -178,6 +185,19 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
 ];
 
+/// `COMMANDS` names that are NOT callable over the warm session protocol — one-shot CLI only,
+/// or stubs not yet implemented anywhere. Kept in sync with the CLI's `dispatch_session_request`
+/// (the `not_implemented` arm) and enforced by tests. The `session --jsonl` / `batch --jsonl`
+/// entries are the protocol itself and are intentionally not listed here.
+pub const SESSION_EXCLUDED_COMMANDS: &[&str] = &["related", "ingest", "eval france-legi", "sync"];
+
+/// True when `name` is callable over the warm session protocol.
+pub fn command_session_available(name: &str) -> bool {
+    !SESSION_EXCLUDED_COMMANDS.contains(&name)
+        && name != "session --jsonl"
+        && name != "batch --jsonl"
+}
+
 pub fn agent_help() -> String {
     let mut out = String::new();
     out.push_str("# jurisearch agent contract\n\n");
@@ -194,6 +214,9 @@ pub fn agent_help() -> String {
         out.push_str(command.name);
         out.push_str("` — ");
         out.push_str(command.summary);
+        if SESSION_EXCLUDED_COMMANDS.contains(&command.name) {
+            out.push_str(" (one-shot CLI only — not available over the session protocol)");
+        }
         out.push('\n');
     }
     out.push_str("\n## Exit codes\n\n");
