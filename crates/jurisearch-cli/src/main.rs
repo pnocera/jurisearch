@@ -67,10 +67,10 @@ use jurisearch_storage::{
         prepare_legi_projection_statements,
     },
     retrieval::{
-        CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery,
-        RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode, context_documents_json,
-        fetch_documents_json, hybrid_candidates_json, related_neighbours_json,
-        resolve_legi_citation_json, rrf_weights,
+        CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy,
+        HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
+        context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -210,6 +210,9 @@ struct SearchArgs {
     /// Output verbosity: `concise` (ranked candidates) or `detailed`.
     #[arg(long, default_value = "concise")]
     format: CliOutputFormat,
+    /// Result granularity: `chunk` (default, one row per passage) or `document` (one row per article).
+    #[arg(long, default_value = "chunk")]
+    group_by: CliGroupBy,
     /// Maximum number of candidates to return.
     #[arg(long, default_value_t = 10)]
     top_k: u32,
@@ -236,6 +239,8 @@ struct SessionSearchArgs {
     mode: CliSearchMode,
     #[serde(default = "default_output_format")]
     format: CliOutputFormat,
+    #[serde(default = "default_group_by")]
+    group_by: CliGroupBy,
     #[serde(default = "default_top_k")]
     top_k: u32,
     #[serde(default)]
@@ -244,6 +249,10 @@ struct SessionSearchArgs {
     as_of: Option<String>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
+}
+
+fn default_group_by() -> CliGroupBy {
+    CliGroupBy::Chunk
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,6 +580,22 @@ impl From<CliSearchMode> for RetrievalMode {
             CliSearchMode::Hybrid => Self::Hybrid,
             CliSearchMode::Bm25 => Self::Bm25,
             CliSearchMode::Dense => Self::Dense,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CliGroupBy {
+    Chunk,
+    Document,
+}
+
+impl From<CliGroupBy> for GroupBy {
+    fn from(group_by: CliGroupBy) -> Self {
+        match group_by {
+            CliGroupBy::Chunk => Self::Chunk,
+            CliGroupBy::Document => Self::Document,
         }
     }
 }
@@ -1018,6 +1043,7 @@ fn france_legi_search_documents(
         kind: CliKind::Code,
         mode: CliSearchMode::Hybrid,
         format: CliOutputFormat::Concise,
+        group_by: CliGroupBy::Chunk,
         top_k,
         cursor: None,
         as_of: Some(as_of.to_owned()),
@@ -1160,6 +1186,7 @@ fn eval_phase1_fixture_result(
             kind: CliKind::Code,
             mode,
             format: CliOutputFormat::Detailed,
+            group_by: CliGroupBy::Chunk,
             top_k,
             cursor: None,
             as_of: fixture.as_of.clone(),
@@ -1260,7 +1287,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     let after_cursor = args
         .cursor
         .as_deref()
-        .map(parse_search_cursor)
+        .map(|cursor| parse_search_cursor(cursor, args.group_by))
         .transpose()?;
     let normalized_query_text = parade_query_text(&args.query);
     let query_text = if retrieval_mode.uses_lexical() {
@@ -1460,8 +1487,15 @@ fn search_with_postgres(
     } else {
         None
     };
-    let lexical_limit = args.top_k.saturating_mul(4);
-    let dense_limit = args.top_k.saturating_mul(4);
+    // Document grouping collapses many chunks per article, so overfetch a deeper pool to still
+    // yield up to top_k UNIQUE documents (reported smaller only when the pool is exhausted).
+    let group_by: GroupBy = args.group_by.into();
+    let pool_multiplier = match group_by {
+        GroupBy::Document => 20,
+        GroupBy::Chunk => 4,
+    };
+    let lexical_limit = args.top_k.saturating_mul(pool_multiplier);
+    let dense_limit = args.top_k.saturating_mul(pool_multiplier);
     let query_limit = args.top_k.saturating_add(1);
 
     // Hybrid retrieval (embedding + BM25/dense/RRF). Run only for conceptual queries, explicit
@@ -1483,10 +1517,8 @@ fn search_with_postgres(
                 query_embedding: query_embedding.as_deref(),
                 embedding_fingerprint: embedding_fingerprint.as_deref(),
                 retrieval_mode,
-                after_cursor: after_cursor.map(|cursor| RetrievalCursor {
-                    score: cursor.score.as_str(),
-                    chunk_id: cursor.chunk_id.as_str(),
-                }),
+                group_by,
+                after_cursor: after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
                 as_of: as_of.as_str(),
                 kind_filter,
                 lexical_limit,
@@ -1834,6 +1866,7 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
             kind: args.kind,
             mode: args.mode,
             format: args.format,
+            group_by: args.group_by,
             top_k: args.top_k,
             cursor: args.cursor,
             as_of: args.as_of,
@@ -6121,31 +6154,67 @@ fn summarize_online_response(response: &Value) -> Value {
 }
 
 #[derive(Debug)]
-struct ParsedSearchCursor {
-    score: String,
-    chunk_id: String,
+enum ParsedSearchCursor {
+    Chunk { score: String, chunk_id: String },
+    Document { score: String, document_id: String },
 }
 
-fn parse_search_cursor(cursor: &str) -> Result<ParsedSearchCursor, ErrorObject> {
-    let (score, chunk_id) = cursor.split_once(':').ok_or_else(|| {
-        ErrorObject::bad_input(
-            "search --cursor must use the cursor value returned by a previous search candidate",
-        )
+impl ParsedSearchCursor {
+    fn as_retrieval_cursor(&self) -> RetrievalCursor<'_> {
+        match self {
+            Self::Chunk { score, chunk_id } => RetrievalCursor::Chunk { score, chunk_id },
+            Self::Document { score, document_id } => RetrievalCursor::Document { score, document_id },
+        }
+    }
+}
+
+fn validate_cursor_score(score: &str, tail: &str) -> Result<(), ErrorObject> {
+    let parsed = score.parse::<f64>().map_err(|_| {
+        ErrorObject::bad_input("search --cursor must start with a numeric score followed by ':' and an id")
     })?;
-    let parsed_score = score.parse::<f64>().map_err(|_| {
-        ErrorObject::bad_input(
-            "search --cursor must start with a numeric score followed by ':' and a chunk id",
-        )
-    })?;
-    if !parsed_score.is_finite() || parsed_score < 0.0 || chunk_id.trim().is_empty() {
+    if !parsed.is_finite() || parsed < 0.0 || tail.trim().is_empty() {
         return Err(ErrorObject::bad_input(
-            "search --cursor must start with a finite non-negative score followed by ':' and a chunk id",
+            "search --cursor must be a finite non-negative score followed by ':' and an id",
         ));
     }
-    Ok(ParsedSearchCursor {
-        score: score.to_owned(),
-        chunk_id: chunk_id.to_owned(),
-    })
+    Ok(())
+}
+
+/// Parse the opaque cursor, tagged by grouping. A `doc:`-prefixed cursor is a document cursor; an
+/// unprefixed `<score>:<chunk_id>` is a chunk cursor. A cursor from the other grouping is rejected
+/// rather than silently mis-paging.
+fn parse_search_cursor(cursor: &str, group_by: CliGroupBy) -> Result<ParsedSearchCursor, ErrorObject> {
+    if let Some(rest) = cursor.strip_prefix("doc:") {
+        if group_by != CliGroupBy::Document {
+            return Err(ErrorObject::bad_input(
+                "this is a document cursor; rerun with --group-by document",
+            ));
+        }
+        let (score, document_id) = rest.split_once(':').ok_or_else(|| {
+            ErrorObject::bad_input("malformed document cursor (expected doc:<score>:<document_id>)")
+        })?;
+        validate_cursor_score(score, document_id)?;
+        Ok(ParsedSearchCursor::Document {
+            score: score.to_owned(),
+            document_id: document_id.to_owned(),
+        })
+    } else {
+        if group_by != CliGroupBy::Chunk {
+            return Err(ErrorObject::bad_input(
+                "this is a chunk cursor; rerun with --group-by chunk (the default)",
+            ));
+        }
+        let (score, chunk_id) = cursor.split_once(':').ok_or_else(|| {
+            ErrorObject::bad_input(
+                "search --cursor must use the cursor value returned by a previous search candidate",
+            )
+        })?;
+        validate_cursor_score(score, chunk_id)?;
+        Ok(ParsedSearchCursor::Chunk {
+            score: score.to_owned(),
+            chunk_id: chunk_id.to_owned(),
+        })
+    }
 }
 
 fn is_valid_iso_date(value: &str) -> bool {

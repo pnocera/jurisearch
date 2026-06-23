@@ -41,12 +41,29 @@ fn format_sql_f64(value: f64) -> String {
     format!("{value:.6}")
 }
 
+/// Result granularity: one row per matching chunk, or one row per article (its best chunk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupBy {
+    Chunk,
+    Document,
+}
+
+impl GroupBy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chunk => "chunk",
+            Self::Document => "document",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HybridCandidateQuery<'a> {
     pub query_text: &'a str,
     pub query_embedding: Option<&'a str>,
     pub embedding_fingerprint: Option<&'a str>,
     pub retrieval_mode: RetrievalMode,
+    pub group_by: GroupBy,
     pub after_cursor: Option<RetrievalCursor<'a>>,
     pub as_of: &'a str,
     pub kind_filter: Option<&'a str>,
@@ -55,10 +72,13 @@ pub struct HybridCandidateQuery<'a> {
     pub limit: u32,
 }
 
+/// An opaque pagination cursor, tagged by grouping. A chunk cursor is `<score>:<chunk_id>`; a
+/// document cursor is `doc:<score>:<document_id>`. The tag lets us reject a cursor from the wrong
+/// grouping instead of silently mis-paging.
 #[derive(Debug, Clone, Copy)]
-pub struct RetrievalCursor<'a> {
-    pub score: &'a str,
-    pub chunk_id: &'a str,
+pub enum RetrievalCursor<'a> {
+    Chunk { score: &'a str, chunk_id: &'a str },
+    Document { score: &'a str, document_id: &'a str },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,32 +173,26 @@ pub fn hybrid_candidates_json(
         .kind_filter
         .map(|kind| format!("AND d.kind = {}", sql_string_literal(kind)))
         .unwrap_or_default();
-    let cursor_predicate = cursor_predicate(query.after_cursor);
     let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &kind_predicate)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
         "SET ivfflat.probes = 4;\n\n"
     } else {
         ""
     };
+    let limit = query.limit;
 
-    postgres.execute_sql(&format!(
-        r#"
+    let sql = match query.group_by {
+        GroupBy::Chunk => {
+            let cursor_predicate = cursor_predicate(query.after_cursor);
+            format!(
+                r#"
 {set_ivfflat_probes}WITH {ranked_ctes},
 limited AS (
     SELECT
-        r.chunk_id,
-        c.document_id,
-        d.source,
-        d.kind,
-        d.citation,
-        d.title,
-        d.source_url,
-        d.valid_from::text AS valid_from,
-        d.valid_to::text AS valid_to,
+        r.chunk_id, c.document_id, d.source, d.kind, d.citation, d.title, d.source_url,
+        d.valid_from::text AS valid_from, d.valid_to::text AS valid_to,
         left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
-        r.lexical_rank,
-        r.dense_rank,
-        r.fused_score
+        r.lexical_rank, r.dense_rank, r.fused_score
     FROM ranked r
     JOIN chunks c ON c.chunk_id = r.chunk_id
     JOIN documents d ON d.document_id = c.document_id
@@ -190,44 +204,79 @@ SELECT jsonb_build_object(
     'query', {query_text},
     'retrieval_mode', {retrieval_mode},
     'as_of', {as_of},
+    'group_by', 'chunk',
     'limit', {limit},
     'candidates', COALESCE((
-        SELECT jsonb_agg(
-            jsonb_build_object(
-                'chunk_id', chunk_id,
-                'document_id', document_id,
-                'source', source,
-                'kind', kind,
-                'citation', citation,
-                'title', title,
-                'source_url', source_url,
-                'snippet', snippet,
-                'validity', jsonb_build_object(
-                    'from', valid_from,
-                    'to', valid_to,
-                    'to_exclusive', true
-                ),
-                'scores', jsonb_build_object(
-                    'rrf', round(fused_score::numeric, 8),
-                    'lexical_rank', lexical_rank,
-                    'dense_rank', dense_rank
-                ),
-                'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
-            )
-            ORDER BY round(fused_score::numeric, 8) DESC, chunk_id
-        )
+        SELECT jsonb_agg(jsonb_build_object(
+            'chunk_id', chunk_id,
+            'document_id', document_id,
+            'source', source, 'kind', kind, 'citation', citation, 'title', title,
+            'source_url', source_url, 'snippet', snippet,
+            'validity', jsonb_build_object('from', valid_from, 'to', valid_to, 'to_exclusive', true),
+            'scores', jsonb_build_object('rrf', round(fused_score::numeric, 8), 'lexical_rank', lexical_rank, 'dense_rank', dense_rank),
+            'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
+        ) ORDER BY round(fused_score::numeric, 8) DESC, chunk_id)
         FROM limited
     ), '[]'::jsonb)
 )::text;
-"#,
-        set_ivfflat_probes = set_ivfflat_probes,
-        ranked_ctes = ranked_ctes,
-        query_text = query_text,
-        retrieval_mode = retrieval_mode,
-        as_of = as_of,
-        cursor_predicate = cursor_predicate,
-        limit = query.limit
-    ))
+"#
+            )
+        }
+        GroupBy::Document => {
+            // Group BEFORE paging: pick each document's best chunk, then rank documents and apply the
+            // document keyset cursor over that grouped rowset (never post-page dedupe).
+            let cursor_predicate = document_cursor_predicate(query.after_cursor);
+            format!(
+                r#"
+{set_ivfflat_probes}WITH {ranked_ctes},
+scored AS (
+    SELECT
+        r.chunk_id, c.document_id, d.source, d.kind, d.citation, d.title, d.source_url,
+        d.valid_from::text AS valid_from, d.valid_to::text AS valid_to,
+        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
+        r.lexical_rank, r.dense_rank,
+        round(r.fused_score::numeric, 8) AS cursor_score
+    FROM ranked r
+    JOIN chunks c ON c.chunk_id = r.chunk_id
+    JOIN documents d ON d.document_id = c.document_id
+),
+best_document_chunks AS (
+    SELECT DISTINCT ON (document_id) *
+    FROM scored
+    ORDER BY document_id, cursor_score DESC, chunk_id
+),
+limited AS (
+    SELECT *
+    FROM best_document_chunks
+    {cursor_predicate}
+    ORDER BY cursor_score DESC, document_id
+    LIMIT {limit}
+)
+SELECT jsonb_build_object(
+    'query', {query_text},
+    'retrieval_mode', {retrieval_mode},
+    'as_of', {as_of},
+    'group_by', 'document',
+    'limit', {limit},
+    'candidates', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'document_id', document_id,
+            'chunk_id', chunk_id,
+            'best_chunk_id', chunk_id,
+            'source', source, 'kind', kind, 'citation', citation, 'title', title,
+            'source_url', source_url, 'snippet', snippet,
+            'validity', jsonb_build_object('from', valid_from, 'to', valid_to, 'to_exclusive', true),
+            'scores', jsonb_build_object('rrf', cursor_score, 'lexical_rank', lexical_rank, 'dense_rank', dense_rank),
+            'cursor', concat('doc:', cursor_score::text, ':', document_id)
+        ) ORDER BY cursor_score DESC, document_id)
+        FROM limited
+    ), '[]'::jsonb)
+)::text;
+"#
+            )
+        }
+    };
+    postgres.execute_sql(&sql)
 }
 
 /// Inputs for structured citation resolution: an article reference parsed out of a citation-shaped
@@ -365,18 +414,37 @@ fn like_contains(value: &str) -> String {
     escaped
 }
 
+/// Keyset cursor predicate for chunk grouping (over the `ranked` rows). Tie-break on `chunk_id`.
 fn cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
-    cursor
-        .map(|cursor| {
-            let score = sql_string_literal(cursor.score);
-            let chunk_id = sql_string_literal(cursor.chunk_id);
+    match cursor {
+        Some(RetrievalCursor::Chunk { score, chunk_id }) => {
+            let score = sql_string_literal(score);
+            let chunk_id = sql_string_literal(chunk_id);
             format!(
                 "WHERE (round(r.fused_score::numeric, 8) < {score}::numeric \
                  OR (round(r.fused_score::numeric, 8) = {score}::numeric \
                  AND r.chunk_id > {chunk_id}))"
             )
-        })
-        .unwrap_or_default()
+        }
+        // A document cursor never reaches the chunk-grouped query (the CLI rejects the mismatch).
+        Some(RetrievalCursor::Document { .. }) | None => String::new(),
+    }
+}
+
+/// Keyset cursor predicate for document grouping (over `best_document_chunks`). Tie-break on
+/// `document_id`. Uses the same rounded `cursor_score` as the ordering so ties never duplicate/skip.
+fn document_cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
+    match cursor {
+        Some(RetrievalCursor::Document { score, document_id }) => {
+            let score = sql_string_literal(score);
+            let document_id = sql_string_literal(document_id);
+            format!(
+                "WHERE (cursor_score < {score}::numeric \
+                 OR (cursor_score = {score}::numeric AND document_id > {document_id}))"
+            )
+        }
+        Some(RetrievalCursor::Chunk { .. }) | None => String::new(),
+    }
 }
 
 fn ranked_candidate_ctes(

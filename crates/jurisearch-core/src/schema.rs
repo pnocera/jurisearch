@@ -91,6 +91,7 @@ pub fn compiled_schema() -> Value {
                 "properties": {
                     "query": { "type": "string" },
                     "retrieval_mode": { "enum": ["hybrid", "bm25", "dense"] },
+                    "group_by": { "enum": ["chunk", "document"] },
                     "format": { "enum": ["concise", "detailed"] },
                     "expansion_seed_version": { "type": "string" },
                     "expanded_terms": {
@@ -164,6 +165,7 @@ pub fn compiled_schema() -> Value {
                             "type": "object",
                             "properties": {
                                 "chunk_id": { "type": "string" },
+                                "best_chunk_id": { "type": "string", "description": "Document grouping: the best-ranked chunk of the article." },
                                 "document_id": { "type": "string" },
                                 "source": { "type": "string" },
                                 "kind": { "type": "string" },
