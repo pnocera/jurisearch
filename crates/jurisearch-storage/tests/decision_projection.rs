@@ -305,6 +305,66 @@ fn decision_search_metadata_filters() -> Result<(), StorageError> {
     // No filters returns both.
     assert_eq!(search(DecisionFilters::default()).len(), 2);
 
+    // A LEGI article (version start 1990) must NOT be filtered by a decision-date bound: any decision
+    // filter implies kind='decision', so the article is excluded entirely rather than date-filtered
+    // by its version start.
+    postgres.execute_sql(
+        "INSERT INTO documents \
+            (document_id, source, kind, source_uid, body, valid_from, source_payload_hash) \
+         VALUES ('legi:LEGIARTI000000000001@1990-01-01', 'legi', 'article', \
+                 'LEGIARTI000000000001', 'decision article body', '1990-01-01', 'sha256:a');",
+    )?;
+    postgres.execute_sql(
+        "INSERT INTO chunks \
+            (chunk_id, document_id, chunk_index, body, contextualized_body, chunk_kind, chunking, \
+             boundary, source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('chunk:legi:LEGIARTI000000000001@1990-01-01:0', \
+                 'legi:LEGIARTI000000000001@1990-01-01', 0, 'decision article body', \
+                 'decision article body', 'article_body', 'structural', 'article', 'sha256:a', \
+                 'x', 'bge-m3:1024:normalize:true');",
+    )?;
+    postgres.execute_sql(&format!(
+        "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES ('chunk:legi:LEGIARTI000000000001@1990-01-01:0', 'bge-m3:1024:normalize:true', \
+                 '{}'::vector, 'bge-m3', 1024);",
+        vector_literal(0)
+    ))?;
+    // kind=all + a decision-date bound that the 1990 article's version start satisfies: the article
+    // must still be excluded (decision filters are decision-scoped), leaving only the 2025 decision.
+    let response = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            query_text: "decision",
+            query_embedding: Some(&vector),
+            embedding_fingerprint: Some(EMBEDDING_FINGERPRINT),
+            retrieval_mode: RetrievalMode::Dense,
+            options: RetrievalOptions::default(),
+            group_by: GroupBy::Document,
+            after_cursor: None,
+            as_of: "2025-12-31",
+            kind_filter: None,
+            decision_filters: DecisionFilters {
+                decided_from: Some("1980-01-01"),
+                ..DecisionFilters::default()
+            },
+            lexical_limit: 20,
+            dense_limit: 20,
+            limit: 10,
+        },
+    )?;
+    let response: serde_json::Value = serde_json::from_str(&response)?;
+    let ids: Vec<&str> = response["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["document_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&"legi:LEGIARTI000000000001@1990-01-01"),
+        "article leaked through a decision-date filter: {ids:?}"
+    );
+    assert!(ids.iter().all(|id| id.starts_with("cass:") || id.starts_with("jade:")));
+
     postgres.stop()?;
     Ok(())
 }

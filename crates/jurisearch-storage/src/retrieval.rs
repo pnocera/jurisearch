@@ -102,10 +102,26 @@ pub struct DecisionFilters<'a> {
 }
 
 impl DecisionFilters<'_> {
+    fn is_empty(&self) -> bool {
+        self.jurisdiction.is_none()
+            && self.formation.is_none()
+            && self.publication.is_none()
+            && self.decided_from.is_none()
+            && self.decided_to.is_none()
+    }
+
     /// Build the SQL predicate fragment (each clause prefixed with `AND`) against `documents d`.
     /// All values pass through `sql_string_literal`, so this is injection-safe.
+    ///
+    /// Any non-empty filter implies `d.kind = 'decision'`: these are decision-metadata filters, so
+    /// they must never silently re-interpret a statute search (e.g. a decision-date bound must not
+    /// filter LEGI articles by their version start). Court/formation/publication already self-scope
+    /// via the JSON metadata only decisions carry; the kind guard makes the date bounds consistent.
     fn predicate(&self) -> String {
-        let mut predicate = String::new();
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut predicate = String::from(" AND d.kind = 'decision'");
         if let Some(jurisdiction) = self.jurisdiction {
             predicate.push_str(&format!(
                 " AND d.canonical_json->>'jurisdiction' ILIKE {}",
