@@ -3865,12 +3865,16 @@ fn ingest_juri_archives_payload(
         }
     }
 
-    let run_status = if counters.failed_members == 0 && fatal_error.is_none() {
+    // Build the manifest from the pre-finalization state, then RECOMPUTE the terminal run_status
+    // after the manifest update so a fatal manifest-update failure cannot persist `completed`
+    // (mirrors the LEGI reference; review 2026-06-23 phase2-1bc WARN).
+    let manifest_run_status = if counters.failed_members == 0 && fatal_error.is_none() {
         IngestRunStatus::Completed
     } else {
         IngestRunStatus::Failed
     };
-    let final_manifest = juri_archive_manifest(source, &plan, &counters, run_status.as_str());
+    let final_manifest =
+        juri_archive_manifest(source, &plan, &counters, manifest_run_status.as_str());
     let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest_with_client(
         &mut ingest_client,
@@ -3880,6 +3884,11 @@ fn ingest_juri_archives_payload(
         fatal_error.get_or_insert_with(|| storage_error_object(error));
     }
 
+    let run_status = if counters.failed_members == 0 && fatal_error.is_none() {
+        IngestRunStatus::Completed
+    } else {
+        IngestRunStatus::Failed
+    };
     let error_message = fatal_error.as_ref().map(|error| error.message.as_str());
     finish_ingest_run_with_client(&mut ingest_client, run_id.as_str(), run_status, error_message)
         .map_err(storage_error_object)?;
