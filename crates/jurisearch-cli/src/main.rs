@@ -8141,7 +8141,13 @@ fn phase2_benchmark_payload_with_path(artifact_path: Option<&Path>) -> Value {
             return payload;
         }
     };
-    payload["artifact"] = artifact.clone();
+    // Normalize the diagnostic surface so the emitted payload always matches the published schema,
+    // even for a parseable-but-malformed artifact (e.g. `[]` or `false` parse fine but are rejected).
+    payload["artifact"] = if artifact.is_object() {
+        artifact.clone()
+    } else {
+        Value::Null
+    };
     payload["categories"] = artifact["categories"].clone();
     payload["provenance"] = artifact["provenance"].clone();
     payload["evidence"] = artifact["evidence"].as_array().map_or(json!([]), |_| artifact["evidence"].clone());
@@ -8209,7 +8215,7 @@ fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
     }
 
     // Production provenance: the benchmark must run through the production pipeline, with pinned
-    // code/index revisions and no sampling/human/LLM gold.
+    // code/index revisions, `sampled=false`, and disclosed human/LLM gold booleans.
     let provenance = &artifact["provenance"];
     if provenance["pipeline"].as_str() != Some(PHASE2_PRODUCTION_PIPELINE) {
         errors.push(format!(
@@ -9543,6 +9549,14 @@ mod tests {
         let payload = phase2_benchmark_payload_with_path(Some(&wpath));
         assert_eq!(payload["state"], "passed");
         assert!(payload["artifact_reported_state"].is_null());
+
+        // A parseable but non-object artifact (`[]`) is rejected and the emitted `artifact`
+        // diagnostic is normalized to null so the payload still matches the published schema.
+        let arr_path = dir.path().join("array.json");
+        std::fs::write(&arr_path, "[]").unwrap();
+        let payload = phase2_benchmark_payload_with_path(Some(&arr_path));
+        assert_eq!(payload["state"], "failed");
+        assert!(payload["artifact"].is_null());
     }
 
     #[test]
