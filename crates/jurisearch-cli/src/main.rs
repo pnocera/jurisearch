@@ -60,10 +60,11 @@ use jurisearch_storage::{
     },
     france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     projection::{
-        ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot,
+        ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot, LegiProjectionStatements,
         backfill_legi_article_hierarchy_from_metadata,
         backfill_legi_article_hierarchy_from_metadata_scoped, insert_chunk_embeddings,
-        insert_legi_documents_with_client, insert_legi_metadata_roots_with_client,
+        insert_legi_documents_with_statements, insert_legi_metadata_roots_with_client,
+        prepare_legi_projection_statements,
     },
     retrieval::{
         ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
@@ -2074,6 +2075,9 @@ fn process_legi_archive_member_batch(
     transaction
         .batch_execute("SET LOCAL synchronous_commit TO off;")
         .map_err(StorageError::PostgresClient)?;
+    // Prepare the document/chunk/edge upsert statements once for the whole batch instead of
+    // re-parsing them for every member's insert.
+    let projection_statements = prepare_legi_projection_statements(&mut transaction)?;
     let mut committed = LegiArchiveIngestCounters::default();
     for member in members {
         process_legi_archive_member(
@@ -2081,6 +2085,7 @@ fn process_legi_archive_member_batch(
             run_id,
             archive_name,
             member,
+            &projection_statements,
             quarantine_dir,
             &mut committed,
         )?;
@@ -2095,6 +2100,7 @@ fn process_legi_archive_member<C: postgres::GenericClient>(
     run_id: &str,
     archive_name: &str,
     member: &ArchiveMember,
+    projection_statements: &LegiProjectionStatements,
     quarantine_dir: Option<&Path>,
     counters: &mut LegiArchiveIngestCounters,
 ) -> Result<(), StorageError> {
@@ -2184,7 +2190,12 @@ fn process_legi_archive_member<C: postgres::GenericClient>(
                     compatibility,
                 },
             )?;
-            let report = insert_legi_documents_with_client(client, &[document], None)?;
+            let report = insert_legi_documents_with_statements(
+                client,
+                projection_statements,
+                &[document],
+                None,
+            )?;
             update_ingest_member_status_with_client(
                 client,
                 record.member_id,

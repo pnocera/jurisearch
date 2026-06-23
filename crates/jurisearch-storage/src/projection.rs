@@ -72,12 +72,19 @@ pub fn insert_legi_documents(
     Ok(report)
 }
 
-pub fn insert_legi_documents_with_client<C: GenericClient>(
+/// LEGI document/chunk/edge upsert statements, prepared once and reused across a whole ingest batch
+/// instead of being re-parsed per member (an archive batch holds up to ~128 members).
+pub struct LegiProjectionStatements {
+    document: postgres::Statement,
+    chunk: postgres::Statement,
+    edge: postgres::Statement,
+}
+
+/// Prepare the three LEGI projection statements on `client` (typically once per ingest transaction).
+pub fn prepare_legi_projection_statements<C: GenericClient>(
     client: &mut C,
-    documents: &[CanonicalDocument],
-    chunk_embedding_fingerprint: Option<&str>,
-) -> Result<CanonicalInsertReport, StorageError> {
-    let document_statement = client
+) -> Result<LegiProjectionStatements, StorageError> {
+    let document = client
         .prepare(
             "INSERT INTO documents \
                 (document_id, source, kind, source_uid, version_group, citation, title, body, \
@@ -105,7 +112,7 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
                 updated_at = now();",
         )
         .map_err(StorageError::PostgresClient)?;
-    let chunk_statement = client
+    let chunk = client
         .prepare(
             "INSERT INTO chunks \
                 (chunk_id, document_id, chunk_index, body, contextualized_body, chunk_kind, \
@@ -129,7 +136,7 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
                 embedding_fingerprint = EXCLUDED.embedding_fingerprint;",
         )
         .map_err(StorageError::PostgresClient)?;
-    let edge_statement = client
+    let edge = client
         .prepare(
             "INSERT INTO graph_edges \
                 (edge_id, from_document_id, to_document_id, edge_kind, edge_source, payload) \
@@ -142,6 +149,25 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
                 payload = EXCLUDED.payload;",
         )
         .map_err(StorageError::PostgresClient)?;
+    Ok(LegiProjectionStatements {
+        document,
+        chunk,
+        edge,
+    })
+}
+
+/// Upsert `documents` (and their chunks/edges) using pre-prepared statements. Prefer this in a batch
+/// loop so the statements are parsed once via [`prepare_legi_projection_statements`].
+pub fn insert_legi_documents_with_statements<C: GenericClient>(
+    client: &mut C,
+    statements: &LegiProjectionStatements,
+    documents: &[CanonicalDocument],
+    chunk_embedding_fingerprint: Option<&str>,
+) -> Result<CanonicalInsertReport, StorageError> {
+    // Cheap Arc-backed clones so the existing `&statement` execute calls below are unchanged.
+    let document_statement = statements.document.clone();
+    let chunk_statement = statements.chunk.clone();
+    let edge_statement = statements.edge.clone();
 
     let mut chunks = 0usize;
     let mut publisher_edges = 0usize;
@@ -223,6 +249,17 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
         chunks,
         publisher_edges,
     })
+}
+
+/// Convenience wrapper: prepare the projection statements then upsert `documents`. For a single
+/// call (or tests); batch callers should prepare once and use [`insert_legi_documents_with_statements`].
+pub fn insert_legi_documents_with_client<C: GenericClient>(
+    client: &mut C,
+    documents: &[CanonicalDocument],
+    chunk_embedding_fingerprint: Option<&str>,
+) -> Result<CanonicalInsertReport, StorageError> {
+    let statements = prepare_legi_projection_statements(client)?;
+    insert_legi_documents_with_statements(client, &statements, documents, chunk_embedding_fingerprint)
 }
 
 pub fn insert_legi_metadata_roots(
