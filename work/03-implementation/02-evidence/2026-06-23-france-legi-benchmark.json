@@ -1,0 +1,52 @@
+{
+  "categories": {
+    "cross_reference": {
+      "metric_value": 0.143,
+      "queries": 120
+    },
+    "known_item": {
+      "metric_value": 0.55,
+      "queries": 60
+    },
+    "temporal": {
+      "metric_value": 0.75,
+      "queries": 12
+    }
+  },
+  "claim_scope": "France-LEGI official-evidence statutory retrieval (known-item, temporal as-of, cross-reference) through the production pipeline",
+  "embedding": {
+    "dimension": 1024,
+    "fingerprint_model": "bge-m3",
+    "normalize": true
+  },
+  "evidence": [
+    "France-LEGI runner over index `phase1-freemium-20250713`: 60 known-item, 12 temporal, 120 cross-reference qrels through the production search pipeline"
+  ],
+  "jurisdiction": "france",
+  "kind": "phase1_france_legi_benchmark",
+  "provenance": {
+    "code_version": "jurisearch-cli:0.1.0",
+    "human_in_gold": false,
+    "index_revision": "phase1-freemium-20250713",
+    "llm_in_gold": false,
+    "official_source": "DILA LEGI (Licence Ouverte)",
+    "pipeline": "jurisearch search (BM25 + dense + RRF)",
+    "qrel_limits": {
+      "cross_reference": 120,
+      "known_item": 60,
+      "temporal": 12
+    },
+    "qrel_selection": "deterministic_bounded_by_document_id",
+    "sampled": false,
+    "source_revision": "index:phase1-freemium-20250713"
+  },
+  "retriever": "jurisearch search (BM25 + dense + RRF)",
+  "schema_version": 1,
+  "source": "DILA LEGI (Licence Ouverte) official fields, extracted from the built index",
+  "state": "failed",
+  "thresholds": {
+    "cross_reference_recall_at_10_min": 0.6,
+    "known_item_recall_at_10_min": 0.85,
+    "temporal_version_exactness_at_10_min": 0.9
+  }
+}
