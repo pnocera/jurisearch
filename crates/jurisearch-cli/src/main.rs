@@ -844,19 +844,19 @@ fn france_legi_artifact(
         },
         "categories": {
             "structured_citation_resolution": {
-                "metric_value": round_metric(structured.metric),
+                "metric_value": floor_metric(structured.metric),
                 "queries": structured.queries,
                 "gating": true,
                 "routing_backends": structured.backends
             },
             "temporal_version_pinning": {
-                "metric_value": round_metric(temporal.metric),
+                "metric_value": floor_metric(temporal.metric),
                 "queries": temporal.queries,
                 "gating": true,
                 "routing_backends": temporal.backends
             },
             "semantic_retrieval": {
-                "metric_value": round_metric(semantic.metric),
+                "metric_value": floor_metric(semantic.metric),
                 "queries": semantic.queries,
                 "gating": false,
                 "advisory": true,
@@ -972,8 +972,13 @@ fn mean(hits: usize, total: usize) -> f64 {
     }
 }
 
-fn round_metric(value: f64) -> f64 {
-    (value * 1000.0).round() / 1000.0
+/// Truncate (floor) a gate metric to 3 decimals for the artifact. Flooring, not rounding, so the
+/// RECORDED metric can never exceed the raw value: the status gate re-derives pass from the recorded
+/// 3-decimal `metric_value` against a 3-decimal floor, and `floor(raw*1000) >= floor*1000` holds iff
+/// `raw >= floor`, so the recorded value passes exactly when the runner's raw decision passes (a
+/// below-floor raw metric can never round up into a passing recorded value).
+fn floor_metric(value: f64) -> f64 {
+    (value * 1000.0).floor() / 1000.0
 }
 
 fn eval_phase1_payload(
@@ -5082,6 +5087,36 @@ fn phase1_france_legi_validate_category(
     {
         errors.push(format!("{queries_path} must be at least {min_queries}"));
     }
+    // Routing-backend audit: the per-query backend accounting must cover EVERY query, and a GATING
+    // category must have been resolved entirely by the structured citation resolver. This is the
+    // proof the split relies on — that the structured metrics came from input-driven structured
+    // resolution, not an answer-aware or fuzzy harness reporting high numbers.
+    let backends_path = format!("categories.{category}.routing_backends");
+    let queries = artifact_pointer_value(artifact, &queries_path).and_then(Value::as_u64);
+    match artifact_pointer_value(artifact, &backends_path).and_then(Value::as_object) {
+        Some(backends) => {
+            if let Some(queries) = queries {
+                let total: u64 = backends.values().filter_map(Value::as_u64).sum();
+                if total != queries {
+                    errors.push(format!(
+                        "{backends_path} must account for all {queries} queries (counted {total})"
+                    ));
+                }
+                if !advisory {
+                    let structured = backends
+                        .get("structured_citation")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    if structured != queries {
+                        errors.push(format!(
+                            "{backends_path}.structured_citation must equal queries ({queries}) for a gating category: every query must resolve via the structured citation resolver (got {structured})"
+                        ));
+                    }
+                }
+            }
+        }
+        None => errors.push(format!("{backends_path} is required")),
+    }
 }
 
 fn phase1_france_legi_check_status(france_legi: &Value) -> &'static str {
@@ -6514,9 +6549,9 @@ mod tests {
                 "semantic_retrieval_recall_at_10_advisory": 0.40
             },
             "categories": {
-                "structured_citation_resolution": { "metric_value": 1.0, "queries": 60, "gating": true },
-                "temporal_version_pinning": { "metric_value": 1.0, "queries": 12, "gating": true },
-                "semantic_retrieval": { "metric_value": 0.12, "queries": 80, "gating": false, "advisory": true }
+                "structured_citation_resolution": { "metric_value": 1.0, "queries": 60, "gating": true, "routing_backends": { "structured_citation": 60 } },
+                "temporal_version_pinning": { "metric_value": 1.0, "queries": 12, "gating": true, "routing_backends": { "structured_citation": 12 } },
+                "semantic_retrieval": { "metric_value": 0.12, "queries": 80, "gating": false, "advisory": true, "routing_backends": { "hybrid": 80 } }
             },
             "provenance": {
                 "official_source": "DILA LEGI Freemium_legi_global_20250713 (Licence Ouverte)",
@@ -6744,6 +6779,82 @@ mod tests {
     }
 
     #[test]
+    fn france_legi_gate_requires_structured_routing_audit() {
+        // A gating category that claims structured metrics but was served by hybrid must be rejected.
+        let mut hybrid_served = valid_france_legi_artifact();
+        hybrid_served["categories"]["structured_citation_resolution"]["routing_backends"] =
+            json!({ "hybrid": 60 });
+        assert!(
+            phase1_france_legi_artifact_errors(&hybrid_served)
+                .iter()
+                .any(|error| error.contains("structured_citation must equal queries")),
+            "hybrid-served gating category must be rejected"
+        );
+
+        // A missing routing audit must be rejected.
+        let mut no_audit = valid_france_legi_artifact();
+        no_audit["categories"]["temporal_version_pinning"]
+            .as_object_mut()
+            .unwrap()
+            .remove("routing_backends");
+        assert!(
+            phase1_france_legi_artifact_errors(&no_audit)
+                .iter()
+                .any(|error| error
+                    .contains("categories.temporal_version_pinning.routing_backends is required")),
+            "missing routing audit must be rejected"
+        );
+
+        // Backend accounting that does not cover every query must be rejected.
+        let mut partial = valid_france_legi_artifact();
+        partial["categories"]["structured_citation_resolution"]["routing_backends"] =
+            json!({ "structured_citation": 40 });
+        assert!(
+            phase1_france_legi_artifact_errors(&partial)
+                .iter()
+                .any(|error| error.contains("must account for all 60 queries")),
+            "incomplete backend accounting must be rejected"
+        );
+    }
+
+    #[test]
+    fn france_legi_runner_state_and_status_agree_at_floor_boundary() {
+        // Just below the 0.95 structured floor: the runner fails on the RAW metric, and the floored
+        // recorded metric (0.949) also fails status re-derivation — no divergence.
+        let below = france_legi_artifact(
+            france_legi_category(0.9496, 60, "structured_citation"),
+            france_legi_category(1.0, 12, "structured_citation"),
+            france_legi_category(0.116, 120, "hybrid"),
+            FranceLegiGoldLimits::default(),
+            "idx",
+            "rev",
+        );
+        assert_eq!(below["state"], "failed");
+        assert_eq!(
+            below["categories"]["structured_citation_resolution"]["metric_value"],
+            json!(0.949)
+        );
+        assert!(!phase1_france_legi_artifact_errors(&below).is_empty());
+
+        // At/above the floor: the runner passes and status accepts.
+        let at = france_legi_artifact(
+            france_legi_category(0.9504, 60, "structured_citation"),
+            france_legi_category(1.0, 12, "structured_citation"),
+            france_legi_category(0.116, 120, "hybrid"),
+            FranceLegiGoldLimits::default(),
+            "idx",
+            "rev",
+        );
+        assert_eq!(at["state"], "passed");
+        assert_eq!(
+            at["categories"]["structured_citation_resolution"]["metric_value"],
+            json!(0.950)
+        );
+        let errors = phase1_france_legi_artifact_errors(&at);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
     fn france_legi_document_id_helpers() {
         assert_eq!(
             legi_source_uid_of("legi:LEGIARTI000006284600@1998-05-21"),
@@ -6755,7 +6866,13 @@ mod tests {
         );
         assert_eq!(legi_source_uid_of("nonsense"), None);
         assert_eq!(legi_document_as_of("nonsense"), None);
-        assert!((round_metric(0.4284) - 0.428).abs() < 1e-9);
+        // floor_metric truncates (never rounds up), so a below-floor raw metric cannot become a
+        // passing recorded value: 0.9496 -> 0.949 (< 0.95 floor), 0.9504 -> 0.950 (>= floor).
+        assert!((floor_metric(0.4284) - 0.428).abs() < 1e-9);
+        assert!((floor_metric(0.9496) - 0.949).abs() < 1e-9);
+        assert!((floor_metric(0.9504) - 0.950).abs() < 1e-9);
+        assert!(floor_metric(0.9496) < 0.95);
+        assert!(floor_metric(0.95) >= 0.95);
         assert!((mean(3, 4) - 0.75).abs() < 1e-9);
         assert_eq!(mean(0, 0), 0.0);
     }
