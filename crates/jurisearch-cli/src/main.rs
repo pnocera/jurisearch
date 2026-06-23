@@ -5655,7 +5655,11 @@ fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
             );
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                // Match the TCP path: a read timeout drops a slow/idle client, and a write timeout
+                // stops a client that sends a request then never drains the response from blocking
+                // the single-client daemon.
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
                 let reader = io::BufReader::new(stream.try_clone()?);
                 let _ = serve_jsonl(reader, stream, &default_index_dir);
             }
