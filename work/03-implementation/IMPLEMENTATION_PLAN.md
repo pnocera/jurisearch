@@ -760,6 +760,8 @@ Goal: add Judilibre and justice administrative so the product can claim best-in-
 
 Phase 2 scope note: DILA bulk jurisprudence XML (`cass`, `inca`, `capp`, `jade`; roots `TEXTE_JURI_JUDI` / `TEXTE_JURI_ADMIN`) is an explicit optional adapter, not a default equal source path. Judilibre and justice-administrative ingestion remain the required Phase 2 path. If DILA bulk is accepted, it is a flagged coverage fallback after 2.1 and 2.2 are stable; decisions without official publisher zones use heuristic/fallback chunking provenance and do not satisfy the official-zone chunking gate by themselves.
 
+Phase 2 scope decision (2026-06-23, accepted; codex GO): full-corpus jurisprudence ingestion is executed from **DILA bulk official XML** (CASS/CAPP/INCA `TEXTE_JURI_JUDI`, JADE `TEXTE_JURI_ADMIN`), mirroring the offline LEGI pipeline, because the locked architecture is official-source-first (not API-first) and the complete bulk corpus + DTDs are available locally. **Judilibre PISTE remains required and first-class** for `cite --online` verification, `sync --since` deltas via `/transactionalhistory`, and zone-accurate enrichment — not full-corpus API egress. Source-family coverage and per-chunk zone quality (`zone`/`heuristic`/`structural`/`hard_split`) are reported independently; bulk-only records never satisfy the official-zone chunking gate by assertion. Full details and the canonical-decision schema/identifier/edge/pseudonymisation constraints: `work/03-implementation/02-evidence/2026-06-23-phase2-jurisprudence-ingestion-scope-decision.md`.
+
 ### 2.1 Judilibre Ingestion
 
 Tasks:
