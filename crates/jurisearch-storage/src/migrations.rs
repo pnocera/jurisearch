@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 9;
+pub const CURRENT_SCHEMA_VERSION: i32 = 10;
 
 struct Migration {
     version: i32,
@@ -370,6 +370,27 @@ WITH (
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 9), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 10,
+        name: "graph_edges_reverse_citation_index",
+        // Partial expression index supporting `related --rel cited_by`: reverse citation lookups key
+        // on payload->>'to_source_uid' (the seed's source_uid), which `graph_edges_from_idx` cannot
+        // serve. Without it, cited_by is a full scan of the ~12.9M-edge table. Partial + expression
+        // keeps it small (only resolved publisher CITATION/cible edges). Migrations run inside a
+        // transaction, so this is a plain CREATE INDEX (not CONCURRENTLY).
+        sql: r#"
+CREATE INDEX IF NOT EXISTS graph_edges_publisher_citation_to_source_uid_idx
+ON graph_edges ((payload->>'to_source_uid'))
+WHERE edge_source = 'publisher'
+  AND payload->'attributes' @> '[{"key":"typelien","value":"CITATION"},{"key":"sens","value":"cible"}]'::jsonb;
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 10), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

@@ -87,8 +87,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "related",
-        summary: "Return bounded graph neighbours with authority signals.",
-        status: CommandStatus::Stub,
+        summary: "Return depth-1 graph neighbours (cites / cited_by / temporal) with authority signals.",
+        status: CommandStatus::Implemented,
         request_schema: "RelatedRequest",
         response_schema: "RelatedResponse",
     },
@@ -126,6 +126,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "SetupRequest",
         response_schema: "SetupResponse",
+    },
+    CommandSpec {
+        name: "doctor",
+        summary: "Non-owning dependency preflight (embedding, models, PG runtime, extensions, index dir); does not start Postgres.",
+        status: CommandStatus::Implemented,
+        request_schema: "DoctorRequest",
+        response_schema: "DoctorResponse",
     },
     CommandSpec {
         name: "session --jsonl",
@@ -189,7 +196,7 @@ pub const COMMANDS: &[CommandSpec] = &[
 /// or stubs not yet implemented anywhere. Kept in sync with the CLI's `dispatch_session_request`
 /// (the `not_implemented` arm) and enforced by tests. The `session --jsonl` / `batch --jsonl`
 /// entries are the protocol itself and are intentionally not listed here.
-pub const SESSION_EXCLUDED_COMMANDS: &[&str] = &["related", "ingest", "eval france-legi", "sync"];
+pub const SESSION_EXCLUDED_COMMANDS: &[&str] = &["ingest", "eval france-legi", "sync"];
 
 /// True when `name` is callable over the warm session protocol.
 pub fn command_session_available(name: &str) -> bool {

@@ -68,8 +68,9 @@ use jurisearch_storage::{
     },
     retrieval::{
         CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery,
-        RetrievalCursor, RetrievalMode, context_documents_json, fetch_documents_json,
-        hybrid_candidates_json, resolve_legi_citation_json, rrf_weights,
+        RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode, context_documents_json,
+        fetch_documents_json, hybrid_candidates_json, related_neighbours_json,
+        resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -163,6 +164,10 @@ enum Command {
     ///
     /// Output: `SetupResponse`. Example:  jurisearch setup
     Setup,
+    /// Run a non-owning dependency preflight (embedding, models, PG runtime, extensions, index dir).
+    ///
+    /// Does NOT start the index Postgres. Output: `DoctorResponse`. Example:  jurisearch doctor
+    Doctor,
     /// Warm JSONL subprocess protocol for order-preserving agent workflows.
     ///
     /// Reads one JSON request per line on stdin, writes one JSON response per line. Example:
@@ -272,6 +277,29 @@ struct SessionContextArgs {
     index_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionRelatedArgs {
+    id: String,
+    #[serde(default = "default_related_rel")]
+    rel: String,
+    #[serde(default = "default_related_limit")]
+    limit: u32,
+    #[serde(default = "default_related_depth")]
+    depth: u32,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn default_related_rel() -> String {
+    "cites".to_string()
+}
+fn default_related_limit() -> u32 {
+    50
+}
+fn default_related_depth() -> u32 {
+    1
+}
+
 #[derive(Debug, Args)]
 struct StatusArgs {
     /// Recompute and cache full replay-snapshot signatures (slower); default reads cached signatures.
@@ -318,11 +346,17 @@ struct CiteArgs {
 
 #[derive(Debug, Args)]
 struct RelatedArgs {
-    /// Stable ID of the document whose graph neighbours to return.
+    /// Exact, version-pinned stable ID of the document whose graph neighbours to return.
     id: String,
-    /// Edge-type filter (e.g. cites, cited_by, temporal, sibling). STUB — not yet applied.
-    #[arg(long)]
-    rel: Option<String>,
+    /// Relation: `cites` (outgoing, default), `cited_by` (incoming), or `temporal` (version family).
+    #[arg(long, default_value = "cites")]
+    rel: String,
+    /// Maximum number of neighbours to return.
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+    /// Traversal depth — only `1` is supported (multi-hop is a later feature).
+    #[arg(long, default_value_t = 1)]
+    depth: u32,
 }
 
 #[derive(Debug, Args)]
@@ -626,11 +660,13 @@ fn run() -> anyhow::Result<()> {
                 emit_cite(args, index_dir.as_deref())
             }
         }
-        Command::Related(args) => emit_error(ErrorObject::not_implemented(&format!(
-            "related id={} rel={}",
-            args.id,
-            args.rel.as_deref().unwrap_or("any")
-        ))),
+        Command::Related(args) => {
+            if args.id.trim().is_empty() {
+                emit_error(ErrorObject::bad_input("related requires a document id"))
+            } else {
+                emit_related(args, index_dir.as_deref())
+            }
+        }
         Command::Context(args) => {
             if args.id.trim().is_empty() {
                 emit_error(ErrorObject::bad_input(
@@ -649,6 +685,7 @@ fn run() -> anyhow::Result<()> {
         }
         Command::Model(args) => emit_model(args),
         Command::Setup => write_json(&setup_payload()),
+        Command::Doctor => write_json(&doctor_payload(index_dir.as_deref())),
         Command::Sync(args) => emit_error(ErrorObject::not_implemented(&format!(
             "sync source={} since={}",
             args.source.as_deref().unwrap_or("unspecified"),
@@ -1593,6 +1630,45 @@ fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<(
     }
 }
 
+fn related_payload(args: RelatedArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    if args.depth != 1 {
+        return Err(ErrorObject::bad_input(
+            "related --depth > 1 is reserved for a later multi-hop graph feature; only depth 1 is supported",
+        ));
+    }
+    if args.rel == "sibling" {
+        return Err(ErrorObject::bad_input(
+            "related --rel sibling is not a graph relation; use `context --siblings` for structural siblings",
+        ));
+    }
+    let relation = RelatedRelation::parse(&args.rel).ok_or_else(|| {
+        ErrorObject::bad_input(format!(
+            "unknown --rel `{}`; expected one of: cites, cited_by, temporal",
+            args.rel
+        ))
+    })?;
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let response = related_neighbours_json(
+        &postgres,
+        &RelatedQuery {
+            document_id: &args.id,
+            rel: relation,
+            limit: args.limit,
+        },
+    )
+    .map_err(storage_error_object)?;
+    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+}
+
+fn emit_related(args: RelatedArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match related_payload(args, index_dir) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
 fn emit_expand(args: QueryArgs) -> anyhow::Result<()> {
     match expand_payload(args) {
         Ok(response) => write_json(&response),
@@ -1810,6 +1886,24 @@ fn session_context_payload(args: Value) -> Result<Value, ErrorObject> {
             id: args.id,
             siblings: args.siblings,
             as_of: args.as_of,
+        },
+        index_dir.as_deref(),
+    )
+}
+
+fn session_related_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionRelatedArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid related args: {error}")))?;
+    if args.id.trim().is_empty() {
+        return Err(ErrorObject::bad_input("related requires a non-empty stable ID"));
+    }
+    let index_dir = args.index_dir;
+    related_payload(
+        RelatedArgs {
+            id: args.id,
+            rel: args.rel,
+            limit: args.limit,
+            depth: args.depth,
         },
         index_dir.as_deref(),
     )
@@ -4288,10 +4382,12 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "fetch" => session_fetch_payload(args),
         "cite" => session_cite_payload(args),
         "context" => session_context_payload(args),
+        "related" => session_related_payload(args),
         "expand" => session_expand_payload(args),
         "model fetch" => session_model_fetch_payload(args),
         "eval phase1" => session_eval_phase1_payload(args),
         "setup" => Ok(setup_payload()),
+        "doctor" => session_doctor_payload(args),
         // One-shot-only commands (the contract's SESSION_EXCLUDED_COMMANDS, e.g. `related`, `ingest`,
         // `eval france-legi`, `sync`) are advertised but not session-callable: reject with
         // not_implemented so the dispatcher matches the agent contract exactly.
@@ -4481,6 +4577,124 @@ fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshot
         "ingest_health": ingest_health,
         "phase1_gate": phase1_gate
     })
+}
+
+fn doctor_check(name: &str, status: &str, detail: Value) -> Value {
+    json!({ "name": name, "status": status, "detail": detail })
+}
+
+/// Non-owning dependency preflight: verifies the embedding config/endpoint/model, the Postgres
+/// runtime + required extension assets (pg_search, vector), and index-dir presence — WITHOUT
+/// starting or owning the index Postgres (so it never fights a running instance). For deep
+/// index/ingest readiness (migrations, query-readiness) run `status`.
+fn doctor_payload(index_dir: Option<&Path>) -> Value {
+    let mut checks: Vec<Value> = Vec::new();
+    let mut ready = true;
+
+    let loaded = loaded_embedding_config();
+
+    // 1. Embedding configuration loads cleanly.
+    match &loaded.config_error {
+        None => checks.push(doctor_check("embedding_config", "pass", json!("loaded"))),
+        Some(error) => {
+            ready = false;
+            checks.push(doctor_check("embedding_config", "fail", json!(error)));
+        }
+    }
+
+    // 2. Embedding endpoint reachability (TCP probe; non-applicable for in-process).
+    let endpoint = embedding_endpoint_status_json(&loaded.config);
+    let endpoint_state = endpoint["state"].as_str().unwrap_or("not_checked");
+    let endpoint_status = match endpoint_state {
+        "reachable" => "pass",
+        "unreachable" | "invalid" => "fail",
+        _ => "warn",
+    };
+    if endpoint_status == "fail" {
+        ready = false;
+    }
+    checks.push(doctor_check("embedding_endpoint", endpoint_status, endpoint));
+
+    // 3. Model cache present when an in-process model is required.
+    let model_cache = model_cache_status(&loaded.config);
+    if !model_cache.required {
+        checks.push(doctor_check("model_cache", "not_required", json!("in-process model not required")));
+    } else if model_cache.model_present() {
+        checks.push(doctor_check("model_cache", "pass", json!("model present")));
+    } else {
+        ready = false;
+        checks.push(doctor_check(
+            "model_cache",
+            "fail",
+            json!("model not cached; run `jurisearch model fetch --allow-download`"),
+        ));
+    }
+
+    // 4. Postgres runtime + required extension assets (filesystem only — no server start).
+    match PgConfig::discover() {
+        Ok(pg_config) => {
+            checks.push(doctor_check("pg_config", "pass", json!(pg_config.version.trim())));
+            for extension in ["pg_search", "vector"] {
+                if pg_config.has_extension_assets(extension) {
+                    checks.push(doctor_check(
+                        "extension_assets",
+                        "pass",
+                        json!(format!("{extension} assets present")),
+                    ));
+                } else {
+                    ready = false;
+                    checks.push(doctor_check(
+                        "extension_assets",
+                        "fail",
+                        json!(format!("{extension} assets missing")),
+                    ));
+                }
+            }
+        }
+        Err(error) => {
+            ready = false;
+            checks.push(doctor_check("pg_config", "fail", json!(error.to_string())));
+        }
+    }
+
+    // 5. Index directory presence (does not open it).
+    match index_dir {
+        Some(path) if path.exists() => {
+            checks.push(doctor_check("index_dir", "pass", json!(path.display().to_string())))
+        }
+        Some(path) => {
+            ready = false;
+            checks.push(doctor_check(
+                "index_dir",
+                "fail",
+                json!(format!("index directory not found: {}", path.display())),
+            ));
+        }
+        None => checks.push(doctor_check(
+            "index_dir",
+            "warn",
+            json!("no --index-dir / $JURISEARCH_INDEX_DIR set"),
+        )),
+    }
+
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "ready": ready,
+        "checks": checks,
+        "note": "Non-owning preflight: the index Postgres is not started. Run `status` for index/ingest readiness."
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionDoctorArgs {
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn session_doctor_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionDoctorArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid doctor args: {error}")))?;
+    Ok(doctor_payload(args.index_dir.as_deref()))
 }
 
 fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
@@ -6211,6 +6425,24 @@ mod tests {
         assert!(
             missing.is_empty(),
             "france_legi_artifact keys absent from EvalFranceLegiResponse schema: {missing:?}"
+        );
+    }
+
+    /// doctor is a non-owning preflight: it returns a ready flag + per-dependency checks and must NOT
+    /// open the index (no ingest_health / phase1_gate, which would require starting Postgres).
+    #[test]
+    fn doctor_payload_is_a_non_owning_preflight() {
+        let payload = doctor_payload(None);
+        assert!(payload["ready"].is_boolean(), "doctor must report `ready`");
+        let checks = payload["checks"].as_array().expect("doctor `checks` array");
+        assert!(!checks.is_empty(), "doctor must run at least one check");
+        for check in checks {
+            assert!(check["name"].is_string(), "each check has a name");
+            assert!(check["status"].is_string(), "each check has a status");
+        }
+        assert!(
+            payload.get("ingest_health").is_none() && payload.get("phase1_gate").is_none(),
+            "doctor must not open the index (no ingest_health/phase1_gate)"
         );
     }
 

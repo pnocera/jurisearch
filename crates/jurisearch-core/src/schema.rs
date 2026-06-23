@@ -545,6 +545,29 @@ pub fn compiled_schema() -> Value {
                     }
                 }
             },
+            "DoctorRequest": {
+                "properties": {
+                    "index_dir": { "type": "string" }
+                }
+            },
+            "DoctorResponse": {
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "ready": { "type": "boolean" },
+                    "note": { "type": "string" },
+                    "checks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "status": { "enum": ["pass", "warn", "fail", "not_required"] },
+                                "detail": {}
+                            }
+                        }
+                    }
+                }
+            },
             "ModelCacheStatus": {
                 "properties": {
                     "required": { "type": "boolean" },
@@ -589,18 +612,70 @@ pub fn compiled_schema() -> Value {
             "RelatedRequest": {
                 "required": ["id"],
                 "properties": {
-                    "id": { "type": "string" },
+                    "id": { "type": "string", "description": "Exact, version-pinned document ID." },
                     "rel": {
-                        "type": "string",
-                        "description": "Edge-type filter (e.g. cites, cited_by, temporal, sibling)."
-                    }
+                        "enum": ["cites", "cited_by", "temporal"],
+                        "default": "cites",
+                        "description": "cites=outgoing citations, cited_by=incoming citations, temporal=version family."
+                    },
+                    "limit": { "type": "integer", "minimum": 1, "default": 50 },
+                    "depth": { "type": "integer", "enum": [1], "default": 1, "description": "Only depth 1 is supported." }
                 }
             },
             "RelatedResponse": {
-                "description": "STUB — not yet implemented; shape is provisional.",
                 "properties": {
                     "id": { "type": "string" },
-                    "neighbours": { "type": "array", "items": { "type": "object" } }
+                    "rel": { "enum": ["cites", "cited_by", "temporal"] },
+                    "depth": { "type": "integer" },
+                    "returned": { "type": "integer" },
+                    "neighbours": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "rel": { "type": "string" },
+                                "direction": { "enum": ["outgoing", "incoming"] },
+                                "depth": { "type": "integer" },
+                                "document": {
+                                    "type": "object",
+                                    "properties": {
+                                        "document_id": { "type": "string" },
+                                        "source_uid": { "type": "string" },
+                                        "citation": { "type": ["string", "null"] },
+                                        "title": { "type": ["string", "null"] },
+                                        "validity": { "type": "object" },
+                                        "source_url": { "type": ["string", "null"] }
+                                    }
+                                },
+                                "edge": {
+                                    "type": "object",
+                                    "properties": {
+                                        "edge_id": { "type": "string" },
+                                        "edge_kind": { "type": "string" },
+                                        "edge_source": { "type": "string" },
+                                        "source_tag": { "type": ["string", "null"] },
+                                        "attributes": { "type": ["array", "null"] }
+                                    }
+                                },
+                                "authority": {
+                                    "type": "object",
+                                    "properties": {
+                                        "score": { "type": "number" },
+                                        "label": { "type": "string" },
+                                        "confidence": { "type": "string" },
+                                        "reasons": { "type": "array", "items": { "type": "string" } }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "pagination": {
+                        "type": "object",
+                        "properties": {
+                            "limit": { "type": "integer" },
+                            "possibly_truncated": { "type": "boolean" }
+                        }
+                    }
                 }
             },
             "SyncRequest": {
