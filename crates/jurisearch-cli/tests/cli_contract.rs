@@ -4666,6 +4666,7 @@ fn ingest_juri_archives_skips_empty_body_decisions() -> Result<(), Box<dyn std::
     assert_eq!(json["run_status"], "completed"); // empty body did NOT abort the run
     assert_eq!(json["inserted_documents"], 1); // the valid decision
     assert_eq!(json["skipped_empty_body_members"], 1);
+    assert_eq!(json["manifest"]["coverage"]["skipped_empty_body_members"], 1);
     assert_eq!(json["failed_members"], 0);
 
     Ok(())
