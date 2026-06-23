@@ -924,8 +924,9 @@ fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec<CanonicalG
         let has_statutory_prefix = matches!(normalized.as_bytes().first(), Some(b'L' | b'R' | b'D'));
 
         // Look just past the number for a "du [même] code …" hint, but stop at the next "article"
-        // keyword so a following reference's code is never mis-attributed to this one.
-        let window = &body[whole.end()..body.len().min(whole.end() + 80)];
+        // keyword so a following reference's code is never mis-attributed to this one. The window end
+        // is floored to a UTF-8 char boundary so accented French bodies cannot panic the slice.
+        let window = &body[whole.end()..char_safe_window_end(body, whole.end(), 80)];
         let tail = match NEXT_ARTICLE_RE.find(window) {
             Some(next) => &window[..next.start()],
             None => window,
@@ -978,6 +979,17 @@ fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec<CanonicalG
     }
 
     edges
+}
+
+/// Byte offset `max_bytes` after `start`, clamped to the string length and floored to the nearest
+/// UTF-8 char boundary at or after `start`. `start` must already be a char boundary (regex match
+/// ends are). This keeps body windowing panic-safe on accented French text.
+fn char_safe_window_end(text: &str, start: usize, max_bytes: usize) -> usize {
+    let mut end = start.saturating_add(max_bytes).min(text.len());
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 /// Normalize a raw matched article number ("L. 1242-14" → "L1242-14", "R.1332-2" → "R1332-2").

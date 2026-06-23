@@ -443,6 +443,50 @@ fn inferred_citation_edges_are_deterministic_and_deduped() {
 }
 
 #[test]
+fn inferred_citation_extraction_is_utf8_window_safe() {
+    // An accented char sits exactly where the 80-byte code-hint window would otherwise be sliced.
+    // A bare article reference (no prefix/code) followed by ~80 bytes of accented prose must not
+    // panic the slice. Padding (>80 chars of accents) pushes the window end into a multi-byte char.
+    let accents = "é".repeat(60); // 120 bytes of 2-byte chars
+    let body = format!("Vu l'article 5 {accents} et l'article L1242-14 du code du travail.");
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        &body,
+    );
+    // Must not panic; "article 5" is a bare number with no code in its (truncated) window -> skipped.
+    let decision = decision(ArchiveSource::Cass, &xml);
+    let numbers: Vec<&str> = decision
+        .inferred_edges
+        .iter()
+        .flat_map(|edge| edge.attributes.iter())
+        .filter(|attribute| attribute.key == "article_number")
+        .map(|attribute| attribute.value.as_str())
+        .collect();
+    assert!(numbers.contains(&"L1242-14"), "got {numbers:?}");
+    assert!(!numbers.contains(&"5"), "bare article leaked: {numbers:?}");
+}
+
+#[test]
+fn inferred_citation_edges_are_capped_per_decision() {
+    // Build a body citing many distinct statutory articles; the per-decision cap must bound output.
+    let mut body = String::new();
+    for n in 1..=200 {
+        body.push_str(&format!("Vu l'article L{n}-1 du code du travail. "));
+    }
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        &body,
+    );
+    let decision = decision(ArchiveSource::Cass, &xml);
+    assert!(
+        decision.inferred_edges.len() <= 64,
+        "cap exceeded: {}",
+        decision.inferred_edges.len()
+    );
+    assert_eq!(decision.inferred_edges.len(), 64);
+}
+
+#[test]
 fn validate_rejects_mislabelled_inferred_edge() {
     let body = "article L1121-1 du code du travail.";
     let xml = JUDI_XML.replace(
