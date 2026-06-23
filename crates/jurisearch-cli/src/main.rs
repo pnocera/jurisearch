@@ -1992,7 +1992,7 @@ fn ingest_legi_archives_payload(
         return Err(error);
     }
     let replay_snapshot_cache = if run_status == IngestRunStatus::Completed {
-        Some(refresh_replay_snapshot(&postgres).map_err(storage_error_object)?)
+        Some(maybe_refresh_replay_snapshot(&postgres)?)
     } else {
         None
     };
@@ -2034,7 +2034,7 @@ fn ingest_legi_archives_payload(
         "quarantine_dir": quarantine_dir,
         "replay_snapshot_cache": replay_snapshot_cache
             .as_ref()
-            .map(|snapshot| replay_snapshot_cache_json("refreshed", snapshot))
+            .map(|snapshot| replay_snapshot_cache_value(snapshot.as_ref()))
     }))
 }
 
@@ -2512,7 +2512,7 @@ fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, Er
     invalidate_cached_query_readiness(&postgres).map_err(storage_error_object)?;
     let report =
         backfill_legi_article_hierarchy_from_metadata(&postgres).map_err(storage_error_object)?;
-    let replay_snapshot = refresh_replay_snapshot(&postgres).map_err(storage_error_object)?;
+    let replay_snapshot = maybe_refresh_replay_snapshot(&postgres)?;
 
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
@@ -2527,12 +2527,41 @@ fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, Er
         } else {
             None::<&str>
         },
-        "replay_snapshot_cache": replay_snapshot_cache_json("refreshed", &replay_snapshot)
+        "replay_snapshot_cache": replay_snapshot_cache_value(replay_snapshot.as_ref())
     }))
 }
 
 fn default_legi_run_id() -> String {
     format!("legi-{}", unix_seconds())
+}
+
+/// Whether maintenance commands should skip the (expensive, full-table MD5) replay-snapshot refresh
+/// at their command boundary. Default false: the refresh keeps `status` cheap via the cached
+/// signature. Setting `JURISEARCH_SKIP_REPLAY_SNAPSHOT` skips it (hundreds of seconds on a large
+/// index) at the cost of a stale cached signature until the next `status --deep`.
+fn replay_snapshot_refresh_skipped() -> bool {
+    std::env::var_os("JURISEARCH_SKIP_REPLAY_SNAPSHOT").is_some()
+}
+
+/// Refresh the replay snapshot unless skipped via env. Returns `None` when skipped.
+fn maybe_refresh_replay_snapshot(
+    postgres: &ManagedPostgres,
+) -> Result<Option<ReplaySnapshotReport>, ErrorObject> {
+    if replay_snapshot_refresh_skipped() {
+        Ok(None)
+    } else {
+        Ok(Some(
+            refresh_replay_snapshot(postgres).map_err(storage_error_object)?,
+        ))
+    }
+}
+
+/// Report value for a maybe-refreshed snapshot: the full cache JSON when refreshed, else `skipped`.
+fn replay_snapshot_cache_value(snapshot: Option<&ReplaySnapshotReport>) -> Value {
+    match snapshot {
+        Some(snapshot) => replay_snapshot_cache_json("refreshed", snapshot),
+        None => json!({ "source": "skipped" }),
+    }
 }
 
 fn replay_snapshot_cache_json(source: &str, snapshot: &ReplaySnapshotReport) -> Value {
@@ -2671,7 +2700,7 @@ fn embed_chunks_payload(
         },
     )
     .map_err(storage_error_object)?;
-    let replay_snapshot = refresh_replay_snapshot(&postgres).map_err(storage_error_object)?;
+    let replay_snapshot = maybe_refresh_replay_snapshot(&postgres)?;
 
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
@@ -2711,7 +2740,7 @@ fn embed_chunks_payload(
             "index_name": rebuild.index_name,
             "index_lists": rebuild.index_lists
         },
-        "replay_snapshot_cache": replay_snapshot_cache_json("refreshed", &replay_snapshot)
+        "replay_snapshot_cache": replay_snapshot_cache_value(replay_snapshot.as_ref())
     }))
 }
 
@@ -5774,6 +5803,14 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn replay_snapshot_cache_value_reports_skipped_when_absent() {
+        assert_eq!(
+            replay_snapshot_cache_value(None),
+            json!({ "source": "skipped" })
+        );
+    }
 
     #[test]
     fn merge_embedding_endpoint_stats_sums_counters_per_base_url() {
