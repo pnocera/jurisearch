@@ -3,11 +3,78 @@ mod common;
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     retrieval::{
-        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
-        RetrievalMode, context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery,
+        RetrievalCursor, RetrievalMode, context_documents_json, fetch_documents_json,
+        hybrid_candidates_json, resolve_legi_citation_json,
     },
     runtime::{ManagedPostgres, StorageError},
 };
+
+#[test]
+fn resolve_legi_citation_pins_version_by_as_of_and_excludes_siblings() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("citation resolution")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-citation-resolution.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    // Two versions of "Décret X Article 33" (1973-1981, 1981-open) plus a sibling "Article 34".
+    postgres.execute_sql(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, citation, title, body, \
+            valid_from, valid_to, source_payload_hash, canonical_json) \
+         VALUES \
+           ('legi:ART33V1@1973-07-14', 'legi', 'article', 'ART33V1', \
+            'Décret X Article 33', 'Article 33', 'v1 body', '1973-07-14', '1981-05-16', \
+            'h1', '{\"official\":true}'), \
+           ('legi:ART33V2@1981-05-16', 'legi', 'article', 'ART33V2', \
+            'Décret X Article 33', 'Article 33', 'v2 body', '1981-05-16', NULL, \
+            'h2', '{\"official\":true}'), \
+           ('legi:ART34@1973-07-14', 'legi', 'article', 'ART34', \
+            'Décret X Article 34', 'Article 34', 'sibling body', '1973-07-14', NULL, \
+            'h3', '{\"official\":true}'); \
+         INSERT INTO chunks \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+            chunk_builder_version, embedding_fingerprint) \
+         VALUES \
+           ('c33v1', 'legi:ART33V1@1973-07-14', 0, 'v1', 'v1', 'h1', 'cv0', NULL), \
+           ('c33v2', 'legi:ART33V2@1981-05-16', 0, 'v2', 'v2', 'h2', 'cv0', NULL), \
+           ('c34', 'legi:ART34@1973-07-14', 0, 's', 's', 'h3', 'cv0', NULL);",
+    )?;
+
+    let resolve = |as_of: &str| -> Result<Vec<String>, StorageError> {
+        let json = resolve_legi_citation_json(
+            &postgres,
+            &CitationResolutionQuery {
+                query: "Décret X Article 33",
+                article_number: "33",
+                code_hint: Some("Décret X"),
+                as_of,
+                kind_filter: Some("article"),
+                limit: 10,
+            },
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&json).expect("resolver json");
+        Ok(value["candidates"]
+            .as_array()
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|candidate| candidate["document_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    };
+
+    // As-of 1975: only V1 is valid; the sibling Article 34 is excluded by the article-number match.
+    assert_eq!(resolve("1975-01-01")?, vec!["legi:ART33V1@1973-07-14".to_owned()]);
+    // As-of 1990: V2 is the valid version.
+    assert_eq!(resolve("1990-01-01")?, vec!["legi:ART33V2@1981-05-16".to_owned()]);
+
+    Ok(())
+}
 
 #[test]
 fn migrated_schema_supports_bm25_and_vector_candidate_retrieval() -> Result<(), StorageError> {

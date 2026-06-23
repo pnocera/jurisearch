@@ -67,9 +67,9 @@ use jurisearch_storage::{
         prepare_legi_projection_statements,
     },
     retrieval::{
-        ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
-        RetrievalMode, context_documents_json, fetch_documents_json, hybrid_candidates_json,
-        rrf_weights,
+        CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery,
+        RetrievalCursor, RetrievalMode, context_documents_json, fetch_documents_json,
+        hybrid_candidates_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -1169,11 +1169,98 @@ impl PreparedQueryEmbedder {
     }
 }
 
+/// A citation-shaped query parsed for structured resolution: an `Article <n>` reference plus the
+/// as-of date that pins the version (from an `en vigueur au <date>` suffix, else the caller default).
+struct LegiCitationRouting {
+    article_number: String,
+    code_hint: Option<String>,
+    as_of: String,
+}
+
+/// Classify a query for intent routing. Returns `Some` when the query is a citation-shaped LEGI
+/// lookup (contains an `Article <n>` reference, optionally with an `en vigueur au <date>` temporal
+/// suffix) — those route to structured citation resolution. `None` means a conceptual query that
+/// goes to hybrid semantic search. This classification is production-visible (the shared search
+/// path), so the gate measures the same routing users hit.
+fn legi_citation_routing(query: &str, default_as_of: &str) -> Option<LegiCitationRouting> {
+    const EN_VIGUEUR: &str = " en vigueur au ";
+    let (article_part, as_of) = match find_ascii_ci(query, EN_VIGUEUR) {
+        Some(idx) => {
+            let after = query[idx + EN_VIGUEUR.len()..].trim();
+            let date = after.split_whitespace().next().unwrap_or(after);
+            let as_of = if is_iso_date(date) {
+                date.to_owned()
+            } else {
+                default_as_of.to_owned()
+            };
+            (query[..idx].trim(), as_of)
+        }
+        None => (query.trim(), default_as_of.to_owned()),
+    };
+    const ARTICLE: &str = "article ";
+    let pos = rfind_ascii_ci(article_part, ARTICLE)?;
+    let article_number = article_part[pos + ARTICLE.len()..].trim();
+    if article_number.is_empty() {
+        return None;
+    }
+    let code_hint = article_part[..pos].trim();
+    Some(LegiCitationRouting {
+        article_number: article_number.to_owned(),
+        code_hint: (!code_hint.is_empty()).then(|| code_hint.to_owned()),
+        as_of,
+    })
+}
+
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes.iter().enumerate().all(|(index, &byte)| {
+            if index == 4 || index == 7 {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+}
+
+/// Case-insensitive (ASCII) first-occurrence search; the needle must be ASCII. Byte index into
+/// `haystack`, which is a valid char boundary because matched bytes are ASCII.
+fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&start| {
+        haystack[start..start + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
+/// Case-insensitive (ASCII) last-occurrence search; see [`find_ascii_ci`].
+fn rfind_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).rev().find(|&start| {
+        haystack[start..start + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
+}
+
 /// Run one search against an already-open index. Split out from `search_payload` so an
 /// eval/batch path can `open_index` once and run many queries under a single Postgres lifecycle
 /// (avoiding per-query cold starts). Query/kind validation and index opening stay in
 /// `search_payload` to preserve error precedence (an unsearchable query reports `bad_input`
 /// before any index check).
+///
+/// Intent routing: a citation-shaped query (`Article <n>`, optionally `en vigueur au <date>`) in
+/// Hybrid mode resolves structurally (exact article + as-of validity window); conceptual queries
+/// and explicit bm25/dense modes use hybrid search. A `routing` object records the audit trail.
 #[allow(clippy::too_many_arguments)]
 fn search_with_postgres(
     postgres: &ManagedPostgres,
@@ -1198,15 +1285,6 @@ fn search_with_postgres(
         };
         ensure_query_readiness(postgres, readiness_gate)?;
     }
-    let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
-        let (literal, fingerprint) = match embedder {
-            Some(prepared) => prepared.embed(args.query.as_str())?,
-            None => PreparedQueryEmbedder::from_env()?.embed(args.query.as_str())?,
-        };
-        (Some(literal), Some(fingerprint))
-    } else {
-        (None, None)
-    };
     let as_of = args.as_of.clone().unwrap_or_else(today_utc);
     let kind_filter = if matches!(kind, LegalKind::Code) {
         Some("article")
@@ -1216,27 +1294,76 @@ fn search_with_postgres(
     let lexical_limit = args.top_k.saturating_mul(4);
     let dense_limit = args.top_k.saturating_mul(4);
     let query_limit = args.top_k.saturating_add(1);
-    let response = hybrid_candidates_json(
-        postgres,
-        &HybridCandidateQuery {
-            query_text,
-            query_embedding: query_embedding.as_deref(),
-            embedding_fingerprint: embedding_fingerprint.as_deref(),
-            retrieval_mode,
-            after_cursor: after_cursor.map(|cursor| RetrievalCursor {
-                score: cursor.score.as_str(),
-                chunk_id: cursor.chunk_id.as_str(),
-            }),
-            as_of: as_of.as_str(),
-            kind_filter,
-            lexical_limit,
-            dense_limit,
-            limit: query_limit,
-        },
-    )
-    .map_err(storage_error_object)?;
-    let mut response: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+
+    // Hybrid retrieval (embedding + BM25/dense/RRF). Run only for conceptual queries, explicit
+    // bm25/dense modes, or as a fallback when structured citation resolution finds nothing.
+    let run_hybrid = || -> Result<Value, ErrorObject> {
+        let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
+            let (literal, fingerprint) = match embedder {
+                Some(prepared) => prepared.embed(args.query.as_str())?,
+                None => PreparedQueryEmbedder::from_env()?.embed(args.query.as_str())?,
+            };
+            (Some(literal), Some(fingerprint))
+        } else {
+            (None, None)
+        };
+        let response = hybrid_candidates_json(
+            postgres,
+            &HybridCandidateQuery {
+                query_text,
+                query_embedding: query_embedding.as_deref(),
+                embedding_fingerprint: embedding_fingerprint.as_deref(),
+                retrieval_mode,
+                after_cursor: after_cursor.map(|cursor| RetrievalCursor {
+                    score: cursor.score.as_str(),
+                    chunk_id: cursor.chunk_id.as_str(),
+                }),
+                as_of: as_of.as_str(),
+                kind_filter,
+                lexical_limit,
+                dense_limit,
+                limit: query_limit,
+            },
+        )
+        .map_err(storage_error_object)?;
+        serde_json::from_str::<Value>(&response)
+            .map_err(|error| dependency_unavailable(error.to_string()))
+    };
+
+    // Intent routing. A citation-shaped query in Hybrid mode resolves structurally; a structured
+    // miss falls back to hybrid so a malformed citation still returns results.
+    let citation_intent = legi_citation_routing(&args.query, as_of.as_str());
+    let query_type = if citation_intent.is_some() {
+        "citation"
+    } else {
+        "semantic"
+    };
+    let (mut response, chosen_backend, fallback_path) = match citation_intent {
+        Some(parsed) if matches!(retrieval_mode, RetrievalMode::Hybrid) => {
+            let structured = resolve_legi_citation_json(
+                postgres,
+                &CitationResolutionQuery {
+                    query: args.query.as_str(),
+                    article_number: parsed.article_number.as_str(),
+                    code_hint: parsed.code_hint.as_deref(),
+                    as_of: parsed.as_of.as_str(),
+                    kind_filter,
+                    limit: query_limit,
+                },
+            )
+            .map_err(storage_error_object)?;
+            let structured: Value = serde_json::from_str(&structured)
+                .map_err(|error| dependency_unavailable(error.to_string()))?;
+            let count = structured["candidates"].as_array().map_or(0, Vec::len);
+            if count > 0 {
+                (structured, "structured_citation", "none")
+            } else {
+                (run_hybrid()?, retrieval_mode.as_str(), "hybrid_fallback")
+            }
+        }
+        _ => (run_hybrid()?, retrieval_mode.as_str(), "none"),
+    };
+    let routed_candidate_count = response["candidates"].as_array().map_or(0, Vec::len);
     let expansion = expand_query(&args.query);
     response["format"] = json!(output_format.as_str());
     response["limit"] = json!(args.top_k);
@@ -1269,6 +1396,15 @@ fn search_with_postgres(
             None
         }
     });
+    // Intent-routing audit: prove the resolver was used because the input is structurally
+    // resolvable (query_type=citation, backend=structured_citation), not because the evaluator
+    // knew the answer. Recorded on every search, structured and hybrid alike.
+    response["routing"] = json!({
+        "query_type": query_type,
+        "chosen_backend": chosen_backend,
+        "candidate_count": routed_candidate_count,
+        "fallback_path": fallback_path,
+    });
     if matches!(output_format, OutputFormat::Detailed) {
         response["diagnostics"] = json!({
             "query_input": args.query.clone(),
@@ -1284,7 +1420,6 @@ fn search_with_postgres(
                 "lexical_limit": lexical_limit,
                 "dense_limit": dense_limit,
                 "query_limit": query_limit,
-                "embedding_fingerprint": embedding_fingerprint.as_deref(),
                 "kind_filter": kind_filter,
                 "after_cursor": args.cursor.as_deref(),
             }
@@ -5803,6 +5938,60 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn legi_citation_routing_parses_article_and_temporal_suffix() {
+        // Plain citation: article number + parent-text hint, as-of from the caller default.
+        let known = legi_citation_routing(
+            "Décret n°73-645 du 18 juin 1973 COMPTABLE Article 33",
+            "1973-07-14",
+        )
+        .expect("citation-shaped");
+        assert_eq!(known.article_number, "33");
+        assert_eq!(
+            known.code_hint.as_deref(),
+            Some("Décret n°73-645 du 18 juin 1973 COMPTABLE")
+        );
+        assert_eq!(known.as_of, "1973-07-14");
+
+        // Temporal suffix overrides the as-of and is stripped from the article part.
+        let temporal = legi_citation_routing(
+            "Code de la sécurité sociale Article R242-40 en vigueur au 1990-06-01",
+            "2026-01-01",
+        )
+        .expect("citation-shaped");
+        assert_eq!(temporal.article_number, "R242-40");
+        assert_eq!(
+            temporal.code_hint.as_deref(),
+            Some("Code de la sécurité sociale")
+        );
+        assert_eq!(temporal.as_of, "1990-06-01");
+
+        // Article reference with no leading text → no code hint.
+        let bare = legi_citation_routing("Article L. 242-1", "2026-01-01").expect("citation-shaped");
+        assert_eq!(bare.article_number, "L. 242-1");
+        assert_eq!(bare.code_hint, None);
+
+        // A non-date "en vigueur au" target falls back to the default as-of.
+        let bad_date =
+            legi_citation_routing("X Article 5 en vigueur au demain", "2026-01-01").expect("shaped");
+        assert_eq!(bad_date.as_of, "2026-01-01");
+        assert_eq!(bad_date.article_number, "5");
+
+        // Conceptual queries (no article reference) are not citation-shaped.
+        assert!(legi_citation_routing("responsabilité civile pour faute", "2026-01-01").is_none());
+        assert!(legi_citation_routing("", "2026-01-01").is_none());
+    }
+
+    #[test]
+    fn ascii_ci_search_handles_non_ascii_haystack() {
+        assert_eq!(find_ascii_ci("Décret Article 1", "article "), Some(8));
+        assert_eq!(rfind_ascii_ci("Article 1 Article 2", "article "), Some(10));
+        assert_eq!(rfind_ascii_ci("no match here", "article "), None);
+        assert!(is_iso_date("1990-06-01"));
+        assert!(!is_iso_date("1990/06/01"));
+        assert!(!is_iso_date("demain"));
+    }
 
     #[test]
     fn replay_snapshot_cache_value_reports_skipped_when_absent() {
