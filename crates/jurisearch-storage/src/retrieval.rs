@@ -968,6 +968,105 @@ const CITATION_FILTER: &str =
 const VERSION_FILTER: &str =
     r#"'[{"key":"debut"},{"key":"fin"},{"key":"num"},{"key":"etat"}]'::jsonb"#;
 
+/// The version family of an article: the target plus its LIEN_ART version-edge neighbours, with a
+/// shared CTE body so `versions` and `diff` resolve the same set. `$id` is interpolated by the caller.
+fn version_family_cte(id: &str) -> String {
+    // No `is_target` column here: LIEN_ART edges include a self-link, so the target also appears in
+    // the edge branch. Keeping the columns identical lets UNION dedupe to one row per document;
+    // consumers derive `is_target` as `document_id = id`.
+    format!(
+        r#"family AS (
+    SELECT d.document_id, d.source_uid, d.citation, d.title,
+           d.valid_from::text AS valid_from, d.valid_to::text AS valid_to, d.body
+    FROM documents d
+    WHERE d.document_id = {id}
+    UNION
+    SELECT td.document_id, td.source_uid, td.citation, td.title,
+           td.valid_from::text AS valid_from, td.valid_to::text AS valid_to, td.body
+    FROM graph_edges e
+    JOIN documents td
+      ON td.source = 'legi' AND td.kind = 'article'
+     AND td.source_uid = e.payload->>'to_source_uid'
+    WHERE e.edge_source = 'publisher'
+      AND e.from_document_id = {id}
+      AND e.payload->>'source_tag' = 'LIEN_ART'
+      AND e.payload->>'to_source_uid' LIKE 'LEGIARTI%'
+      AND e.payload->'attributes' @> {VERSION_FILTER}
+)"#
+    )
+}
+
+/// Version timeline for an article (`versions`): every member of its version family ordered by
+/// validity start. Each entry carries validity window + citation; the requested id is flagged.
+pub fn document_versions_json(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+) -> Result<String, StorageError> {
+    let id = sql_string_literal(document_id);
+    postgres.execute_sql(&format!(
+        r#"
+WITH {family}
+SELECT jsonb_build_object(
+    'id', {id},
+    'count', (SELECT count(*) FROM family),
+    'versions', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'document_id', document_id,
+            'source_uid', source_uid,
+            'citation', citation,
+            'title', title,
+            'validity', jsonb_build_object('from', valid_from, 'to', valid_to, 'to_exclusive', true),
+            'is_target', (document_id = {id})
+        ) ORDER BY valid_from NULLS FIRST, document_id)
+        FROM family
+    ), '[]'::jsonb)
+)::text;
+"#,
+        family = version_family_cte(&id)
+    ))
+}
+
+/// Compare the article versions in force on two dates (`diff`). Returns the family member valid on
+/// each date (full record incl. body) and whether the version changed between them.
+pub fn document_diff_json(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<String, StorageError> {
+    let id = sql_string_literal(document_id);
+    let from_lit = sql_string_literal(from);
+    let to_lit = sql_string_literal(to);
+    postgres.execute_sql(&format!(
+        r#"
+WITH {family},
+from_version AS (
+    SELECT * FROM family f
+    WHERE (f.valid_from IS NULL OR f.valid_from <= {from_lit})
+      AND (f.valid_to IS NULL OR f.valid_to > {from_lit})
+    ORDER BY f.valid_from DESC NULLS LAST LIMIT 1
+),
+to_version AS (
+    SELECT * FROM family f
+    WHERE (f.valid_from IS NULL OR f.valid_from <= {to_lit})
+      AND (f.valid_to IS NULL OR f.valid_to > {to_lit})
+    ORDER BY f.valid_from DESC NULLS LAST LIMIT 1
+)
+SELECT jsonb_build_object(
+    'id', {id},
+    'from', {from_lit},
+    'to', {to_lit},
+    'from_version', (SELECT to_jsonb(f) FROM from_version f),
+    'to_version', (SELECT to_jsonb(t) FROM to_version t),
+    'changed', (
+        (SELECT document_id FROM from_version) IS DISTINCT FROM (SELECT document_id FROM to_version)
+    )
+)::text;
+"#,
+        family = version_family_cte(&id)
+    ))
+}
+
 /// Depth-1 publisher-edge graph traversal for `related`. Resolves typed neighbours of an exact,
 /// version-pinned `document_id`:
 /// - `cites` / `temporal`: outgoing edges (`from_document_id = id`), target resolved by

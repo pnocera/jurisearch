@@ -156,6 +156,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "InspectResponse",
     },
     CommandSpec {
+        name: "versions",
+        summary: "List an article's version timeline (every member of its version family by validity start).",
+        status: CommandStatus::Implemented,
+        request_schema: "VersionsRequest",
+        response_schema: "VersionsResponse",
+    },
+    CommandSpec {
+        name: "diff",
+        summary: "Compare the article versions in force on two dates (which version, and whether it changed).",
+        status: CommandStatus::Implemented,
+        request_schema: "DiffRequest",
+        response_schema: "DiffResponse",
+    },
+    CommandSpec {
         name: "session --jsonl",
         summary: "Warm JSONL subprocess protocol for order-preserving agent workflows.",
         status: CommandStatus::Implemented,

@@ -70,9 +70,9 @@ use jurisearch_storage::{
     retrieval::{
         CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy,
         HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
-        RetrievalOptions, context_documents_json, corpus_stats_json, fetch_documents_json,
-        hybrid_candidates_json, inspect_document_json, related_neighbours_json,
-        resolve_legi_citation_json, rrf_weights,
+        RetrievalOptions, context_documents_json, corpus_stats_json, document_diff_json,
+        document_versions_json, fetch_documents_json, hybrid_candidates_json, inspect_document_json,
+        related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -188,6 +188,14 @@ enum Command {
     ///
     /// Output: `InspectResponse`. Example:  jurisearch inspect legi:LEGIARTI000006850948@1994-08-21
     Inspect(InspectArgs),
+    /// List an article's version timeline (every member of its version family, by validity start).
+    ///
+    /// Output: `VersionsResponse`. Example:  jurisearch versions legi:LEGIARTI000006419298@2002-01-01
+    Versions(VersionsArgs),
+    /// Compare the article versions in force on two dates (which version, and whether it changed).
+    ///
+    /// Output: `DiffResponse`. Example:  jurisearch diff legi:LEGIARTI...@2002-01-01 --from 2002-01-01 --to 2010-01-01
+    Diff(DiffArgs),
     /// Warm JSONL subprocess protocol for order-preserving agent workflows.
     ///
     /// Reads one JSON request per line on stdin, writes one JSON response per line. Example:
@@ -397,6 +405,24 @@ struct StatusArgs {
 struct InspectArgs {
     /// Document id to inspect (e.g. legi:LEGIARTI000006850948@1994-08-21).
     id: String,
+}
+
+#[derive(Debug, Args)]
+struct VersionsArgs {
+    /// Any version's document id; returns the whole version family timeline.
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct DiffArgs {
+    /// Any version's document id (used to resolve the version family).
+    id: String,
+    /// First date (`YYYY-MM-DD`): the version in force on this date.
+    #[arg(long)]
+    from: String,
+    /// Second date (`YYYY-MM-DD`): the version in force on this date.
+    #[arg(long)]
+    to: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -888,6 +914,20 @@ fn run() -> anyhow::Result<()> {
                 }
             }
         }
+        Command::Versions(args) => {
+            if args.id.trim().is_empty() {
+                emit_error(ErrorObject::bad_input("versions requires a document id"))
+            } else {
+                match versions_payload(args, index_dir.as_deref()) {
+                    Ok(response) => write_json(&response),
+                    Err(error) => emit_error(error),
+                }
+            }
+        }
+        Command::Diff(args) => match diff_payload(args, index_dir.as_deref()) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
         Command::Sync(args) => emit_error(ErrorObject::not_implemented(&format!(
             "sync source={} since={}",
             args.source.as_deref().unwrap_or("unspecified"),
@@ -5448,6 +5488,8 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "doctor" => session_doctor_payload(args),
         "stats" => session_stats_payload(args),
         "inspect" => session_inspect_payload(args),
+        "versions" => session_versions_payload(args),
+        "diff" => session_diff_payload(args),
         // One-shot-only commands (the contract's SESSION_EXCLUDED_COMMANDS, e.g. `related`, `ingest`,
         // `eval france-legi`, `sync`) are advertised but not session-callable: reject with
         // not_implemented so the dispatcher matches the agent contract exactly.
@@ -5831,6 +5873,71 @@ fn session_inspect_payload(args: Value) -> Result<Value, ErrorObject> {
     }
     let index_dir = args.index_dir;
     inspect_payload(InspectArgs { id: args.id }, index_dir.as_deref())
+}
+
+fn versions_payload(args: VersionsArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let response = document_versions_json(&postgres, &args.id).map_err(storage_error_object)?;
+    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+}
+
+fn diff_payload(args: DiffArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    if args.id.trim().is_empty() {
+        return Err(ErrorObject::bad_input("diff requires a document id"));
+    }
+    if !is_valid_iso_date(&args.from) || !is_valid_iso_date(&args.to) {
+        return Err(ErrorObject::bad_input(
+            "diff --from and --to must be YYYY-MM-DD dates",
+        ));
+    }
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let response = document_diff_json(&postgres, &args.id, &args.from, &args.to)
+        .map_err(storage_error_object)?;
+    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionVersionsArgs {
+    id: String,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn session_versions_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionVersionsArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid versions args: {error}")))?;
+    if args.id.trim().is_empty() {
+        return Err(ErrorObject::bad_input("versions requires a document id"));
+    }
+    let index_dir = args.index_dir;
+    versions_payload(VersionsArgs { id: args.id }, index_dir.as_deref())
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionDiffArgs {
+    id: String,
+    from: String,
+    to: String,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn session_diff_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionDiffArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid diff args: {error}")))?;
+    let index_dir = args.index_dir;
+    diff_payload(
+        DiffArgs {
+            id: args.id,
+            from: args.from,
+            to: args.to,
+        },
+        index_dir.as_deref(),
+    )
 }
 
 fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {

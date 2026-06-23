@@ -640,6 +640,48 @@ pub fn compiled_schema() -> Value {
                     "outgoing_edges": { "type": "integer" }
                 }
             },
+            "VersionsRequest": {
+                "required": ["id"],
+                "properties": { "id": { "type": "string" } }
+            },
+            "VersionsResponse": {
+                "properties": {
+                    "id": { "type": "string" },
+                    "count": { "type": "integer" },
+                    "versions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": { "type": "string" },
+                                "source_uid": { "type": "string" },
+                                "citation": { "type": ["string", "null"] },
+                                "title": { "type": ["string", "null"] },
+                                "validity": { "type": "object" },
+                                "is_target": { "type": "boolean" }
+                            }
+                        }
+                    }
+                }
+            },
+            "DiffRequest": {
+                "required": ["id", "from", "to"],
+                "properties": {
+                    "id": { "type": "string" },
+                    "from": { "type": "string", "format": "date" },
+                    "to": { "type": "string", "format": "date" }
+                }
+            },
+            "DiffResponse": {
+                "properties": {
+                    "id": { "type": "string" },
+                    "from": { "type": "string", "format": "date" },
+                    "to": { "type": "string", "format": "date" },
+                    "from_version": { "type": ["object", "null"] },
+                    "to_version": { "type": ["object", "null"] },
+                    "changed": { "type": ["boolean", "null"] }
+                }
+            },
             "DoctorResponse": {
                 "properties": {
                     "schema_version": { "type": "string" },
