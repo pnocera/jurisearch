@@ -604,6 +604,42 @@ pub fn compiled_schema() -> Value {
                     "index_dir": { "type": "string" }
                 }
             },
+            "StatsRequest": {
+                "properties": {
+                    "index_dir": { "type": "string" }
+                }
+            },
+            "StatsResponse": {
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "stats": {
+                        "type": "object",
+                        "properties": {
+                            "documents": { "type": "integer" },
+                            "documents_by_kind": { "type": "object" },
+                            "documents_by_source": { "type": "object" },
+                            "chunks": { "type": "integer" },
+                            "chunk_embeddings": { "type": "integer" },
+                            "graph_edges": { "type": "integer" },
+                            "graph_edges_by_kind": { "type": "object" },
+                            "graph_edges_by_source": { "type": "object" }
+                        }
+                    }
+                }
+            },
+            "InspectRequest": {
+                "required": ["id"],
+                "properties": {
+                    "id": { "type": "string" }
+                }
+            },
+            "InspectResponse": {
+                "properties": {
+                    "document": { "type": ["object", "null"], "description": "Full documents row incl. canonical_json." },
+                    "chunk_count": { "type": "integer" },
+                    "outgoing_edges": { "type": "integer" }
+                }
+            },
             "DoctorResponse": {
                 "properties": {
                     "schema_version": { "type": "string" },

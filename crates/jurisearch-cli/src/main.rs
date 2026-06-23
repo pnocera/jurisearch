@@ -70,8 +70,9 @@ use jurisearch_storage::{
     retrieval::{
         CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy,
         HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
-        RetrievalOptions, context_documents_json, fetch_documents_json, hybrid_candidates_json,
-        related_neighbours_json, resolve_legi_citation_json, rrf_weights,
+        RetrievalOptions, context_documents_json, corpus_stats_json, fetch_documents_json,
+        hybrid_candidates_json, inspect_document_json, related_neighbours_json,
+        resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -179,6 +180,14 @@ enum Command {
     ///
     /// Does NOT start the index Postgres. Output: `DoctorResponse`. Example:  jurisearch doctor
     Doctor,
+    /// Report corpus/graph/embedding counts (replaces ad-hoc psql for introspection).
+    ///
+    /// Output: `StatsResponse`. Example:  jurisearch stats
+    Stats,
+    /// Return the raw canonical record for one document id (full row, chunk count, edge count).
+    ///
+    /// Output: `InspectResponse`. Example:  jurisearch inspect legi:LEGIARTI000006850948@1994-08-21
+    Inspect(InspectArgs),
     /// Warm JSONL subprocess protocol for order-preserving agent workflows.
     ///
     /// Reads one JSON request per line on stdin, writes one JSON response per line. Example:
@@ -382,6 +391,12 @@ struct StatusArgs {
     /// Recompute and cache full replay-snapshot signatures (slower); default reads cached signatures.
     #[arg(long)]
     deep: bool,
+}
+
+#[derive(Debug, Args)]
+struct InspectArgs {
+    /// Document id to inspect (e.g. legi:LEGIARTI000006850948@1994-08-21).
+    id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -859,6 +874,20 @@ fn run() -> anyhow::Result<()> {
         Command::Model(args) => emit_model(args),
         Command::Setup => write_json(&setup_payload()),
         Command::Doctor => write_json(&doctor_payload(index_dir.as_deref())),
+        Command::Stats => match stats_payload(index_dir.as_deref()) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
+        Command::Inspect(args) => {
+            if args.id.trim().is_empty() {
+                emit_error(ErrorObject::bad_input("inspect requires a document id"))
+            } else {
+                match inspect_payload(args, index_dir.as_deref()) {
+                    Ok(response) => write_json(&response),
+                    Err(error) => emit_error(error),
+                }
+            }
+        }
         Command::Sync(args) => emit_error(ErrorObject::not_implemented(&format!(
             "sync source={} since={}",
             args.source.as_deref().unwrap_or("unspecified"),
@@ -5417,6 +5446,8 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "eval phase1" => session_eval_phase1_payload(args),
         "setup" => Ok(setup_payload()),
         "doctor" => session_doctor_payload(args),
+        "stats" => session_stats_payload(args),
+        "inspect" => session_inspect_payload(args),
         // One-shot-only commands (the contract's SESSION_EXCLUDED_COMMANDS, e.g. `related`, `ingest`,
         // `eval france-legi`, `sync`) are advertised but not session-callable: reject with
         // not_implemented so the dispatcher matches the agent contract exactly.
@@ -5749,6 +5780,57 @@ fn session_doctor_payload(args: Value) -> Result<Value, ErrorObject> {
     let args = serde_json::from_value::<SessionDoctorArgs>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid doctor args: {error}")))?;
     Ok(doctor_payload(args.index_dir.as_deref()))
+}
+
+fn stats_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    let response = corpus_stats_json(&postgres).map_err(storage_error_object)?;
+    let stats: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    Ok(json!({ "schema_version": SCHEMA_VERSION, "stats": stats }))
+}
+
+fn inspect_payload(args: InspectArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let response = inspect_document_json(&postgres, &args.id).map_err(storage_error_object)?;
+    let value: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if value["document"].is_null() {
+        return Err(no_results(format!("no document with id `{}`", args.id)));
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionStatsArgs {
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn session_stats_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionStatsArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid stats args: {error}")))?;
+    stats_payload(args.index_dir.as_deref())
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionInspectArgs {
+    id: String,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn session_inspect_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionInspectArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid inspect args: {error}")))?;
+    if args.id.trim().is_empty() {
+        return Err(ErrorObject::bad_input("inspect requires a document id"));
+    }
+    let index_dir = args.index_dir;
+    inspect_payload(InspectArgs { id: args.id }, index_dir.as_deref())
 }
 
 fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {

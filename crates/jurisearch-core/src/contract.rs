@@ -142,6 +142,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "DoctorResponse",
     },
     CommandSpec {
+        name: "stats",
+        summary: "Report corpus/graph/embedding counts (replaces ad-hoc psql for introspection).",
+        status: CommandStatus::Implemented,
+        request_schema: "StatsRequest",
+        response_schema: "StatsResponse",
+    },
+    CommandSpec {
+        name: "inspect",
+        summary: "Return the raw canonical record for one document id (full row, chunk count, edge count).",
+        status: CommandStatus::Implemented,
+        request_schema: "InspectRequest",
+        response_schema: "InspectResponse",
+    },
+    CommandSpec {
         name: "session --jsonl",
         summary: "Warm JSONL subprocess protocol for order-preserving agent workflows.",
         status: CommandStatus::Implemented,

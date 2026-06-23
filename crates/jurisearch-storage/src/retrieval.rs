@@ -926,6 +926,43 @@ SELECT jsonb_build_object(
     ))
 }
 
+/// Corpus/graph/embedding counts for `stats` — replaces ad-hoc psql for introspection. The counts
+/// are exact (sequential scans over large tables), so this is an introspection command, not a hot path.
+pub fn corpus_stats_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
+    postgres.execute_sql(
+        r#"
+SELECT jsonb_build_object(
+    'documents', (SELECT count(*) FROM documents),
+    'documents_by_kind', COALESCE((SELECT jsonb_object_agg(kind, c) FROM (SELECT kind, count(*) c FROM documents GROUP BY kind) t), '{}'::jsonb),
+    'documents_by_source', COALESCE((SELECT jsonb_object_agg(source, c) FROM (SELECT source, count(*) c FROM documents GROUP BY source) t), '{}'::jsonb),
+    'chunks', (SELECT count(*) FROM chunks),
+    'chunk_embeddings', (SELECT count(*) FROM chunk_embeddings),
+    'graph_edges', (SELECT count(*) FROM graph_edges),
+    'graph_edges_by_kind', COALESCE((SELECT jsonb_object_agg(edge_kind, c) FROM (SELECT edge_kind, count(*) c FROM graph_edges GROUP BY edge_kind) t), '{}'::jsonb),
+    'graph_edges_by_source', COALESCE((SELECT jsonb_object_agg(edge_source, c) FROM (SELECT edge_source, count(*) c FROM graph_edges GROUP BY edge_source) t), '{}'::jsonb)
+)::text;
+"#,
+    )
+}
+
+/// Raw canonical record for one document (`inspect`): the full `documents` row (incl. canonical_json),
+/// its chunk count, and outgoing edge count. Returns `{"document": null, ...}` when the id is unknown.
+pub fn inspect_document_json(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+) -> Result<String, StorageError> {
+    let id = sql_string_literal(document_id);
+    postgres.execute_sql(&format!(
+        r#"
+SELECT jsonb_build_object(
+    'document', (SELECT to_jsonb(d) FROM documents d WHERE d.document_id = {id}),
+    'chunk_count', (SELECT count(*) FROM chunks WHERE document_id = {id}),
+    'outgoing_edges', (SELECT count(*) FROM graph_edges WHERE from_document_id = {id})
+)::text;
+"#
+    ))
+}
+
 const CITATION_FILTER: &str =
     r#"'[{"key":"typelien","value":"CITATION"},{"key":"sens","value":"cible"}]'::jsonb"#;
 const VERSION_FILTER: &str =
