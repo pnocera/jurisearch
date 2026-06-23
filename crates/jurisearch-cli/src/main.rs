@@ -1123,12 +1123,6 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
     )
 }
 
-/// Run one search against an already-open index. Split out from `search_payload` so an
-/// eval/batch path can `open_index` once and run many queries under a single Postgres lifecycle
-/// (avoiding per-query cold starts). Query/kind validation and index opening stay in
-/// `search_payload` to preserve error precedence (an unsearchable query reports `bad_input`
-/// before any index check).
-#[allow(clippy::too_many_arguments)]
 /// A query-embedding client built once and reused across many searches. Building an
 /// `OpenAiCompatibleClient` loads a tokenizer and a fresh HTTP agent, and `ensure_embedding_runtime_ready`
 /// is a network probe — paying both per query in a batch sweep (the France-LEGI runner issues up to
@@ -1167,6 +1161,12 @@ impl PreparedQueryEmbedder {
     }
 }
 
+/// Run one search against an already-open index. Split out from `search_payload` so an
+/// eval/batch path can `open_index` once and run many queries under a single Postgres lifecycle
+/// (avoiding per-query cold starts). Query/kind validation and index opening stay in
+/// `search_payload` to preserve error precedence (an unsearchable query reports `bad_input`
+/// before any index check).
+#[allow(clippy::too_many_arguments)]
 fn search_with_postgres(
     postgres: &ManagedPostgres,
     args: &SearchArgs,
