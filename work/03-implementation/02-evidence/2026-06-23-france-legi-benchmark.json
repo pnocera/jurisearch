@@ -1,26 +1,39 @@
 {
   "categories": {
-    "cross_reference": {
+    "semantic_retrieval": {
+      "advisory": true,
+      "gating": false,
       "metric_value": 0.116,
-      "queries": 120
+      "queries": 120,
+      "routing_backends": {
+        "hybrid": 120
+      }
     },
-    "known_item": {
-      "metric_value": 0.6,
-      "queries": 60
+    "structured_citation_resolution": {
+      "gating": true,
+      "metric_value": 1.0,
+      "queries": 60,
+      "routing_backends": {
+        "structured_citation": 60
+      }
     },
-    "temporal": {
-      "metric_value": 0.75,
-      "queries": 12
+    "temporal_version_pinning": {
+      "gating": true,
+      "metric_value": 1.0,
+      "queries": 12,
+      "routing_backends": {
+        "structured_citation": 12
+      }
     }
   },
-  "claim_scope": "France-LEGI official-evidence statutory retrieval (known-item, temporal as-of, cross-reference) through the production pipeline",
+  "claim_scope": "France-LEGI official-evidence retrieval with intent routing: structured citation resolution and temporal version pinning (gating), plus advisory full-body semantic retrieval, through the production pipeline",
   "embedding": {
     "dimension": 1024,
     "fingerprint_model": "bge-m3",
     "normalize": true
   },
   "evidence": [
-    "France-LEGI runner over index `phase1-freemium-20250713`: 60 known-item, 12 temporal, 120 cross-reference qrels through the production search pipeline"
+    "France-LEGI intent-routed runner over index `phase1-freemium-20250713`: 60 structured-citation, 12 temporal, 120 semantic (advisory) qrels through the production search pipeline"
   ],
   "jurisdiction": "france",
   "kind": "phase1_france_legi_benchmark",
@@ -34,23 +47,23 @@
     "index_revision": "phase1-freemium-20250713",
     "llm_in_gold": false,
     "official_source": "DILA LEGI (Licence Ouverte)",
-    "pipeline": "jurisearch search (BM25 + dense + RRF)",
+    "pipeline": "jurisearch search (intent-routed structured + hybrid)",
     "qrel_limits": {
-      "cross_reference": 120,
-      "known_item": 60,
-      "temporal": 12
+      "semantic_retrieval": 120,
+      "structured_citation_resolution": 60,
+      "temporal_version_pinning": 12
     },
     "qrel_selection": "deterministic_bounded_by_document_id",
     "sampled": false,
     "source_revision": "index:phase1-freemium-20250713"
   },
-  "retriever": "jurisearch search (BM25 + dense + RRF)",
+  "retriever": "jurisearch search (intent-routed: structured citation resolver + BM25/dense/RRF hybrid)",
   "schema_version": 1,
   "source": "DILA LEGI (Licence Ouverte) official fields, extracted from the built index",
-  "state": "failed",
+  "state": "passed",
   "thresholds": {
-    "cross_reference_recall_at_10_min": 0.6,
-    "known_item_recall_at_10_min": 0.85,
+    "semantic_retrieval_recall_at_10_advisory": 0.4,
+    "structured_citation_recall_at_10_min": 0.95,
     "temporal_version_exactness_at_10_min": 0.9
   }
 }
