@@ -823,6 +823,16 @@ pub fn compiled_schema() -> Value {
                     "since": { "type": ["string", "null"] }
                 }
             },
+            "ServeRequest": {
+                "description": "Bind one transport, then speak the session_envelope protocol over the socket.",
+                "properties": {
+                    "tcp": { "type": ["string", "null"], "description": "host:port (XOR socket)." },
+                    "socket": { "type": ["string", "null"], "description": "Unix socket path (XOR tcp)." }
+                }
+            },
+            "ServeResponse": {
+                "description": "serve does not return a JSON document; each socket connection speaks the JSONL session protocol (request = session_envelope.request, response = success/error). Capability discovery via {\"command\":\"help schema\"}."
+            },
             "SessionRequest": { "$ref": "#/session_envelope/request" },
             "SessionResponse": {
                 "oneOf": [

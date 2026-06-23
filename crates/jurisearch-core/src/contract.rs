@@ -184,6 +184,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "SessionResponse",
     },
     CommandSpec {
+        name: "serve",
+        summary: "Serve the JSONL session protocol over a TCP or Unix socket (single-client, sequential).",
+        status: CommandStatus::Implemented,
+        request_schema: "ServeRequest",
+        response_schema: "ServeResponse",
+    },
+    CommandSpec {
         name: "ingest",
         summary: "Build or inspect official-source ingestion plans and canonical records.",
         status: CommandStatus::Implemented,
@@ -246,7 +253,7 @@ pub const COMMANDS: &[CommandSpec] = &[
 /// (the `not_implemented` arm) and enforced by tests. The `session --jsonl` / `batch --jsonl`
 /// entries are the protocol itself and are intentionally not listed here.
 pub const SESSION_EXCLUDED_COMMANDS: &[&str] =
-    &["ingest", "eval france-legi", "eval run", "eval tune", "sync"];
+    &["ingest", "eval france-legi", "eval run", "eval tune", "serve", "sync"];
 
 /// True when `name` is callable over the warm session protocol.
 pub fn command_session_available(name: &str) -> bool {

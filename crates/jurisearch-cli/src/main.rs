@@ -206,6 +206,13 @@ enum Command {
     /// Like `session` but terminates at end-of-input. Example:
     ///   jurisearch batch --jsonl < requests.jsonl
     Batch(JsonlArgs),
+    /// Serve the JSONL request protocol over a TCP or Unix socket (single-client, sequential).
+    ///
+    /// Exposes the SAME handlers as the warm session, so a thin client gets byte-identical results
+    /// to the one-shot CLI; capability discovery via `{"command":"help schema"}`. The bound
+    /// `--index-dir` is injected into requests that omit it. Example:
+    ///   jurisearch serve --socket /tmp/jurisearch.sock --index-dir /abs/index
+    Serve(ServeArgs),
     /// Official-source ingestion helpers (subcommands: plan-archives, legi-archives, embed-chunks, ...).
     ///
     /// Builds the canonical index from official archives. Example:
@@ -493,6 +500,16 @@ struct ContextArgs {
 struct QueryArgs {
     /// Query whose curated legal-vocabulary expansions to return.
     query: String,
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Bind a TCP listener at host:port (e.g. 127.0.0.1:8099). Provide this OR --socket.
+    #[arg(long)]
+    tcp: Option<String>,
+    /// Bind a Unix-domain socket at this path. Provide this OR --tcp.
+    #[arg(long)]
+    socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -838,6 +855,7 @@ fn run() -> anyhow::Result<()> {
             replay_snapshot_mode(args.deep),
         )),
         Command::Session(args) | Command::Batch(args) => run_jsonl(args),
+        Command::Serve(args) => run_serve(args, index_dir.as_deref()),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
         Command::Eval(eval) => emit_eval(eval, index_dir.as_deref()),
         Command::Search(args) => {
@@ -5430,6 +5448,103 @@ fn line_column_for_offset(contents: &str, byte_offset: usize) -> (usize, usize) 
         }
     }
     (line, column)
+}
+
+/// Inject the server's bound index dir into a request that doesn't specify one, so clients of a
+/// daemon bound to one index can omit `index_dir`.
+fn inject_server_index_dir(args: &mut Value, default_index_dir: &Option<String>) {
+    let Some(dir) = default_index_dir else {
+        return;
+    };
+    if !args.is_object() {
+        *args = json!({});
+    }
+    if let Some(map) = args.as_object_mut() {
+        map.entry("index_dir")
+            .or_insert_with(|| Value::String(dir.clone()));
+    }
+}
+
+/// Serve the JSONL request protocol over one socket, sequentially (the index's advisory lock means
+/// one request holds the index at a time). Reuses `dispatch_session_request` — the same transport-
+/// neutral handler the warm session uses — so results are byte-identical to the one-shot CLI.
+fn serve_jsonl<R: BufRead, W: Write>(
+    reader: R,
+    mut writer: W,
+    default_index_dir: &Option<String>,
+) -> io::Result<()> {
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let (response, should_exit) = match serde_json::from_str::<SessionRequest>(&line) {
+            Ok(mut request) => {
+                inject_server_index_dir(&mut request.args, default_index_dir);
+                dispatch_session_request(request)
+            }
+            Err(error) => (
+                SessionResponse::err(
+                    None,
+                    ErrorObject::bad_input(format!("malformed request: {error}")),
+                ),
+                false,
+            ),
+        };
+        let encoded = serde_json::to_string(&response).unwrap_or_else(|_| {
+            r#"{"ok":false,"error":{"code":"internal","message":"failed to encode response"}}"#
+                .to_owned()
+        });
+        writeln!(writer, "{encoded}")?;
+        writer.flush()?;
+        if should_exit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    let default_index_dir = index_dir.map(|path| path.display().to_string());
+    match (args.tcp.as_deref(), args.socket.as_deref()) {
+        (Some(_), Some(_)) | (None, None) => {
+            emit_error(ErrorObject::bad_input(
+                "serve requires exactly one of --tcp or --socket",
+            ))
+        }
+        (Some(addr), None) => {
+            let listener = std::net::TcpListener::bind(addr)
+                .map_err(|error| anyhow::anyhow!("failed to bind TCP {addr}: {error}"))?;
+            eprintln!(
+                "jurisearch serve: listening on tcp://{addr} (JSONL session protocol; single-client sequential)"
+            );
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let reader = io::BufReader::new(stream.try_clone()?);
+                // Sequential: handle the whole connection before accepting the next (the index's
+                // advisory lock allows only one holder at a time).
+                let _ = serve_jsonl(reader, stream, &default_index_dir);
+            }
+            Ok(())
+        }
+        (None, Some(path)) => {
+            use std::os::unix::net::UnixListener;
+            let _ = fs::remove_file(path);
+            let listener = UnixListener::bind(path).map_err(|error| {
+                anyhow::anyhow!("failed to bind socket {}: {error}", path.display())
+            })?;
+            eprintln!(
+                "jurisearch serve: listening on unix://{} (JSONL session protocol; single-client sequential)",
+                path.display()
+            );
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let reader = io::BufReader::new(stream.try_clone()?);
+                let _ = serve_jsonl(reader, stream, &default_index_dir);
+            }
+            Ok(())
+        }
+    }
 }
 
 fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
