@@ -3674,14 +3674,55 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
     assert_eq!(json["run_status"], "completed");
     assert_eq!(json["inserted_documents"], 1); // only delta B (after cutoff)
 
-    // The index now holds the baseline A + the synced B, but NOT the pre-cutoff C.
+    // A NEWER delta that a no-op sync will NOT process: status freshness must not jump to it.
+    write_tar_gz(
+        archives.path().join("CASS_20250301-000000.tar.gz").as_path(),
+        &[(
+            "juri/cass/JURITEXT000000000004.xml",
+            cass_decision_fixture("JURITEXT000000000004", "23-10004").as_slice(),
+        )],
+    )?;
+    let noop = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["sync", "--source", "cass", "--since", "2999-01-01", "--archives-dir"])
+        .arg(archives.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let noop: Value = serde_json::from_slice(&noop).unwrap();
+    assert_eq!(noop["inserted_documents"], 0); // nothing processed
+    // Honest: a run that processed nothing reports null freshness (BLOCKER fix), not the dir's newest.
+    assert!(noop["manifest"]["source_version"].is_null());
+    assert!(noop["manifest"]["freshness"].is_null());
+
+    // status corpus_sources still reports the last ACTUALLY-processed delta (20250201), not 20250301.
+    let status = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status).unwrap();
+    assert_eq!(status["corpus_sources"]["cass"]["source_version"], "20250201-000000");
+
+    // The index holds the baseline A + the synced B, but NOT the pre-cutoff C or the unprocessed D.
     let postgres = ManagedPostgres::start_durable(_pg_config, index.path())?;
     let count = postgres.execute_sql("SELECT count(*) FROM documents WHERE kind='decision';")?;
     assert_eq!(count.trim(), "2");
-    let has_c = postgres.execute_sql(
-        "SELECT count(*) FROM documents WHERE document_id = 'cass:JURITEXT000000000003';",
-    )?;
-    assert_eq!(has_c.trim(), "0", "pre-cutoff delta was synced despite --since");
+    for missing in ["cass:JURITEXT000000000003", "cass:JURITEXT000000000004"] {
+        let present = postgres.execute_sql(&format!(
+            "SELECT count(*) FROM documents WHERE document_id = '{missing}';"
+        ))?;
+        assert_eq!(present.trim(), "0", "{missing} should not be in the index");
+    }
     postgres.stop()?;
 
     // Validation errors.

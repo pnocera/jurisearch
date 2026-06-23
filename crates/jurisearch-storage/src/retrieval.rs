@@ -1052,7 +1052,11 @@ SELECT COALESCE((
             ) AS summary
         FROM ingest_run
         WHERE status = 'completed'
-        ORDER BY source, completed_at DESC NULLS LAST, run_id DESC
+          -- Only runs that actually advanced freshness (processed archives) define per-source
+          -- freshness; a no-op/incremental sync that read nothing carries a null source_version and
+          -- must not regress the reported freshness to the previous full build.
+          AND manifest->>'source_version' IS NOT NULL
+        ORDER BY source, manifest->>'source_version' DESC, completed_at DESC NULLS LAST, run_id DESC
     ) latest
 ), '{}'::jsonb)::text;
 "#,

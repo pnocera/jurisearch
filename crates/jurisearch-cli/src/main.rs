@@ -3649,10 +3649,20 @@ impl LegiArchiveIngestCounters {
 
 fn legi_archive_manifest(
     plan: &ArchivePlan,
+    latest_processed: Option<&PlannedArchive>,
     counters: &LegiArchiveIngestCounters,
     run_status: &str,
 ) -> Value {
-    let latest_archive = plan.deltas.last().unwrap_or(&plan.baseline);
+    // Freshness/source_version reflect the latest archive ACTUALLY processed (so an incremental or
+    // no-op sync never advances reported corpus freshness for archives it did not read).
+    let freshness = latest_processed.map_or(Value::Null, |archive| {
+        json!({
+            "latest_archive": archive.file_name.as_str(),
+            "latest_archive_kind": archive.kind,
+            "latest_archive_timestamp": archive.timestamp.to_string(),
+            "latest_archive_timestamp_compact": archive.timestamp.compact()
+        })
+    });
     json!({
         "source": "legi",
         "dataset": "LEGI",
@@ -3661,13 +3671,8 @@ fn legi_archive_manifest(
         "parser_version": LEGI_PARSER_VERSION,
         "canonical_schema_version": CANONICAL_SCHEMA_VERSION,
         "code_version": CLI_CODE_VERSION,
-        "source_version": latest_archive.timestamp.to_string(),
-        "freshness": {
-            "latest_archive": latest_archive.file_name.as_str(),
-            "latest_archive_kind": latest_archive.kind,
-            "latest_archive_timestamp": latest_archive.timestamp.to_string(),
-            "latest_archive_timestamp_compact": latest_archive.timestamp.compact()
-        },
+        "source_version": latest_processed.map(|archive| archive.timestamp.to_string()),
+        "freshness": freshness,
         "archive_plan": {
             "baseline": planned_archive_manifest(&plan.baseline),
             "deltas": plan.deltas.iter().map(planned_archive_manifest).collect::<Vec<_>>(),
@@ -3738,15 +3743,26 @@ fn select_archives_to_process<'a>(
     archives
 }
 
-/// Normalize a `--since` value (`YYYY-MM-DD` or a compact `YYYYMMDDHHMMSS`) to the 14-digit compact
-/// archive-timestamp form for lexicographic comparison. Returns `None` for anything unparseable.
+/// Normalize a `--since` value to the 14-digit compact archive-timestamp form for lexicographic
+/// comparison. Accepts ONLY the two documented shapes — `YYYY-MM-DD` or compact `YYYYMMDDHHMMSS` —
+/// and returns `None` for anything else (e.g. `2025/01/15`, `2025-01-15T00:00:00`, noise).
 fn normalize_since(since: &str) -> Option<String> {
-    let digits: String = since.chars().filter(|c| c.is_ascii_digit()).collect();
-    match digits.len() {
-        8 => Some(format!("{digits}000000")),
-        14 => Some(digits),
-        _ => None,
+    let bytes = since.as_bytes();
+    if bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        let digits: String = since.chars().filter(char::is_ascii_digit).collect();
+        return Some(format!("{digits}000000"));
     }
+    if since.len() == 14 && since.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(since.to_owned());
+    }
+    None
 }
 
 fn ingest_legi_archives_payload(
@@ -3773,8 +3789,11 @@ fn ingest_legi_archives_payload(
     let run_id = run_id.unwrap_or_else(default_legi_run_id);
     let archive_plan_json =
         serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
+    let archives = select_archives_to_process(&plan, archive_filter);
+    let latest_processed = archives.last().copied();
     let initial_manifest = legi_archive_manifest(
         &plan,
+        latest_processed,
         &LegiArchiveIngestCounters::default(),
         IngestRunStatus::Running.as_str(),
     );
@@ -3798,9 +3817,8 @@ fn ingest_legi_archives_payload(
     let mut counters = LegiArchiveIngestCounters::default();
     let mut fatal_error = None::<ErrorObject>;
     let limit_members = limit_members.map(|limit| limit as usize);
-    let archives = select_archives_to_process(&plan, archive_filter);
 
-    'archives: for archive in archives {
+    'archives: for archive in &archives {
         let archive_name = archive.file_name.as_str();
         let mut pending_members = Vec::with_capacity(LEGI_INGEST_TRANSACTION_BATCH_SIZE);
         let mut pending_member_bytes = 0usize;
@@ -3925,7 +3943,8 @@ fn ingest_legi_archives_payload(
     } else {
         IngestRunStatus::Failed
     };
-    let final_manifest = legi_archive_manifest(&plan, &counters, manifest_run_status.as_str());
+    let final_manifest =
+        legi_archive_manifest(&plan, latest_processed, &counters, manifest_run_status.as_str());
     let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest_with_client(
         &mut ingest_client,
@@ -4040,10 +4059,21 @@ fn default_juri_run_id(source: ArchiveSource) -> String {
 fn juri_archive_manifest(
     source: ArchiveSource,
     plan: &ArchivePlan,
+    latest_processed: Option<&PlannedArchive>,
     counters: &JuriArchiveIngestCounters,
     run_status: &str,
 ) -> Value {
-    let latest_archive = plan.deltas.last().unwrap_or(&plan.baseline);
+    // Freshness/source_version reflect the latest archive ACTUALLY processed by this run, not the
+    // newest archive in the directory — so an incremental/`--since`-filtered or no-op sync never
+    // advances reported corpus freshness for archives it did not read.
+    let freshness = latest_processed.map_or(Value::Null, |archive| {
+        json!({
+            "latest_archive": archive.file_name.as_str(),
+            "latest_archive_kind": archive.kind,
+            "latest_archive_timestamp": archive.timestamp.to_string(),
+            "latest_archive_timestamp_compact": archive.timestamp.compact()
+        })
+    });
     json!({
         "source": source.as_str(),
         "dataset": source.as_str().to_uppercase(),
@@ -4056,13 +4086,8 @@ fn juri_archive_manifest(
         "parser_version": JURI_PARSER_VERSION,
         "canonical_schema_version": JURI_CANONICAL_SCHEMA_VERSION,
         "code_version": CLI_CODE_VERSION,
-        "source_version": latest_archive.timestamp.to_string(),
-        "freshness": {
-            "latest_archive": latest_archive.file_name.as_str(),
-            "latest_archive_kind": latest_archive.kind,
-            "latest_archive_timestamp": latest_archive.timestamp.to_string(),
-            "latest_archive_timestamp_compact": latest_archive.timestamp.compact()
-        },
+        "source_version": latest_processed.map(|archive| archive.timestamp.to_string()),
+        "freshness": freshness,
         "archive_plan": {
             "baseline": planned_archive_manifest(&plan.baseline),
             "deltas": plan.deltas.iter().map(planned_archive_manifest).collect::<Vec<_>>(),
@@ -4119,9 +4144,12 @@ fn ingest_juri_archives_payload(
     let run_id = run_id.unwrap_or_else(|| default_juri_run_id(source));
     let archive_plan_json =
         serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
+    let archives = select_archives_to_process(&plan, archive_filter);
+    let latest_processed = archives.last().copied();
     let initial_manifest = juri_archive_manifest(
         source,
         &plan,
+        latest_processed,
         &JuriArchiveIngestCounters::default(),
         IngestRunStatus::Running.as_str(),
     );
@@ -4145,9 +4173,8 @@ fn ingest_juri_archives_payload(
     let mut counters = JuriArchiveIngestCounters::default();
     let mut fatal_error = None::<ErrorObject>;
     let limit_members = limit_members.map(|limit| limit as usize);
-    let archives = select_archives_to_process(&plan, archive_filter);
 
-    'archives: for archive in archives {
+    'archives: for archive in &archives {
         let archive_name = archive.file_name.as_str();
         let mut pending_members = Vec::with_capacity(LEGI_INGEST_TRANSACTION_BATCH_SIZE);
         let mut pending_member_bytes = 0usize;
@@ -4241,7 +4268,7 @@ fn ingest_juri_archives_payload(
         IngestRunStatus::Failed
     };
     let final_manifest =
-        juri_archive_manifest(source, &plan, &counters, manifest_run_status.as_str());
+        juri_archive_manifest(source, &plan, latest_processed, &counters, manifest_run_status.as_str());
     let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest_with_client(
         &mut ingest_client,
@@ -9027,8 +9054,13 @@ mod tests {
     fn normalize_since_accepts_date_and_compact_forms() {
         assert_eq!(normalize_since("2025-01-15").as_deref(), Some("20250115000000"));
         assert_eq!(normalize_since("20250201000000").as_deref(), Some("20250201000000"));
+        // Only the two documented shapes are accepted; separators/noise/extra precision are rejected.
         assert_eq!(normalize_since("not-a-date"), None);
         assert_eq!(normalize_since("2025"), None);
+        assert_eq!(normalize_since("2025/01/15"), None);
+        assert_eq!(normalize_since("2025-01-15T00:00:00"), None);
+        assert_eq!(normalize_since("abc20250115xyz"), None);
+        assert_eq!(normalize_since("2025-1-5"), None);
     }
 
     #[test]
