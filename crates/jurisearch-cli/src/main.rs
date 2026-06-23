@@ -68,6 +68,7 @@ use jurisearch_storage::{
     retrieval::{
         ContextDocumentsQuery, FetchDocumentsQuery, HybridCandidateQuery, RetrievalCursor,
         RetrievalMode, context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -816,6 +817,12 @@ fn france_legi_artifact(
             "official_source": "DILA LEGI (Licence Ouverte)",
             "source_revision": source_revision,
             "pipeline": "jurisearch search (BM25 + dense + RRF)",
+            // Record the exact fusion weights so the gate evidence is honest about the retrieval
+            // configuration it measured (dense is down-weighted as a recall-expander).
+            "fusion": {
+                "rrf_lexical_weight": rrf_weights().0,
+                "rrf_dense_weight": rrf_weights().1
+            },
             "code_version": CLI_CODE_VERSION,
             "index_revision": index_revision,
             // The qrel set is a deterministic, reproducible ORDER BY + LIMIT bound (not random or

@@ -5,6 +5,42 @@ use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 const DENSE_TEMPORAL_OVERFETCH_FACTOR: u32 = 4;
 const DEFAULT_CONTEXT_SIBLING_LIMIT: u32 = 50;
 
+// Reciprocal-rank-fusion constant and per-arm weights. LEGI has many near-duplicate sibling
+// articles (same parent text, different article number) whose dense embeddings are nearly
+// identical, so an equal-weight dense arm dilutes the much sharper BM25 ranking on exact-citation
+// queries. The weights let the dense arm act as a recall-expander/tie-breaker rather than an equal
+// vote; tune via env without recompiling. The default down-weights dense to 0.3 (BM25-favored).
+const RRF_K: f64 = 60.0;
+const DEFAULT_RRF_LEXICAL_WEIGHT: f64 = 1.0;
+// Dense down-weighted to a recall-expander/tie-breaker. France-LEGI calibration over the production
+// index: equal weight (1.0) gave known-item recall@10 0.55; 0.3 lifts it to 0.60 with no temporal
+// regression (0.75) and an immaterial cross-reference change. Lower still (0.15) trades temporal
+// away for known-item. See reviews/2026-06-23-retrieval-fusion-*.
+const DEFAULT_RRF_DENSE_WEIGHT: f64 = 0.3;
+
+/// `(lexical_weight, dense_weight)` for hybrid RRF, overridable via
+/// `JURISEARCH_RRF_LEXICAL_WEIGHT` / `JURISEARCH_RRF_DENSE_WEIGHT` (finite, >= 0).
+pub fn rrf_weights() -> (f64, f64) {
+    fn weight(var: &str, default: f64) -> f64 {
+        std::env::var(var)
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|weight| weight.is_finite() && *weight >= 0.0)
+            .unwrap_or(default)
+    }
+    (
+        weight("JURISEARCH_RRF_LEXICAL_WEIGHT", DEFAULT_RRF_LEXICAL_WEIGHT),
+        weight("JURISEARCH_RRF_DENSE_WEIGHT", DEFAULT_RRF_DENSE_WEIGHT),
+    )
+}
+
+/// Format a finite, non-negative f64 as a plain SQL numeric literal (no locale/exponent surprises).
+/// `rrf_weights` already guarantees finiteness; clamp defensively.
+fn format_sql_f64(value: f64) -> String {
+    let value = if value.is_finite() { value.max(0.0) } else { 0.0 };
+    format!("{value:.6}")
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HybridCandidateQuery<'a> {
     pub query_text: &'a str,
@@ -176,6 +212,7 @@ fn ranked_candidate_ctes(
             let query_embedding = sql_string_literal(query_embedding);
             let embedding_fingerprint = sql_string_literal(embedding_fingerprint);
             let dense_pool_limit = dense_pool_limit(query.dense_limit);
+            let (lexical_weight, dense_weight) = rrf_weights();
             Ok(format!(
                 r#"
 lexical AS (
@@ -236,8 +273,8 @@ ranked AS (
         f.lexical_rank,
         f.dense_rank,
         (
-            CASE WHEN f.lexical_rank IS NULL THEN 0.0 ELSE 1.0 / (60.0 + f.lexical_rank) END
-            + CASE WHEN f.dense_rank IS NULL THEN 0.0 ELSE 1.0 / (60.0 + f.dense_rank) END
+            CASE WHEN f.lexical_rank IS NULL THEN 0.0 ELSE {lexical_weight} / ({rrf_k} + f.lexical_rank) END
+            + CASE WHEN f.dense_rank IS NULL THEN 0.0 ELSE {dense_weight} / ({rrf_k} + f.dense_rank) END
         ) AS fused_score
     FROM fused f
 )"#,
@@ -249,6 +286,9 @@ ranked AS (
                 embedding_fingerprint = embedding_fingerprint,
                 dense_pool_limit = dense_pool_limit,
                 dense_limit = query.dense_limit,
+                rrf_k = format_sql_f64(RRF_K),
+                lexical_weight = format_sql_f64(lexical_weight),
+                dense_weight = format_sql_f64(dense_weight),
             ))
         }
         RetrievalMode::Bm25 => Ok(format!(
