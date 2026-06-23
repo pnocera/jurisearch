@@ -510,7 +510,8 @@ pub fn compiled_schema() -> Value {
                     "categories": { "type": ["object", "null"] },
                     "provenance": { "type": ["object", "null"] },
                     "evidence": { "type": "array" },
-                    "reason": { "type": "string" }
+                    "reason": { "type": "string" },
+                    "artifact": { "type": ["object", "null"] }
                 }
             },
             "Phase1GateResponse": {

@@ -23,8 +23,9 @@ of the gating checks; advisory checks (`gating:false`) are reported but never bl
   `human_in_gold`/`llm_in_gold`); and BOTH jurisprudence families plus citation coverage:
   - `judicial_retrieval` `metric=recall_at_10` ≥ 0.50 over ≥ 15 queries (Cassation/appeal);
   - `administrative_retrieval` `metric=recall_at_10` ≥ 0.50 over ≥ 15 queries;
-  - `decision_citation` `metric=decision_citation_accuracy` ≥ 0.95 over ≥ 30 queries, with
-    `identifiers` covering all of `ecli`, `pourvoi`, `cetatext`.
+  - `decision_citation` `metric=decision_citation_accuracy` with a MEASURED per-identifier breakdown
+    `by_identifier.{ecli,pourvoi,cetatext}`, each ≥ 0.95 accuracy over ≥ 10 queries (so coverage of
+    every identifier kind is proven, not just declared).
 
 Advisory: `pseudonymisation_preserved` — preserved verbatim by the juri parser (unit + real-archive
 tests); advisory until the release benchmark asserts no re-identification.

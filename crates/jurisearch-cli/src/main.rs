@@ -128,7 +128,9 @@ const PHASE2_MIN_RETRIEVAL_RECALL_AT_10: f64 = 0.50;
 const PHASE2_MIN_JUDICIAL_RETRIEVAL_QUERIES: u64 = 15;
 const PHASE2_MIN_ADMINISTRATIVE_RETRIEVAL_QUERIES: u64 = 15;
 const PHASE2_MIN_DECISION_CITATION_ACCURACY: f64 = 0.95;
-const PHASE2_MIN_DECISION_CITATION_QUERIES: u64 = 30;
+// Per-identifier floor: each of ECLI/pourvoi/CETATEXT must be MEASURED (not just declared), so the
+// "ECLI/pourvoi/CETATEXT verification" claim cannot pass on an ECLI-only benchmark.
+const PHASE2_MIN_CITATION_QUERIES_PER_IDENTIFIER: u64 = 10;
 const PHASE2_REQUIRED_CITATION_IDENTIFIERS: [&str; 3] = ["ecli", "pourvoi", "cetatext"];
 
 #[derive(Debug, Parser)]
@@ -8146,8 +8148,9 @@ fn phase2_benchmark_payload_with_path(artifact_path: Option<&Path>) -> Value {
 
     let errors = phase2_benchmark_artifact_errors(&artifact);
     // Re-derive the state from the validation, never the artifact's self-reported `state` (which is
-    // preserved only as a diagnostic). Empty errors over the full contract == genuinely passed.
-    payload["artifact_reported_state"] = artifact["state"].clone();
+    // preserved only as a string-or-null diagnostic). Empty errors over the full contract == passed.
+    payload["artifact_reported_state"] =
+        artifact["state"].as_str().map_or(Value::Null, |state| json!(state));
     if errors.is_empty() {
         payload["state"] = json!("passed");
         payload["artifact_error"] = Value::Null;
@@ -8169,7 +8172,7 @@ fn phase2_benchmark_default_payload() -> Value {
         "claim_scope": "full French juridic search (statutes + jurisprudence): judicial (Cassation/appeal) AND administrative retrieval AND ECLI/pourvoi/CETATEXT decision-citation verification, through the production pipeline",
         "required_evidence": [
             "judicial_retrieval AND administrative_retrieval categories, each with metric=recall_at_10 and independent query floors, run through the production search pipeline",
-            "decision_citation category with metric=decision_citation_accuracy and identifiers covering ecli, pourvoi, and cetatext",
+            "decision_citation.by_identifier with a MEASURED breakdown for each of ecli, pourvoi, cetatext (metric=decision_citation_accuracy, per-identifier queries + accuracy at/above floors)",
             "per-category metrics with query counts and the locked bge-m3 fingerprint, at or above policy floors",
             "structured provenance: pipeline='production', non-empty code_version + index_revision, sampled=false, boolean human_in_gold + llm_in_gold",
             "pseudonymisation preservation asserted (no re-identification, no cross-source linking)"
@@ -8179,7 +8182,7 @@ fn phase2_benchmark_default_payload() -> Value {
             "min_judicial_retrieval_queries": PHASE2_MIN_JUDICIAL_RETRIEVAL_QUERIES,
             "min_administrative_retrieval_queries": PHASE2_MIN_ADMINISTRATIVE_RETRIEVAL_QUERIES,
             "decision_citation_accuracy": PHASE2_MIN_DECISION_CITATION_ACCURACY,
-            "min_decision_citation_queries": PHASE2_MIN_DECISION_CITATION_QUERIES,
+            "min_citation_queries_per_identifier": PHASE2_MIN_CITATION_QUERIES_PER_IDENTIFIER,
             "required_citation_identifiers": PHASE2_REQUIRED_CITATION_IDENTIFIERS
         },
         "categories": null,
@@ -8218,6 +8221,8 @@ fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
             errors.push(format!("provenance.{field} must be a non-empty string"));
         }
     }
+    // Recorded as booleans (the policy does not forbid LLM-drafted/human-reviewed gold, only hidden
+    // sampling): sampled must be false; human_in_gold / llm_in_gold are disclosed booleans.
     for flag in ["sampled", "human_in_gold", "llm_in_gold"] {
         if !provenance[flag].is_boolean() {
             errors.push(format!("provenance.{flag} must be a boolean"));
@@ -8244,29 +8249,23 @@ fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
         PHASE2_MIN_ADMINISTRATIVE_RETRIEVAL_QUERIES,
         &mut errors,
     );
+
+    // Decision-citation verification must be MEASURED per identifier kind (not just declared): each of
+    // ECLI/pourvoi/CETATEXT needs its own metric, query count, and accuracy at/above the floors, so an
+    // ECLI-only run cannot open the "ECLI/pourvoi/CETATEXT verification" claim.
     let decision_citation = &artifact["categories"]["decision_citation"];
-    phase2_benchmark_validate_category(
-        decision_citation,
-        "decision_citation",
-        "decision_citation_accuracy",
-        PHASE2_MIN_DECISION_CITATION_ACCURACY,
-        PHASE2_MIN_DECISION_CITATION_QUERIES,
-        &mut errors,
-    );
-    // Citation verification must actually cover all three decision identifier kinds.
-    let identifiers: Vec<String> = decision_citation["identifiers"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.as_str())
-        .map(|value| value.to_ascii_lowercase())
-        .collect();
-    for required in PHASE2_REQUIRED_CITATION_IDENTIFIERS {
-        if !identifiers.iter().any(|identifier| identifier == required) {
-            errors.push(format!(
-                "decision_citation.identifiers must include `{required}` (ECLI/pourvoi/CETATEXT coverage)"
-            ));
-        }
+    if decision_citation["metric"].as_str() != Some("decision_citation_accuracy") {
+        errors.push("category `decision_citation` metric must be `decision_citation_accuracy`".to_owned());
+    }
+    for identifier in PHASE2_REQUIRED_CITATION_IDENTIFIERS {
+        phase2_benchmark_validate_category(
+            &decision_citation["by_identifier"][identifier],
+            &format!("decision_citation.by_identifier.{identifier}"),
+            "decision_citation_accuracy",
+            PHASE2_MIN_DECISION_CITATION_ACCURACY,
+            PHASE2_MIN_CITATION_QUERIES_PER_IDENTIFIER,
+            &mut errors,
+        );
     }
     errors
 }
@@ -9400,8 +9399,12 @@ mod tests {
                 "judicial_retrieval": { "metric": "recall_at_10", "value": 0.62, "queries": 20 },
                 "administrative_retrieval": { "metric": "recall_at_10", "value": 0.58, "queries": 18 },
                 "decision_citation": {
-                    "metric": "decision_citation_accuracy", "value": 0.98, "queries": 40,
-                    "identifiers": ["ecli", "pourvoi", "cetatext"]
+                    "metric": "decision_citation_accuracy",
+                    "by_identifier": {
+                        "ecli": { "metric": "decision_citation_accuracy", "value": 0.98, "queries": 14 },
+                        "pourvoi": { "metric": "decision_citation_accuracy", "value": 0.96, "queries": 12 },
+                        "cetatext": { "metric": "decision_citation_accuracy", "value": 0.97, "queries": 11 }
+                    }
                 }
             }
         })
@@ -9521,11 +9524,25 @@ mod tests {
             derived("metric.json", &|a| a["categories"]["decision_citation"]["metric"] = json!("f1")),
             "failed"
         );
-        // Missing a required citation identifier rejected (BLOCKER 2).
+        // A declared-but-unmeasured identifier (pourvoi breakdown removed) is rejected (r2 BLOCKER):
+        // coverage must be MEASURED, not just listed.
         assert_eq!(
-            derived("ids.json", &|a| a["categories"]["decision_citation"]["identifiers"] = json!(["ecli", "pourvoi"])),
+            derived("ids.json", &|a| { a["categories"]["decision_citation"]["by_identifier"]["pourvoi"] = Value::Null; }),
             "failed"
         );
+        // A below-per-identifier-query-floor breakdown (cetatext = 2 queries) is rejected.
+        assert_eq!(
+            derived("idq.json", &|a| a["categories"]["decision_citation"]["by_identifier"]["cetatext"]["queries"] = json!(2)),
+            "failed"
+        );
+        // A non-string artifact `state` does not crash; it re-derives and coerces the diagnostic.
+        let mut weird: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+        weird["state"] = json!(false);
+        let wpath = dir.path().join("weird_state.json");
+        std::fs::write(&wpath, weird.to_string()).unwrap();
+        let payload = phase2_benchmark_payload_with_path(Some(&wpath));
+        assert_eq!(payload["state"], "passed");
+        assert!(payload["artifact_reported_state"].is_null());
     }
 
     #[test]
