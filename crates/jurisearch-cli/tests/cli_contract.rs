@@ -96,6 +96,14 @@ fn help_schema_json_is_valid_and_lists_commands() {
         "concise"
     );
     assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["group_by"]["default"],
+        "chunk"
+    );
+    assert_eq!(
+        json["schemas"]["SearchRequest"]["properties"]["group_by"]["enum"][1],
+        "document"
+    );
+    assert_eq!(
         json["schemas"]["SearchRequest"]["properties"]["cursor"]["type"],
         "string"
     );
