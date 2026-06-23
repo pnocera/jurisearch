@@ -72,9 +72,9 @@ use jurisearch_storage::{
     retrieval::{
         CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy,
         HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
-        RetrievalOptions, context_documents_json, corpus_stats_json, document_diff_json,
-        document_versions_json, fetch_documents_json, hybrid_candidates_json, inspect_document_json,
-        related_neighbours_json, resolve_legi_citation_json, rrf_weights,
+        RetrievalOptions, context_documents_json, corpus_source_coverage_json, corpus_stats_json,
+        document_diff_json, document_versions_json, fetch_documents_json, hybrid_candidates_json,
+        inspect_document_json, related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
 };
@@ -6559,7 +6559,8 @@ fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshot
     let embedding_base_url = embedding_config.base_url.clone().unwrap_or_default();
     let embedding_manifest = embedding_config.manifest();
     let embedding_fingerprint = embedding_manifest.fingerprint.clone();
-    let (index, ingest_health) = status_index_and_ingest_health(index_dir, replay_snapshot_mode);
+    let (index, ingest_health, corpus_sources) =
+        status_index_and_ingest_health(index_dir, replay_snapshot_mode);
     let phase1_gate = phase1_gate_payload(&index, &ingest_health);
 
     json!({
@@ -6591,6 +6592,7 @@ fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshot
             "endpoint": endpoint
         },
         "ingest_health": ingest_health,
+        "corpus_sources": corpus_sources,
         "phase1_gate": phase1_gate
     })
 }
@@ -7683,7 +7685,7 @@ fn coverage_value_complete(coverage: &Value) -> bool {
 fn status_index_and_ingest_health(
     index_dir: Option<&Path>,
     replay_snapshot_mode: ReplaySnapshotMode,
-) -> (Value, Value) {
+) -> (Value, Value, Value) {
     let Some(index_dir) = configured_index_dir(index_dir) else {
         return (
             json!({
@@ -7692,6 +7694,7 @@ fn status_index_and_ingest_health(
                 "message": "No index has been built yet; Phase 0 scaffold is installed."
             }),
             pending_ingest_health(),
+            Value::Null,
         );
     };
 
@@ -7705,11 +7708,18 @@ fn status_index_and_ingest_health(
                 "message": "The configured index directory is not initialized."
             }),
             pending_ingest_health(),
+            Value::Null,
         );
     }
 
     match open_index(&index_dir) {
         Ok(postgres) => {
+            // Per-source coverage + freshness from each source's latest completed run manifest.
+            // Cheap (small ingest_run table); null if it cannot be read so status still renders.
+            let corpus_sources = match corpus_source_coverage_json(&postgres) {
+                Ok(json_text) => serde_json::from_str(&json_text).unwrap_or(Value::Null),
+                Err(_) => Value::Null,
+            };
             match load_ingest_health_with_replay_snapshot_mode(&postgres, replay_snapshot_mode) {
                 Ok(report) => {
                     let query_ready = coverage_complete(
@@ -7732,6 +7742,7 @@ fn status_index_and_ingest_health(
                             "message": message
                         }),
                         ingest_health_payload(report),
+                        corpus_sources,
                     )
                 }
                 Err(error) => {
@@ -7745,6 +7756,7 @@ fn status_index_and_ingest_health(
                             "error": error
                         }),
                         pending_ingest_health(),
+                        corpus_sources,
                     )
                 }
             }
@@ -7758,6 +7770,7 @@ fn status_index_and_ingest_health(
                 "error": error
             }),
             pending_ingest_health(),
+            Value::Null,
         ),
     }
 }

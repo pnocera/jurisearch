@@ -4244,6 +4244,32 @@ fn ingest_juri_archives_compatible_replay_skips_inserted_members()
     assert_eq!(second["skipped_compatible_members"], 1);
     assert_eq!(second["run_status"], "completed");
 
+    // status reports per-source jurisprudence coverage + freshness with honest provenance.
+    let status = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .arg("status")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status)?;
+    let jade = &status["corpus_sources"]["jade"];
+    assert_eq!(jade["dataset"], "JADE");
+    assert_eq!(jade["source_version"], "20250101-000000");
+    assert_eq!(jade["zone_accurate"], false);
+    assert_eq!(jade["chunking_provenance"], "heuristic");
+    assert!(jade["latest_completed_run"].is_string());
+    assert_eq!(
+        jade["freshness"]["latest_archive"],
+        "Freemium_jade_global_20250101-000000.tar.gz"
+    );
+    // The latest run here is a no-op replay, so its per-run inserts are 0 (cumulative corpus
+    // counts live in `stats`); freshness + honest provenance are what status surfaces.
+    assert_eq!(jade["last_run_coverage"]["inserted_documents"], 0);
+
     Ok(())
 }
 

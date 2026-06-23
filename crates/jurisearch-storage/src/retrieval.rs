@@ -945,6 +945,39 @@ SELECT jsonb_build_object(
     )
 }
 
+/// Per-source corpus coverage + freshness for `status`, read cheaply from each source's latest
+/// completed ingest run manifest (no live full-corpus counts). Surfaces honest zone/chunking
+/// provenance so judicial (cass/capp/inca) vs administrative (jade) jurisprudence coverage and
+/// freshness are visible alongside legi. Sources without a completed run simply do not appear.
+pub fn corpus_source_coverage_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
+    postgres.execute_sql(
+        r#"
+SELECT COALESCE((
+    SELECT jsonb_object_agg(source, summary)
+    FROM (
+        SELECT DISTINCT ON (source)
+            source,
+            jsonb_build_object(
+                'latest_completed_run', run_id,
+                'completed_at', completed_at,
+                'dataset', manifest->>'dataset',
+                'source_version', manifest->>'source_version',
+                'zone_accurate', COALESCE(manifest->'zone_accurate', 'null'::jsonb),
+                'chunking_provenance', manifest->>'chunking_provenance',
+                'freshness', COALESCE(manifest->'freshness', 'null'::jsonb),
+                -- Per-run insert counts from the latest run (a replay/sync may legitimately be 0);
+                -- cumulative live corpus counts are exposed by the `stats` command.
+                'last_run_coverage', COALESCE(manifest->'coverage', '{}'::jsonb)
+            ) AS summary
+        FROM ingest_run
+        WHERE status = 'completed'
+        ORDER BY source, completed_at DESC NULLS LAST, run_id DESC
+    ) latest
+), '{}'::jsonb)::text;
+"#,
+    )
+}
+
 /// Raw canonical record for one document (`inspect`): the full `documents` row (incl. canonical_json),
 /// its chunk count, and outgoing edge count. Returns `{"document": null, ...}` when the id is unknown.
 pub fn inspect_document_json(
