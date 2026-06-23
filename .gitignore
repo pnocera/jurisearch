@@ -29,3 +29,6 @@ __pycache__/
 *.inprogress
 *.lock
 *.failed
+
+# codex ask Q&A transcripts (kept local, not tracked)
+qa/
