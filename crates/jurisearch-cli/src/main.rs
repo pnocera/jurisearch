@@ -596,12 +596,21 @@ struct JsonlArgs {
 
 #[derive(Debug, Args)]
 struct SyncArgs {
-    /// Official source to synchronize (e.g. `legi`). STUB — not yet implemented.
+    /// Source to synchronize: `legi`, `cass`, `capp`, `inca`, or `jade`.
     #[arg(long)]
     source: Option<String>,
-    /// Only pull deltas since this revision/date. STUB — not yet implemented.
+    /// Directory containing the source's delta archives (and baseline).
+    #[arg(long)]
+    archives_dir: Option<PathBuf>,
+    /// Only ingest delta archives at/after this date (`YYYY-MM-DD`) or compact `YYYYMMDDHHMMSS`.
     #[arg(long)]
     since: Option<String>,
+    /// Write skipped/oversized/invalid members to this directory for inspection.
+    #[arg(long)]
+    quarantine_dir: Option<PathBuf>,
+    /// Conservative mode: quarantine on any parse anomaly instead of best-effort recovery.
+    #[arg(long)]
+    safe_mode: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1071,12 +1080,78 @@ fn run() -> anyhow::Result<()> {
             Ok(response) => write_json(&response),
             Err(error) => emit_error(error),
         },
-        Command::Sync(args) => emit_error(ErrorObject::not_implemented(&format!(
-            "sync source={} since={}",
-            args.source.as_deref().unwrap_or("unspecified"),
-            args.since.as_deref().unwrap_or("none")
-        ))),
+        Command::Sync(args) => match sync_payload(args, index_dir.as_deref()) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
     }
+}
+
+/// Incremental sync: pull a source's new delta archives into the existing index. Reuses the proven
+/// per-source ingest path (and its compatibility-based resume, which skips already-ingested members
+/// and blocks parser/schema/code/source-payload mismatches — so sync can never silently mix
+/// incompatible versions). `--since` bounds which delta archives are scanned so a sync never
+/// re-reads the full baseline corpus; `status.corpus_sources` then reports the new freshness.
+fn sync_payload(args: SyncArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    let source_token = args.source.as_deref().ok_or_else(|| {
+        ErrorObject::bad_input("sync requires --source (legi|cass|capp|inca|jade)")
+    })?;
+    let source = ArchiveSource::from_token(source_token).ok_or_else(|| {
+        ErrorObject::bad_input(format!(
+            "unknown sync --source `{source_token}`; expected legi|cass|capp|inca|jade"
+        ))
+    })?;
+    let archives_dir = args
+        .archives_dir
+        .as_deref()
+        .ok_or_else(|| ErrorObject::bad_input("sync requires --archives-dir"))?;
+    let since_compact = match args.since.as_deref() {
+        None => None,
+        Some(raw) => Some(normalize_since(raw).ok_or_else(|| {
+            ErrorObject::bad_input(format!(
+                "invalid --since `{raw}`; expected YYYY-MM-DD or YYYYMMDDHHMMSS"
+            ))
+        })?),
+    };
+    // Incremental: a prior full build already ingested the baseline; only newer deltas are pulled.
+    let archive_filter = ArchiveSyncFilter {
+        incremental: true,
+        since_compact: since_compact.as_deref(),
+    };
+
+    let mut response = if source.is_jurisprudence() {
+        ingest_juri_archives_payload(
+            index_dir,
+            source,
+            archives_dir,
+            None,
+            None,
+            DEFAULT_MEMBER_BYTE_LIMIT,
+            args.quarantine_dir.as_deref(),
+            args.safe_mode,
+            archive_filter,
+        )?
+    } else {
+        ingest_legi_archives_payload(
+            index_dir,
+            archives_dir,
+            None,
+            None,
+            DEFAULT_MEMBER_BYTE_LIMIT,
+            args.quarantine_dir.as_deref(),
+            args.safe_mode,
+            archive_filter,
+        )?
+    };
+
+    // Re-frame the ingest result as a sync result.
+    if let Value::Object(map) = &mut response {
+        map.insert("command".to_owned(), json!("sync"));
+        map.insert("mode".to_owned(), json!("incremental"));
+        map.insert("source".to_owned(), json!(source.as_str()));
+        map.insert("synced_since".to_owned(), json!(args.since));
+    }
+    Ok(response)
 }
 
 fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
@@ -3441,6 +3516,7 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 max_member_bytes,
                 quarantine_dir.as_deref(),
                 safe_mode,
+                ArchiveSyncFilter::default(),
             ) {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
@@ -3474,6 +3550,7 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 max_member_bytes,
                 quarantine_dir.as_deref(),
                 safe_mode,
+                ArchiveSyncFilter::default(),
             ) {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
@@ -3630,6 +3707,48 @@ fn planned_archive_manifest(archive: &PlannedArchive) -> Value {
     })
 }
 
+/// Which archives in a plan to process. The default (`incremental=false`, no `since`) processes the
+/// baseline plus every delta — the full-build behavior. `sync` uses `incremental=true` (a prior full
+/// build already ingested the baseline) plus an optional `since_compact` lower bound on delta
+/// timestamps so a sync never re-scans the entire baseline corpus.
+#[derive(Debug, Clone, Copy, Default)]
+struct ArchiveSyncFilter<'a> {
+    incremental: bool,
+    since_compact: Option<&'a str>,
+}
+
+/// Ordered list of plan archives to process under `filter` (baseline first when not incremental,
+/// then deltas at/after `since_compact`). Deltas keep the planner's deterministic order.
+fn select_archives_to_process<'a>(
+    plan: &'a ArchivePlan,
+    filter: ArchiveSyncFilter<'_>,
+) -> Vec<&'a PlannedArchive> {
+    let mut archives = Vec::new();
+    if !filter.incremental {
+        archives.push(&plan.baseline);
+    }
+    for delta in &plan.deltas {
+        if filter
+            .since_compact
+            .is_none_or(|since| delta.timestamp.compact() >= since)
+        {
+            archives.push(delta);
+        }
+    }
+    archives
+}
+
+/// Normalize a `--since` value (`YYYY-MM-DD` or a compact `YYYYMMDDHHMMSS`) to the 14-digit compact
+/// archive-timestamp form for lexicographic comparison. Returns `None` for anything unparseable.
+fn normalize_since(since: &str) -> Option<String> {
+    let digits: String = since.chars().filter(|c| c.is_ascii_digit()).collect();
+    match digits.len() {
+        8 => Some(format!("{digits}000000")),
+        14 => Some(digits),
+        _ => None,
+    }
+}
+
 fn ingest_legi_archives_payload(
     index_dir: Option<&Path>,
     archives_dir: &Path,
@@ -3638,6 +3757,7 @@ fn ingest_legi_archives_payload(
     max_member_bytes: u64,
     quarantine_dir: Option<&Path>,
     safe_mode: bool,
+    archive_filter: ArchiveSyncFilter<'_>,
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_configured_index_dir(index_dir)?;
     let postgres = open_index_for_bulk_ingest(index_dir.as_path())?;
@@ -3678,8 +3798,7 @@ fn ingest_legi_archives_payload(
     let mut counters = LegiArchiveIngestCounters::default();
     let mut fatal_error = None::<ErrorObject>;
     let limit_members = limit_members.map(|limit| limit as usize);
-    let mut archives = vec![&plan.baseline];
-    archives.extend(plan.deltas.iter());
+    let archives = select_archives_to_process(&plan, archive_filter);
 
     'archives: for archive in archives {
         let archive_name = archive.file_name.as_str();
@@ -3975,6 +4094,7 @@ fn ingest_juri_archives_payload(
     max_member_bytes: u64,
     quarantine_dir: Option<&Path>,
     safe_mode: bool,
+    archive_filter: ArchiveSyncFilter<'_>,
 ) -> Result<Value, ErrorObject> {
     if !source.is_jurisprudence() {
         return Err(ErrorObject::bad_input(format!(
@@ -4025,8 +4145,7 @@ fn ingest_juri_archives_payload(
     let mut counters = JuriArchiveIngestCounters::default();
     let mut fatal_error = None::<ErrorObject>;
     let limit_members = limit_members.map(|limit| limit as usize);
-    let mut archives = vec![&plan.baseline];
-    archives.extend(plan.deltas.iter());
+    let archives = select_archives_to_process(&plan, archive_filter);
 
     'archives: for archive in archives {
         let archive_name = archive.file_name.as_str();
@@ -8903,6 +9022,14 @@ fn write_session_response(
 mod tests {
     use super::*;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+
+    #[test]
+    fn normalize_since_accepts_date_and_compact_forms() {
+        assert_eq!(normalize_since("2025-01-15").as_deref(), Some("20250115000000"));
+        assert_eq!(normalize_since("20250201000000").as_deref(), Some("20250201000000"));
+        assert_eq!(normalize_since("not-a-date"), None);
+        assert_eq!(normalize_since("2025"), None);
+    }
 
     #[test]
     fn heuristic_dispositif_is_utf8_safe_with_accents_before_marker() {

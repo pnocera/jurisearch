@@ -3595,6 +3595,117 @@ PAR CES MOTIFS, la Cour REJETTE le pourvoi.</CONTENU></BLOC_TEXTUEL>
 }
 
 #[test]
+fn sync_pulls_new_deltas_incrementally_with_since_filter()
+-> Result<(), Box<dyn std::error::Error>> {
+    let Some(_pg_config) = discover_pg_config("CLI sync")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-sync.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-sync-archives.")
+        .tempdir()?;
+
+    // Baseline with decision A.
+    write_tar_gz(
+        archives
+            .path()
+            .join("Freemium_cass_global_20250101-000000.tar.gz")
+            .as_path(),
+        &[(
+            "juri/cass/JURITEXT000000000001.xml",
+            cass_decision_fixture("JURITEXT000000000001", "23-10001").as_slice(),
+        )],
+    )?;
+
+    // Full build of the baseline.
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-base"])
+        .assert()
+        .success();
+
+    // Two deltas: one BEFORE the --since cutoff (decision C), one AFTER (decision B).
+    write_tar_gz(
+        archives.path().join("CASS_20250110-000000.tar.gz").as_path(),
+        &[(
+            "juri/cass/JURITEXT000000000003.xml",
+            cass_decision_fixture("JURITEXT000000000003", "23-10003").as_slice(),
+        )],
+    )?;
+    write_tar_gz(
+        archives.path().join("CASS_20250201-000000.tar.gz").as_path(),
+        &[(
+            "juri/cass/JURITEXT000000000002.xml",
+            cass_decision_fixture("JURITEXT000000000002", "23-10002").as_slice(),
+        )],
+    )?;
+
+    // Sync only deltas at/after 2025-01-15: B is pulled, C (2025-01-10) and the baseline are not.
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args([
+            "sync",
+            "--source",
+            "cass",
+            "--since",
+            "2025-01-15",
+            "--archives-dir",
+        ])
+        .arg(archives.path())
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["command"], "sync");
+    assert_eq!(json["mode"], "incremental");
+    assert_eq!(json["source"], "cass");
+    assert_eq!(json["synced_since"], "2025-01-15");
+    assert_eq!(json["run_status"], "completed");
+    assert_eq!(json["inserted_documents"], 1); // only delta B (after cutoff)
+
+    // The index now holds the baseline A + the synced B, but NOT the pre-cutoff C.
+    let postgres = ManagedPostgres::start_durable(_pg_config, index.path())?;
+    let count = postgres.execute_sql("SELECT count(*) FROM documents WHERE kind='decision';")?;
+    assert_eq!(count.trim(), "2");
+    let has_c = postgres.execute_sql(
+        "SELECT count(*) FROM documents WHERE document_id = 'cass:JURITEXT000000000003';",
+    )?;
+    assert_eq!(has_c.trim(), "0", "pre-cutoff delta was synced despite --since");
+    postgres.stop()?;
+
+    // Validation errors.
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["sync", "--source", "bogus", "--archives-dir"])
+        .arg(archives.path())
+        .assert()
+        .code(2);
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["sync", "--source", "cass", "--since", "not-a-date", "--archives-dir"])
+        .arg(archives.path())
+        .assert()
+        .code(2);
+
+    Ok(())
+}
+
+#[test]
 fn context_returns_hierarchy_and_siblings_from_existing_index() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI context existing index")? else {
         return Ok(());
