@@ -62,6 +62,7 @@ fn parses_real_jurisprudence_subsets() {
         let mut parsed_decisions = 0usize;
         let mut publisher_edges = 0usize;
         let mut decisions_with_summary = 0usize;
+        let mut empty_body = 0usize;
         let mut natures = BTreeSet::new();
         let mut unsupported_roots = BTreeSet::new();
 
@@ -101,6 +102,10 @@ fn parses_real_jurisprudence_subsets() {
                 Ok(ParsedJuriXml::UnsupportedRoot { root }) => {
                     unsupported_roots.insert(root);
                 }
+                // Empty-body (metadata-only) decisions are a legitimate skip in real data.
+                Err(jurisearch_ingest::juri::JuriParseError::EmptyBody { .. }) => {
+                    empty_body += 1;
+                }
                 Err(error) => panic!("{member_path} failed to parse: {error}"),
             }
 
@@ -113,7 +118,7 @@ fn parses_real_jurisprudence_subsets() {
         .unwrap_or_else(|error| panic!("failed to stream {}: {error}", archive_path.display()));
 
         eprintln!(
-            "{source}: visited {visited}, decisions {parsed_decisions}, summaries {decisions_with_summary}, edges {publisher_edges}, natures {natures:?}, unsupported {unsupported_roots:?}"
+            "{source}: visited {visited}, decisions {parsed_decisions}, summaries {decisions_with_summary}, empty_body {empty_body}, edges {publisher_edges}, natures {natures:?}, unsupported {unsupported_roots:?}"
         );
         assert!(
             parsed_decisions > 0,

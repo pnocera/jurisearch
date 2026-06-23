@@ -228,6 +228,21 @@ fn rejects_invalid_source_uid() {
 }
 
 #[test]
+fn empty_body_decision_is_typed_not_built() {
+    // A decision whose CONTENU is empty/whitespace surfaces a typed EmptyBody signal (the ingest
+    // skips it) rather than producing an invalid record that fails projection.
+    let xml = JUDI_XML.replace(
+        "LA COUR, après débats &amp; délibéré, concernant M. [T] [P] domicilié [Adresse 2],<br/>\n<br/>rejette le pourvoi.",
+        "  <br/>  ",
+    );
+    let error = parse_juri_xml(ArchiveSource::Cass, &xml, provenance()).unwrap_err();
+    assert!(matches!(
+        error,
+        JuriParseError::EmptyBody { source_uid } if source_uid == "JURITEXT000051824029"
+    ));
+}
+
+#[test]
 fn rejects_missing_decision_date() {
     let xml = JUDI_XML.replace("<DATE_DEC>2025-06-27</DATE_DEC>", "");
     let error = parse_juri_xml(ArchiveSource::Cass, &xml, provenance()).unwrap_err();

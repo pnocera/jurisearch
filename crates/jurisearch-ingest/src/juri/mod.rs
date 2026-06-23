@@ -360,6 +360,8 @@ pub enum JuriParseError {
         dataset: String,
         root: &'static str,
     },
+    #[error("decision `{source_uid}` has no textual body (empty BLOC_TEXTUEL/CONTENU)")]
+    EmptyBody { source_uid: String },
 }
 
 /// Parse a bulk jurisprudence archive member into a canonical decision (or an unsupported-root
@@ -655,6 +657,13 @@ impl RawDecision {
         };
 
         let body = finish_body(&self.body);
+        // Some real DILA decisions carry no textual `BLOC_TEXTUEL/CONTENU` (metadata-only / withheld
+        // records). They are not corrupt, but there is nothing to chunk or search, so surface a typed
+        // empty-body signal the ingest treats as a member-level SKIP rather than a fatal projection
+        // failure that would abort the whole run.
+        if body.trim().is_empty() {
+            return Err(JuriParseError::EmptyBody { source_uid });
+        }
         let source_payload_hash = provenance
             .payload_hash
             .clone()

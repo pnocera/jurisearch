@@ -4613,6 +4613,65 @@ fn ingest_juri_archives_records_accounting_and_quarantines_failures()
 }
 
 #[test]
+fn ingest_juri_archives_skips_empty_body_decisions() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(_pg_config) = discover_pg_config("CLI juri empty body")? else {
+        return Ok(());
+    };
+    let index = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-empty.")
+        .tempdir()?;
+    let archives = tempfile::Builder::new()
+        .prefix("jurisearch-cli-juri-empty-archives.")
+        .tempdir()?;
+    let archive_path = archives
+        .path()
+        .join("Freemium_cass_global_20250101-000000.tar.gz");
+    // An empty-CONTENU decision (metadata only) alongside a normal one: the run must COMPLETE,
+    // skipping the empty record (not abort the whole ingest).
+    let empty_body = br#"<?xml version="1.0" encoding="UTF-8"?>
+<TEXTE_JURI_JUDI>
+<META><META_COMMUN><ID>JURITEXT000000099999</ID><ANCIEN_ID/><ORIGINE>JURI</ORIGINE>
+<URL>texte/juri/judi/JURI/TEXT/.../JURITEXT000000099999.xml</URL><NATURE>ARRET</NATURE>
+</META_COMMUN><META_SPEC><META_JURI>
+<TITRE>Cour de cassation, 1 janvier 2025</TITRE><DATE_DEC>2025-01-01</DATE_DEC>
+<JURIDICTION>Cour de cassation</JURIDICTION><NUMERO>X1</NUMERO><SOLUTION/>
+</META_JURI><META_JURI_JUDI><NUMEROS_AFFAIRES/><PUBLI_BULL publie="non"/><FORMATION/></META_JURI_JUDI>
+</META_SPEC></META>
+<TEXTE><BLOC_TEXTUEL><CONTENU> </CONTENU></BLOC_TEXTUEL><SOMMAIRE/></TEXTE><LIENS/>
+</TEXTE_JURI_JUDI>"#;
+    write_tar_gz(
+        archive_path.as_path(),
+        &[
+            (
+                "juri/cass/JURITEXT000051824029.xml",
+                cass_decision_fixture("JURITEXT000051824029", "23-14999").as_slice(),
+            ),
+            ("juri/cass/JURITEXT000000099999.xml", empty_body),
+        ],
+    )?;
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("--index-dir")
+        .arg(index.path())
+        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .arg(archives.path())
+        .args(["--run-id", "run-empty"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["run_status"], "completed"); // empty body did NOT abort the run
+    assert_eq!(json["inserted_documents"], 1); // the valid decision
+    assert_eq!(json["skipped_empty_body_members"], 1);
+    assert_eq!(json["failed_members"], 0);
+
+    Ok(())
+}
+
+#[test]
 fn ingest_juri_archives_compatible_replay_skips_inserted_members()
 -> Result<(), Box<dyn std::error::Error>> {
     let Some(_pg_config) = discover_pg_config("CLI juri replay skip")? else {

@@ -4050,6 +4050,7 @@ struct JuriArchiveIngestCounters {
     inserted_inferred_edges: usize,
     skipped_members: usize,
     skipped_compatible_members: usize,
+    skipped_empty_body_members: usize,
     failed_members: usize,
     quarantined_payloads: usize,
     unsupported_roots: BTreeMap<String, usize>,
@@ -4063,6 +4064,7 @@ impl JuriArchiveIngestCounters {
         self.inserted_inferred_edges += committed.inserted_inferred_edges;
         self.skipped_members += committed.skipped_members;
         self.skipped_compatible_members += committed.skipped_compatible_members;
+        self.skipped_empty_body_members += committed.skipped_empty_body_members;
         self.failed_members += committed.failed_members;
         self.quarantined_payloads += committed.quarantined_payloads;
         for (root, count) in committed.unsupported_roots {
@@ -4139,6 +4141,7 @@ fn juri_archive_manifest(
             "inserted_inferred_edges": counters.inserted_inferred_edges,
             "skipped_members": counters.skipped_members,
             "skipped_compatible_members": counters.skipped_compatible_members,
+            "skipped_empty_body_members": counters.skipped_empty_body_members,
             "failed_members": counters.failed_members,
             "quarantined_payloads": counters.quarantined_payloads,
             "unsupported_roots": &counters.unsupported_roots
@@ -4358,6 +4361,7 @@ fn ingest_juri_archives_payload(
         "inserted_inferred_edges": counters.inserted_inferred_edges,
         "skipped_members": counters.skipped_members,
         "skipped_compatible_members": counters.skipped_compatible_members,
+        "skipped_empty_body_members": counters.skipped_empty_body_members,
         "failed_members": counters.failed_members,
         "quarantined_payloads": counters.quarantined_payloads,
         "unsupported_roots": counters.unsupported_roots,
@@ -4534,6 +4538,26 @@ fn process_juri_archive_member<C: postgres::GenericClient>(
             )?;
             counters.skipped_members += 1;
         }
+        // A decision with no textual body is not corrupt — there is just nothing to index. Record it
+        // as a SKIP (not a failure/quarantine) so the run completes cleanly, matching the LEGI
+        // no-text-article handling.
+        Err(JuriParseError::EmptyBody { source_uid }) => {
+            record_juri_member(
+                client,
+                source,
+                run_id,
+                JuriMemberRecordInput {
+                    archive_name,
+                    member_path: member.member_path.as_str(),
+                    source_entity: Some(source_uid.as_str()),
+                    date_anchor: None,
+                    status: IngestMemberStatus::Skipped,
+                    compatibility,
+                },
+            )?;
+            counters.skipped_members += 1;
+            counters.skipped_empty_body_members += 1;
+        }
         Err(error) => {
             let (error_class, error_code) = juri_parse_error_class(&error);
             let message = error.to_string();
@@ -4651,6 +4675,8 @@ fn juri_parse_error_class(error: &JuriParseError) -> (&'static str, &'static str
         }
         JuriParseError::InvalidDate { .. } => ("validation_error", "validation_invalid_date"),
         JuriParseError::InvalidId { .. } => ("validation_error", "validation_invalid_id"),
+        // EmptyBody is handled as a skip before this classifier; map it for completeness.
+        JuriParseError::EmptyBody { .. } => ("validation_error", "validation_empty_body"),
         JuriParseError::UnknownSource { .. } | JuriParseError::SourceFamilyMismatch { .. } => {
             ("validation_error", "validation_source_mismatch")
         }
