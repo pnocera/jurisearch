@@ -34,14 +34,18 @@ fn resolve_legi_citation_pins_version_by_as_of_and_excludes_siblings() -> Result
             'h2', '{\"official\":true}'), \
            ('legi:ART34@1973-07-14', 'legi', 'article', 'ART34', \
             'Décret X Article 34', 'Article 34', 'sibling body', '1973-07-14', NULL, \
-            'h3', '{\"official\":true}'); \
+            'h3', '{\"official\":true}'), \
+           ('legi:ART330@1985-01-01', 'legi', 'article', 'ART330', \
+            'Décret X Article 330', 'Article 330', 'prefix sibling body', '1985-01-01', NULL, \
+            'h4', '{\"official\":true}'); \
          INSERT INTO chunks \
            (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
             chunk_builder_version, embedding_fingerprint) \
          VALUES \
            ('c33v1', 'legi:ART33V1@1973-07-14', 0, 'v1', 'v1', 'h1', 'cv0', NULL), \
            ('c33v2', 'legi:ART33V2@1981-05-16', 0, 'v2', 'v2', 'h2', 'cv0', NULL), \
-           ('c34', 'legi:ART34@1973-07-14', 0, 's', 's', 'h3', 'cv0', NULL);",
+           ('c34', 'legi:ART34@1973-07-14', 0, 's', 's', 'h3', 'cv0', NULL), \
+           ('c330', 'legi:ART330@1985-01-01', 0, 'p', 'p', 'h4', 'cv0', NULL);",
     )?;
 
     let resolve = |as_of: &str| -> Result<Vec<String>, StorageError> {
@@ -70,7 +74,8 @@ fn resolve_legi_citation_pins_version_by_as_of_and_excludes_siblings() -> Result
 
     // As-of 1975: only V1 is valid; the sibling Article 34 is excluded by the article-number match.
     assert_eq!(resolve("1975-01-01")?, vec!["legi:ART33V1@1973-07-14".to_owned()]);
-    // As-of 1990: V2 is the valid version.
+    // As-of 1990: V2 is the valid version. The prefix sibling "Article 330" (valid from 1985, a
+    // later valid_from) must NOT be returned for "Article 33" — exact title match, not a prefix.
     assert_eq!(resolve("1990-01-01")?, vec!["legi:ART33V2@1981-05-16".to_owned()]);
 
     Ok(())

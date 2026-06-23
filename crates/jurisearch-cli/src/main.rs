@@ -1172,6 +1172,9 @@ impl PreparedQueryEmbedder {
 /// A citation-shaped query parsed for structured resolution: an `Article <n>` reference plus the
 /// as-of date that pins the version (from an `en vigueur au <date>` suffix, else the caller default).
 struct LegiCitationRouting {
+    /// The citation text with any `en vigueur au <date>` suffix stripped, used for the resolver's
+    /// exact-citation-match ranking (so a temporal query still matches the stored citation).
+    citation_query: String,
     article_number: String,
     code_hint: Option<String>,
     as_of: String,
@@ -1205,6 +1208,7 @@ fn legi_citation_routing(query: &str, default_as_of: &str) -> Option<LegiCitatio
     }
     let code_hint = article_part[..pos].trim();
     Some(LegiCitationRouting {
+        citation_query: article_part.to_owned(),
         article_number: article_number.to_owned(),
         code_hint: (!code_hint.is_empty()).then(|| code_hint.to_owned()),
         as_of,
@@ -1343,12 +1347,14 @@ fn search_with_postgres(
             let structured = resolve_legi_citation_json(
                 postgres,
                 &CitationResolutionQuery {
-                    query: args.query.as_str(),
+                    query: parsed.citation_query.as_str(),
                     article_number: parsed.article_number.as_str(),
                     code_hint: parsed.code_hint.as_deref(),
                     as_of: parsed.as_of.as_str(),
                     kind_filter,
-                    limit: query_limit,
+                    // Structured results have no pagination cursor; request exactly top_k so the
+                    // response never reports a phantom truncation it cannot page past.
+                    limit: args.top_k,
                 },
             )
             .map_err(storage_error_object)?;
@@ -1382,12 +1388,15 @@ fn search_with_postgres(
     }
     let returned = response["candidates"].as_array().map_or(0, Vec::len);
     let has_more = next_cursor.is_some();
+    // Structured citation results are an exact, fully-returned resolution set with no ranking
+    // cursor, so cursor paging does not apply to them.
+    let cursor_supported = chosen_backend != "structured_citation";
     response["pagination"] = json!({
         "requested_top_k": args.top_k,
         "after_cursor": args.cursor.as_deref(),
         "returned": returned,
         "possibly_truncated": has_more,
-        "cursor_supported": true,
+        "cursor_supported": cursor_supported,
         "next_cursor": next_cursor.as_deref(),
         "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
         "guidance": if has_more {
@@ -5966,6 +5975,11 @@ mod tests {
             Some("Code de la sécurité sociale")
         );
         assert_eq!(temporal.as_of, "1990-06-01");
+        // The temporal suffix is stripped from the citation used for exact-citation ranking.
+        assert_eq!(
+            temporal.citation_query,
+            "Code de la sécurité sociale Article R242-40"
+        );
 
         // Article reference with no leading text → no code hint.
         let bare = legi_citation_routing("Article L. 242-1", "2026-01-01").expect("citation-shaped");

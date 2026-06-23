@@ -213,10 +213,13 @@ pub fn resolve_legi_citation_json(
 ) -> Result<String, StorageError> {
     let query_literal = sql_string_literal(query.query);
     let as_of = sql_string_literal(query.as_of);
-    let article_pattern = sql_string_literal(&like_contains(&format!(
+    // Match the article number EXACTLY against the article's own title ("Article <n>"), not a
+    // `%article <n>%` substring — otherwise "Article 33" also matches "Article 330"/"33-1" and a
+    // newer prefix sibling could outrank the intended article.
+    let article_title = sql_string_literal(&format!(
         "article {}",
         query.article_number.trim().to_lowercase()
-    )));
+    ));
     let code_hint_predicate = match query.code_hint {
         Some(hint) if !hint.trim().is_empty() => format!(
             "AND lower(concat_ws(' ', d.citation, d.title)) LIKE {} ESCAPE '\\'",
@@ -247,7 +250,7 @@ WITH resolved AS (
     FROM documents d
     WHERE d.source = 'legi'
       AND d.kind = 'article'
-      AND lower(concat_ws(' ', d.citation, d.title)) LIKE {article_pattern} ESCAPE '\'
+      AND lower(btrim(d.title)) = {article_title}
       {code_hint_predicate}
       {kind_predicate}
       AND (d.valid_from IS NULL OR d.valid_from <= {as_of}::date)
