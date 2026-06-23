@@ -6,6 +6,7 @@ use jurisearch_storage::{
         DENSE_VECTOR_INDEX_NAME, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
     },
+    projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
     runtime::{ManagedPostgres, StorageError},
 };
 
@@ -112,6 +113,81 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
     assert_eq!(manifest["coverage"]["embeddings"], 2);
     assert_eq!(manifest["vector_index"]["name"], DENSE_VECTOR_INDEX_NAME);
     assert_eq!(manifest["vector_index"]["lists"], 1);
+
+    Ok(())
+}
+
+#[test]
+fn insert_chunk_embeddings_upserts_batch_and_guards_fingerprint() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("insert chunk embeddings")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-insert-embeddings.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    postgres.execute_sql(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, citation, title, body, \
+            valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+           ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+            'LEGIARTI000006419320', 'Code civil article 1240', 'Article 1240', \
+            'Responsabilite civile.', '1804-02-21', 'sha256:article-1240', '{\"official\":true}'); \
+         INSERT INTO chunks \
+           (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+            chunk_builder_version, embedding_fingerprint) \
+         VALUES \
+           ('chunk:a', 'legi:LEGIARTI000006419320@1804-02-21', 0, 'a body', 'a ctx', \
+            'sha256:article-1240', 'chunker:v0', NULL), \
+           ('chunk:b', 'legi:LEGIARTI000006419320@1804-02-21', 1, 'b body', 'b ctx', \
+            'sha256:article-1240', 'chunker:v0', NULL);",
+    )?;
+
+    let vector_a = vector_literal(0);
+    let vector_b = vector_literal(1);
+    let row = |chunk_id, literal, fingerprint| ChunkEmbeddingInsert {
+        chunk_id,
+        embedding_fingerprint: fingerprint,
+        embedding_literal: literal,
+        model: "bge-m3",
+        dimension: 1024,
+    };
+
+    // Happy path: a batch upsert sets both chunk fingerprints and writes both vectors.
+    let inserted = insert_chunk_embeddings(
+        &postgres,
+        &[
+            row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT),
+            row("chunk:b", &vector_b, EMBEDDING_FINGERPRINT),
+        ],
+    )?;
+    assert_eq!(inserted, 2);
+    let count = postgres.execute_sql(
+        "SELECT count(*)::text FROM chunk_embeddings \
+         WHERE embedding_fingerprint = 'bge-m3:1024:normalize:true';",
+    )?;
+    assert_eq!(count.trim(), "2");
+
+    // Idempotent: re-running the same batch upserts cleanly.
+    assert_eq!(
+        insert_chunk_embeddings(&postgres, &[row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT)])?,
+        1
+    );
+
+    // Guard: a missing chunk fails the whole batch (batch-granular equivalent of the old per-row
+    // `updated != 1` check).
+    let missing =
+        insert_chunk_embeddings(&postgres, &[row("chunk:missing", &vector_a, EMBEDDING_FINGERPRINT)])
+            .unwrap_err();
+    assert!(matches!(missing, StorageError::Projection { .. }));
+
+    // Guard: a conflicting fingerprint on an already-fingerprinted chunk fails.
+    let conflict =
+        insert_chunk_embeddings(&postgres, &[row("chunk:a", &vector_a, "other-fingerprint")])
+            .unwrap_err();
+    assert!(matches!(conflict, StorageError::Projection { .. }));
 
     Ok(())
 }

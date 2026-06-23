@@ -637,65 +637,114 @@ pub fn insert_chunk_embeddings(
     postgres: &ManagedPostgres,
     embeddings: &[ChunkEmbeddingInsert<'_>],
 ) -> Result<usize, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
-    let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
-    let statement = transaction
-        .prepare(
-            "INSERT INTO chunk_embeddings \
-                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
-             VALUES ($1, $2, $3::text::vector, $4, $5) \
-             ON CONFLICT (chunk_id) DO UPDATE SET \
-                embedding_fingerprint = EXCLUDED.embedding_fingerprint, \
-                embedding = EXCLUDED.embedding, \
-                model = EXCLUDED.model, \
-                dimension = EXCLUDED.dimension;",
-        )
-        .map_err(StorageError::PostgresClient)?;
-    let chunk_fingerprint_statement = transaction
-        .prepare(
-            "UPDATE chunks \
-             SET embedding_fingerprint = $2 \
-             WHERE chunk_id = $1 \
-               AND (embedding_fingerprint IS NULL OR embedding_fingerprint = $2);",
-        )
-        .map_err(StorageError::PostgresClient)?;
+    if embeddings.is_empty() {
+        return Ok(0);
+    }
 
-    for embedding in embeddings {
-        let dimension =
+    // Build per-column arrays so the whole batch is applied set-based (one UNNEST into a temp stage,
+    // one UPDATE, one upsert) instead of two statement executions per embedding.
+    let chunk_ids: Vec<&str> = embeddings.iter().map(|embedding| embedding.chunk_id).collect();
+    let fingerprints: Vec<&str> = embeddings
+        .iter()
+        .map(|embedding| embedding.embedding_fingerprint)
+        .collect();
+    let literals: Vec<&str> = embeddings
+        .iter()
+        .map(|embedding| embedding.embedding_literal)
+        .collect();
+    let models: Vec<&str> = embeddings.iter().map(|embedding| embedding.model).collect();
+    let dimensions: Vec<i32> = embeddings
+        .iter()
+        .map(|embedding| {
             i32::try_from(embedding.dimension).map_err(|_| StorageError::Projection {
                 message: format!(
                     "embedding dimension too large for storage on chunk `{}`: {}",
                     embedding.chunk_id, embedding.dimension
                 ),
-            })?;
-        let updated = transaction
-            .execute(
-                &chunk_fingerprint_statement,
-                &[&embedding.chunk_id, &embedding.embedding_fingerprint],
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+
+    transaction
+        .batch_execute(
+            "CREATE TEMP TABLE stage_chunk_embeddings ( \
+                chunk_id text PRIMARY KEY, \
+                embedding_fingerprint text NOT NULL, \
+                embedding text NOT NULL, \
+                model text NOT NULL, \
+                dimension integer NOT NULL \
+             ) ON COMMIT DROP;",
+        )
+        .map_err(StorageError::PostgresClient)?;
+    transaction
+        .execute(
+            "INSERT INTO stage_chunk_embeddings \
+                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::int[]);",
+            &[&chunk_ids, &fingerprints, &literals, &models, &dimensions],
+        )
+        .map_err(StorageError::PostgresClient)?;
+
+    // Batch-granular equivalent of the old per-row `updated != 1` guard: every staged chunk must
+    // exist and have a NULL or matching fingerprint. A short updated count means at least one chunk
+    // is missing or carries a conflicting fingerprint, so we surface a concrete offender.
+    let updated = transaction
+        .execute(
+            "UPDATE chunks c \
+             SET embedding_fingerprint = s.embedding_fingerprint \
+             FROM stage_chunk_embeddings s \
+             WHERE c.chunk_id = s.chunk_id \
+               AND (c.embedding_fingerprint IS NULL \
+                    OR c.embedding_fingerprint = s.embedding_fingerprint);",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    if updated as usize != embeddings.len() {
+        let offender = transaction
+            .query_opt(
+                "SELECT s.chunk_id, s.embedding_fingerprint \
+                 FROM stage_chunk_embeddings s \
+                 LEFT JOIN chunks c ON c.chunk_id = s.chunk_id \
+                 WHERE c.chunk_id IS NULL \
+                    OR (c.embedding_fingerprint IS NOT NULL \
+                        AND c.embedding_fingerprint <> s.embedding_fingerprint) \
+                 ORDER BY s.chunk_id \
+                 LIMIT 1;",
+                &[],
             )
             .map_err(StorageError::PostgresClient)?;
-        if updated != 1 {
-            return Err(StorageError::Projection {
-                message: format!(
-                    "chunk `{}` is missing or has a different embedding fingerprint than `{}`",
-                    embedding.chunk_id, embedding.embedding_fingerprint
-                ),
+        let message = offender
+            .map(|row| {
+                let chunk_id: String = row.get(0);
+                let fingerprint: String = row.get(1);
+                format!(
+                    "chunk `{chunk_id}` is missing or has a different embedding fingerprint than `{fingerprint}`"
+                )
+            })
+            .unwrap_or_else(|| {
+                "a staged chunk is missing or has a conflicting embedding fingerprint".to_owned()
             });
-        }
-        transaction
-            .execute(
-                &statement,
-                &[
-                    &embedding.chunk_id,
-                    &embedding.embedding_fingerprint,
-                    &embedding.embedding_literal,
-                    &embedding.model,
-                    &dimension,
-                ],
-            )
-            .map_err(StorageError::PostgresClient)?;
+        return Err(StorageError::Projection { message });
     }
+
+    transaction
+        .execute(
+            "INSERT INTO chunk_embeddings \
+                (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             SELECT chunk_id, embedding_fingerprint, embedding::vector, model, dimension \
+             FROM stage_chunk_embeddings \
+             ON CONFLICT (chunk_id) DO UPDATE SET \
+                embedding_fingerprint = EXCLUDED.embedding_fingerprint, \
+                embedding = EXCLUDED.embedding, \
+                model = EXCLUDED.model, \
+                dimension = EXCLUDED.dimension;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
 
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(embeddings.len())
