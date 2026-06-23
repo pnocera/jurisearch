@@ -181,6 +181,57 @@ pub fn compiled_schema() -> Value {
                     }
                 }
             },
+            "CompareRequest": {
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string" },
+                    "kind": { "enum": ["code", "all"], "default": "code" },
+                    "top_k": { "type": "integer", "minimum": 1, "default": 10 },
+                    "as_of": { "type": "string", "format": "date" }
+                }
+            },
+            "CompareResponse": {
+                "properties": {
+                    "query": { "type": "string" },
+                    "as_of": { "type": "string", "format": "date" },
+                    "kind": { "enum": ["code", "all"] },
+                    "group_by": { "const": "document" },
+                    "top_k": { "type": "integer" },
+                    "modes": {
+                        "type": "object",
+                        "description": "Per-retriever results keyed by mode (bm25/dense/hybrid).",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": { "candidates": { "type": "array" } }
+                        }
+                    },
+                    "pool": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": { "type": "string" },
+                                "best_chunk_id": { "type": ["string", "null"] },
+                                "citation": { "type": ["string", "null"] },
+                                "title": { "type": ["string", "null"] },
+                                "by_mode": {
+                                    "type": "object",
+                                    "description": "Per-mode rank+score for this document; null if a mode did not return it."
+                                }
+                            }
+                        }
+                    },
+                    "overlap": {
+                        "type": "object",
+                        "properties": {
+                            "bm25_dense": { "type": "integer" },
+                            "bm25_hybrid": { "type": "integer" },
+                            "dense_hybrid": { "type": "integer" }
+                        }
+                    },
+                    "pagination": { "type": "object" }
+                }
+            },
             "FetchRequest": {
                 "required": ["ids"],
                 "properties": {

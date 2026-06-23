@@ -72,6 +72,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "SearchResponse",
     },
     CommandSpec {
+        name: "compare",
+        summary: "Compare bm25/dense/hybrid retrievers for one query: aligned top-k, pooled union, and overlap.",
+        status: CommandStatus::Implemented,
+        request_schema: "CompareRequest",
+        response_schema: "CompareResponse",
+    },
+    CommandSpec {
         name: "fetch",
         summary: "Return full source text for selected stable IDs.",
         status: CommandStatus::Implemented,

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fs,
     io::{self, BufRead, Write},
     net::{TcpStream, ToSocketAddrs},
@@ -132,6 +132,12 @@ enum Command {
     /// `SearchResponse` (see `help schema --json`). Example:
     ///   jurisearch search "résiliation d'un bail d'habitation" --mode dense --top-k 10 --as-of 2026-06-23
     Search(SearchArgs),
+    /// Compare bm25/dense/hybrid retrievers for one query (document grouping).
+    ///
+    /// Returns aligned per-mode top-k, the pooled union with per-mode ranks, and pairwise overlap.
+    /// Single-page (no cursor). Output: `CompareResponse`. Example:
+    ///   jurisearch compare "résiliation d'un bail" --top-k 10 --as-of 2026-06-23
+    Compare(CompareArgs),
     /// Return full source text for selected exact, version-pinned stable IDs.
     ///
     /// IDs are version-pinned (e.g. `legi:LEGIARTI000006850948@1994-08-21`). Output: `FetchResponse`.
@@ -225,6 +231,21 @@ struct SearchArgs {
 }
 
 #[derive(Debug, Args)]
+struct CompareArgs {
+    /// Query to compare across retrievers (bm25 vs dense vs hybrid).
+    query: String,
+    /// Corpus filter: `code` (default) or `all`.
+    #[arg(long, default_value = "code")]
+    kind: CliKind,
+    /// Number of top documents to compare per retriever.
+    #[arg(long, default_value_t = 10)]
+    top_k: u32,
+    /// Pin temporal validity to this date (`YYYY-MM-DD`).
+    #[arg(long)]
+    as_of: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct FetchArgs {
     /// One or more exact, version-pinned stable IDs (e.g. `legi:LEGIARTI000006850948@1994-08-21`).
     ids: Vec<String>,
@@ -307,6 +328,23 @@ fn default_related_limit() -> u32 {
 }
 fn default_related_depth() -> u32 {
     1
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionCompareArgs {
+    query: String,
+    #[serde(default = "default_compare_kind")]
+    kind: CliKind,
+    #[serde(default = "default_top_k")]
+    top_k: u32,
+    #[serde(default)]
+    as_of: Option<String>,
+    #[serde(default)]
+    index_dir: Option<PathBuf>,
+}
+
+fn default_compare_kind() -> CliKind {
+    CliKind::Code
 }
 
 #[derive(Debug, Args)]
@@ -690,6 +728,15 @@ fn run() -> anyhow::Result<()> {
                 emit_error(ErrorObject::bad_input("related requires a document id"))
             } else {
                 emit_related(args, index_dir.as_deref())
+            }
+        }
+        Command::Compare(args) => {
+            if args.query.trim().is_empty() {
+                emit_error(ErrorObject::bad_input("compare query must not be empty"))
+            } else if args.top_k == 0 {
+                emit_error(ErrorObject::bad_input("compare --top-k must be at least 1"))
+            } else {
+                emit_compare(args, index_dir.as_deref())
             }
         }
         Command::Context(args) => {
@@ -1701,6 +1748,143 @@ fn emit_related(args: RelatedArgs, index_dir: Option<&Path>) -> anyhow::Result<(
     }
 }
 
+/// Run the same query through bm25/dense/hybrid (document grouping) and return aligned per-mode
+/// top-k plus the pooled union with per-mode ranks and pairwise overlap. Single-page (no cursor):
+/// cross-mode pagination has no honest shared meaning.
+fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    if args.query.trim().is_empty() {
+        return Err(ErrorObject::bad_input("compare requires a query"));
+    }
+    if args.top_k == 0 {
+        return Err(ErrorObject::bad_input("compare --top-k must be at least 1"));
+    }
+    let kind: LegalKind = args.kind.into();
+    if matches!(kind, LegalKind::Decision) {
+        return Err(ErrorObject::bad_input(
+            "compare currently supports --kind all or code over the LEGI subset",
+        ));
+    }
+    let query_text = parade_query_text(&args.query).ok_or_else(|| {
+        ErrorObject::bad_input("compare query must contain at least one searchable token")
+    })?;
+    let as_of = args.as_of.clone().unwrap_or_else(today_utc);
+    let kind_filter = if matches!(kind, LegalKind::Code) {
+        Some("article")
+    } else {
+        None
+    };
+    let pool_limit = args.top_k.saturating_mul(20);
+
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
+    let embedder = PreparedQueryEmbedder::from_env()?;
+    let (embedding_literal, embedding_fingerprint) = embedder.embed(args.query.as_str())?;
+
+    let mut modes_out = serde_json::Map::new();
+    let mut pool: Vec<Value> = Vec::new();
+    let mut pool_index: HashMap<String, usize> = HashMap::new();
+    let mut docs_by_mode: HashMap<&str, HashSet<String>> = HashMap::new();
+
+    for mode in [RetrievalMode::Bm25, RetrievalMode::Dense, RetrievalMode::Hybrid] {
+        let (embedding, fingerprint) = if mode.uses_dense() {
+            (
+                Some(embedding_literal.as_str()),
+                Some(embedding_fingerprint.as_str()),
+            )
+        } else {
+            (None, None)
+        };
+        let response = hybrid_candidates_json(
+            &postgres,
+            &HybridCandidateQuery {
+                query_text: &query_text,
+                query_embedding: embedding,
+                embedding_fingerprint: fingerprint,
+                retrieval_mode: mode,
+                group_by: GroupBy::Document,
+                after_cursor: None,
+                as_of: as_of.as_str(),
+                kind_filter,
+                lexical_limit: pool_limit,
+                dense_limit: pool_limit,
+                limit: args.top_k,
+            },
+        )
+        .map_err(storage_error_object)?;
+        let response: Value = serde_json::from_str(&response)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+        let candidates = response["candidates"].as_array().cloned().unwrap_or_default();
+        let mode_name = mode.as_str();
+        let mut mode_docs = HashSet::new();
+        for (rank, candidate) in candidates.iter().enumerate() {
+            let Some(document_id) = candidate["document_id"].as_str() else {
+                continue;
+            };
+            let document_id = document_id.to_owned();
+            mode_docs.insert(document_id.clone());
+            let index = *pool_index.entry(document_id.clone()).or_insert_with(|| {
+                pool.push(json!({
+                    "document_id": document_id,
+                    "best_chunk_id": candidate.get("best_chunk_id").cloned().unwrap_or(Value::Null),
+                    "citation": candidate.get("citation").cloned().unwrap_or(Value::Null),
+                    "title": candidate.get("title").cloned().unwrap_or(Value::Null),
+                    "by_mode": { "bm25": Value::Null, "dense": Value::Null, "hybrid": Value::Null }
+                }));
+                pool.len() - 1
+            });
+            pool[index]["by_mode"][mode_name] =
+                json!({ "rank": rank + 1, "score": candidate["scores"]["rrf"].clone() });
+        }
+        docs_by_mode.insert(mode_name, mode_docs);
+        modes_out.insert(mode_name.to_owned(), json!({ "candidates": candidates }));
+    }
+
+    // Pool ordered by best (minimum) rank across modes, then document_id — most relevant first.
+    let best_rank = |entry: &Value| -> u64 {
+        ["bm25", "dense", "hybrid"]
+            .iter()
+            .filter_map(|mode| entry["by_mode"][*mode]["rank"].as_u64())
+            .min()
+            .unwrap_or(u64::MAX)
+    };
+    pool.sort_by(|a, b| {
+        best_rank(a)
+            .cmp(&best_rank(b))
+            .then_with(|| a["document_id"].as_str().cmp(&b["document_id"].as_str()))
+    });
+
+    let overlap = |left: &str, right: &str| -> usize {
+        match (docs_by_mode.get(left), docs_by_mode.get(right)) {
+            (Some(a), Some(b)) => a.intersection(b).count(),
+            _ => 0,
+        }
+    };
+
+    Ok(json!({
+        "query": args.query,
+        "as_of": as_of,
+        "kind": if matches!(kind, LegalKind::Code) { "code" } else { "all" },
+        "group_by": "document",
+        "top_k": args.top_k,
+        "modes": Value::Object(modes_out),
+        "pool": pool,
+        "overlap": {
+            "bm25_dense": overlap("bm25", "dense"),
+            "bm25_hybrid": overlap("bm25", "hybrid"),
+            "dense_hybrid": overlap("dense", "hybrid"),
+        },
+        "pagination": { "cursor_supported": false }
+    }))
+}
+
+fn emit_compare(args: CompareArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+    match compare_payload(args, index_dir) {
+        Ok(response) => write_json(&response),
+        Err(error) => emit_error(error),
+    }
+}
+
 fn emit_expand(args: QueryArgs) -> anyhow::Result<()> {
     match expand_payload(args) {
         Ok(response) => write_json(&response),
@@ -1937,6 +2121,21 @@ fn session_related_payload(args: Value) -> Result<Value, ErrorObject> {
             rel: args.rel,
             limit: args.limit,
             depth: args.depth,
+        },
+        index_dir.as_deref(),
+    )
+}
+
+fn session_compare_payload(args: Value) -> Result<Value, ErrorObject> {
+    let args = serde_json::from_value::<SessionCompareArgs>(args)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid compare args: {error}")))?;
+    let index_dir = args.index_dir;
+    compare_payload(
+        CompareArgs {
+            query: args.query,
+            kind: args.kind,
+            top_k: args.top_k,
+            as_of: args.as_of,
         },
         index_dir.as_deref(),
     )
@@ -4416,6 +4615,7 @@ fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) 
         "cite" => session_cite_payload(args),
         "context" => session_context_payload(args),
         "related" => session_related_payload(args),
+        "compare" => session_compare_payload(args),
         "expand" => session_expand_payload(args),
         "model fetch" => session_model_fetch_payload(args),
         "eval phase1" => session_eval_phase1_payload(args),
