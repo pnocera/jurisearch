@@ -120,10 +120,16 @@ const FRANCE_LEGI_GATE_TOP_K: u32 = 10;
 // release policy; status re-derives pass from the artifact's per-category metrics, never trusting a
 // self-reported `state`.
 const PHASE2_BENCHMARK_ENV: &str = "JURISEARCH_PHASE2_BENCHMARK";
-const PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_RECALL_AT_10: f64 = 0.50;
+// The benchmark must prove BOTH jurisprudence families (judicial Cassation/appeal AND administrative)
+// AND decision-citation verification across all three identifier kinds — through the production
+// pipeline. Each is re-derived against these floors; the artifact's self-reported `state` is ignored.
+const PHASE2_PRODUCTION_PIPELINE: &str = "production";
+const PHASE2_MIN_RETRIEVAL_RECALL_AT_10: f64 = 0.50;
+const PHASE2_MIN_JUDICIAL_RETRIEVAL_QUERIES: u64 = 15;
+const PHASE2_MIN_ADMINISTRATIVE_RETRIEVAL_QUERIES: u64 = 15;
 const PHASE2_MIN_DECISION_CITATION_ACCURACY: f64 = 0.95;
-const PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_QUERIES: u64 = 30;
 const PHASE2_MIN_DECISION_CITATION_QUERIES: u64 = 30;
+const PHASE2_REQUIRED_CITATION_IDENTIFIERS: [&str; 3] = ["ecli", "pourvoi", "cetatext"];
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
@@ -8139,8 +8145,11 @@ fn phase2_benchmark_payload_with_path(artifact_path: Option<&Path>) -> Value {
     payload["evidence"] = artifact["evidence"].as_array().map_or(json!([]), |_| artifact["evidence"].clone());
 
     let errors = phase2_benchmark_artifact_errors(&artifact);
+    // Re-derive the state from the validation, never the artifact's self-reported `state` (which is
+    // preserved only as a diagnostic). Empty errors over the full contract == genuinely passed.
+    payload["artifact_reported_state"] = artifact["state"].clone();
     if errors.is_empty() {
-        payload["state"] = json!(artifact["state"].as_str().unwrap_or("pending"));
+        payload["state"] = json!("passed");
         payload["artifact_error"] = Value::Null;
     } else {
         payload["state"] = json!("failed");
@@ -8157,19 +8166,21 @@ fn phase2_benchmark_default_payload() -> Value {
         "artifact_error": null,
         "jurisdiction": "france",
         "fingerprint": "bge-m3:1024:normalize:true",
-        "claim_scope": "full French juridic search (statutes + jurisprudence): Cassation + administrative retrieval AND decision-citation verification through the production pipeline",
+        "claim_scope": "full French juridic search (statutes + jurisprudence): judicial (Cassation/appeal) AND administrative retrieval AND ECLI/pourvoi/CETATEXT decision-citation verification, through the production pipeline",
         "required_evidence": [
-            "jurisprudence retrieval tasks for Cassation and administrative courts, run through the production search pipeline",
-            "decision-citation verification (ECLI/pourvoi/CETATEXT) measured for accuracy",
+            "judicial_retrieval AND administrative_retrieval categories, each with metric=recall_at_10 and independent query floors, run through the production search pipeline",
+            "decision_citation category with metric=decision_citation_accuracy and identifiers covering ecli, pourvoi, and cetatext",
             "per-category metrics with query counts and the locked bge-m3 fingerprint, at or above policy floors",
-            "structured provenance: pipeline + code_version + index_revision, sampled=false / human_in_gold + llm_in_gold recorded",
+            "structured provenance: pipeline='production', non-empty code_version + index_revision, sampled=false, boolean human_in_gold + llm_in_gold",
             "pseudonymisation preservation asserted (no re-identification, no cross-source linking)"
         ],
         "floors": {
-            "jurisprudence_retrieval_recall_at_10": PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_RECALL_AT_10,
+            "retrieval_recall_at_10": PHASE2_MIN_RETRIEVAL_RECALL_AT_10,
+            "min_judicial_retrieval_queries": PHASE2_MIN_JUDICIAL_RETRIEVAL_QUERIES,
+            "min_administrative_retrieval_queries": PHASE2_MIN_ADMINISTRATIVE_RETRIEVAL_QUERIES,
             "decision_citation_accuracy": PHASE2_MIN_DECISION_CITATION_ACCURACY,
-            "min_jurisprudence_retrieval_queries": PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_QUERIES,
-            "min_decision_citation_queries": PHASE2_MIN_DECISION_CITATION_QUERIES
+            "min_decision_citation_queries": PHASE2_MIN_DECISION_CITATION_QUERIES,
+            "required_citation_identifiers": PHASE2_REQUIRED_CITATION_IDENTIFIERS
         },
         "categories": null,
         "provenance": null,
@@ -8178,8 +8189,10 @@ fn phase2_benchmark_default_payload() -> Value {
     })
 }
 
-/// Re-derive whether a Phase 2 benchmark artifact PASSES against the policy floors (never trust a
-/// self-reported `state`). Returns the list of reasons it is NOT a valid pass (empty = valid).
+/// Re-derive whether a Phase 2 benchmark artifact PASSES the full contract against the policy floors
+/// (never trust a self-reported `state`). Returns the list of reasons it is NOT a valid pass (empty =
+/// valid). Enforces jurisdiction, locked fingerprint, non-empty evidence, production provenance,
+/// BOTH jurisprudence families' retrieval, and ECLI/pourvoi/CETATEXT citation coverage.
 fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
     let mut errors = Vec::new();
     if artifact["jurisdiction"].as_str() != Some("france") {
@@ -8191,7 +8204,20 @@ fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
     if !artifact["evidence"].as_array().is_some_and(|evidence| !evidence.is_empty()) {
         errors.push("evidence must be a non-empty array".to_owned());
     }
+
+    // Production provenance: the benchmark must run through the production pipeline, with pinned
+    // code/index revisions and no sampling/human/LLM gold.
     let provenance = &artifact["provenance"];
+    if provenance["pipeline"].as_str() != Some(PHASE2_PRODUCTION_PIPELINE) {
+        errors.push(format!(
+            "provenance.pipeline must be `{PHASE2_PRODUCTION_PIPELINE}` (run through the production pipeline)"
+        ));
+    }
+    for field in ["code_version", "index_revision"] {
+        if !provenance[field].as_str().is_some_and(|value| !value.trim().is_empty()) {
+            errors.push(format!("provenance.{field} must be a non-empty string"));
+        }
+    }
     for flag in ["sampled", "human_in_gold", "llm_in_gold"] {
         if !provenance[flag].is_boolean() {
             errors.push(format!("provenance.{flag} must be a boolean"));
@@ -8200,30 +8226,66 @@ fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
     if provenance["sampled"].as_bool() == Some(true) {
         errors.push("provenance.sampled must be false (full benchmark, not a sample)".to_owned());
     }
+
+    // Both jurisprudence families must be retrieved, with the named metric and independent floors.
     phase2_benchmark_validate_category(
-        &artifact["categories"]["jurisprudence_retrieval"],
-        "jurisprudence_retrieval",
-        PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_RECALL_AT_10,
-        PHASE2_MIN_JURISPRUDENCE_RETRIEVAL_QUERIES,
+        &artifact["categories"]["judicial_retrieval"],
+        "judicial_retrieval",
+        "recall_at_10",
+        PHASE2_MIN_RETRIEVAL_RECALL_AT_10,
+        PHASE2_MIN_JUDICIAL_RETRIEVAL_QUERIES,
         &mut errors,
     );
     phase2_benchmark_validate_category(
-        &artifact["categories"]["decision_citation"],
+        &artifact["categories"]["administrative_retrieval"],
+        "administrative_retrieval",
+        "recall_at_10",
+        PHASE2_MIN_RETRIEVAL_RECALL_AT_10,
+        PHASE2_MIN_ADMINISTRATIVE_RETRIEVAL_QUERIES,
+        &mut errors,
+    );
+    let decision_citation = &artifact["categories"]["decision_citation"];
+    phase2_benchmark_validate_category(
+        decision_citation,
         "decision_citation",
+        "decision_citation_accuracy",
         PHASE2_MIN_DECISION_CITATION_ACCURACY,
         PHASE2_MIN_DECISION_CITATION_QUERIES,
         &mut errors,
     );
+    // Citation verification must actually cover all three decision identifier kinds.
+    let identifiers: Vec<String> = decision_citation["identifiers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(|value| value.to_ascii_lowercase())
+        .collect();
+    for required in PHASE2_REQUIRED_CITATION_IDENTIFIERS {
+        if !identifiers.iter().any(|identifier| identifier == required) {
+            errors.push(format!(
+                "decision_citation.identifiers must include `{required}` (ECLI/pourvoi/CETATEXT coverage)"
+            ));
+        }
+    }
     errors
 }
 
 fn phase2_benchmark_validate_category(
     category: &Value,
     name: &str,
+    expected_metric: &str,
     floor: f64,
     min_queries: u64,
     errors: &mut Vec<String>,
 ) {
+    if !category.is_object() {
+        errors.push(format!("category `{name}` is missing"));
+        return;
+    }
+    if category["metric"].as_str() != Some(expected_metric) {
+        errors.push(format!("category `{name}` metric must be `{expected_metric}`"));
+    }
     let Some(value) = category["value"].as_f64() else {
         errors.push(format!("category `{name}` is missing a numeric `value`"));
         return;
@@ -9331,12 +9393,16 @@ mod tests {
             "fingerprint": "bge-m3:1024:normalize:true",
             "evidence": ["work/03-implementation/02-evidence/phase2-eval.json"],
             "provenance": {
-                "pipeline": "production", "code_version": "x", "index_revision": "y",
+                "pipeline": "production", "code_version": "jurisearch-cli:0.1.0", "index_revision": "freemium-20250713",
                 "sampled": false, "human_in_gold": false, "llm_in_gold": true
             },
             "categories": {
-                "jurisprudence_retrieval": { "value": 0.62, "queries": 40 },
-                "decision_citation": { "value": 0.98, "queries": 40 }
+                "judicial_retrieval": { "metric": "recall_at_10", "value": 0.62, "queries": 20 },
+                "administrative_retrieval": { "metric": "recall_at_10", "value": 0.58, "queries": 18 },
+                "decision_citation": {
+                    "metric": "decision_citation_accuracy", "value": 0.98, "queries": 40,
+                    "identifiers": ["ecli", "pourvoi", "cetatext"]
+                }
             }
         })
         .to_string()
@@ -9413,28 +9479,53 @@ mod tests {
         assert_eq!(payload["state"], "passed");
         assert!(payload["artifact_error"].is_null());
 
-        // Below-floor retrieval recall is rejected (state forced to failed).
-        let low: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
-        let mut low = low;
-        low["categories"]["jurisprudence_retrieval"]["value"] = json!(0.10);
-        let low_path = dir.path().join("low.json");
-        std::fs::write(&low_path, low.to_string()).unwrap();
-        let payload = phase2_benchmark_payload_with_path(Some(&low_path));
-        assert_eq!(payload["state"], "failed");
+        // A passing state is RE-DERIVED, not trusted: an artifact reporting state="failed" but
+        // otherwise valid still re-derives to passed (artifact state kept only as a diagnostic).
+        let mut reported_failed: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+        reported_failed["state"] = json!("failed");
+        let rf_path = dir.path().join("reported_failed.json");
+        std::fs::write(&rf_path, reported_failed.to_string()).unwrap();
+        let payload = phase2_benchmark_payload_with_path(Some(&rf_path));
+        assert_eq!(payload["state"], "passed");
+        assert_eq!(payload["artifact_reported_state"], "failed");
 
-        // Wrong jurisdiction is rejected even if state says passed.
-        let mut wrong: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
-        wrong["jurisdiction"] = json!("belgium");
-        let wrong_path = dir.path().join("wrong.json");
-        std::fs::write(&wrong_path, wrong.to_string()).unwrap();
-        assert_eq!(phase2_benchmark_payload_with_path(Some(&wrong_path))["state"], "failed");
+        // Helper: mutate the valid artifact, write it, and return the re-derived state.
+        let derived = |name: &str, mutate: &dyn Fn(&mut Value)| -> Value {
+            let mut artifact: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+            mutate(&mut artifact);
+            let path = dir.path().join(name);
+            std::fs::write(&path, artifact.to_string()).unwrap();
+            phase2_benchmark_payload_with_path(Some(&path))["state"].clone()
+        };
 
-        // Sampled artifact is rejected.
-        let mut sampled: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
-        sampled["provenance"]["sampled"] = json!(true);
-        let sampled_path = dir.path().join("sampled.json");
-        std::fs::write(&sampled_path, sampled.to_string()).unwrap();
-        assert_eq!(phase2_benchmark_payload_with_path(Some(&sampled_path))["state"], "failed");
+        // Below-floor retrieval recall is rejected.
+        assert_eq!(
+            derived("low.json", &|a| a["categories"]["judicial_retrieval"]["value"] = json!(0.10)),
+            "failed"
+        );
+        // Wrong jurisdiction rejected.
+        assert_eq!(derived("juris.json", &|a| a["jurisdiction"] = json!("belgium")), "failed");
+        // Sampled artifact rejected.
+        assert_eq!(derived("sampled.json", &|a| a["provenance"]["sampled"] = json!(true)), "failed");
+        // Missing production provenance (pipeline/code_version/index_revision) rejected (BLOCKER 1).
+        assert_eq!(derived("pipe.json", &|a| a["provenance"]["pipeline"] = json!("proxy")), "failed");
+        assert_eq!(derived("cv.json", &|a| a["provenance"]["code_version"] = json!("")), "failed");
+        assert_eq!(derived("ir.json", &|a| { a["provenance"]["index_revision"] = Value::Null; }), "failed");
+        // Missing administrative family rejected (BLOCKER 2: both families required).
+        assert_eq!(
+            derived("judonly.json", &|a| { a["categories"]["administrative_retrieval"] = Value::Null; }),
+            "failed"
+        );
+        // Wrong citation metric rejected (BLOCKER 2).
+        assert_eq!(
+            derived("metric.json", &|a| a["categories"]["decision_citation"]["metric"] = json!("f1")),
+            "failed"
+        );
+        // Missing a required citation identifier rejected (BLOCKER 2).
+        assert_eq!(
+            derived("ids.json", &|a| a["categories"]["decision_citation"]["identifiers"] = json!(["ecli", "pourvoi"])),
+            "failed"
+        );
     }
 
     #[test]

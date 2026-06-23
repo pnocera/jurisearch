@@ -15,12 +15,16 @@ of the gating checks; advisory checks (`gating:false`) are reported but never bl
 - `honest_zone_provenance` — every present bulk source reports `zone_accurate=false`; bulk never
   claims official Judilibre zones without enrichment. A source claiming `zone_accurate=true` fails it.
 - `jurisprudence_eval_benchmark` — a passing jurisprudence eval benchmark supplied via
-  `JURISEARCH_PHASE2_BENCHMARK`, **re-derived** against policy floors (status never trusts a
-  self-reported `state`): `jurisdiction=france`, locked `bge-m3:1024:normalize:true` fingerprint,
-  non-empty evidence, structured provenance (`sampled=false`, boolean `human_in_gold`/`llm_in_gold`),
-  and per-category metrics ≥ floors with minimum query counts:
-  - `jurisprudence_retrieval` recall@10 ≥ 0.50 over ≥ 30 queries (Cassation + administrative);
-  - `decision_citation` accuracy ≥ 0.95 over ≥ 30 queries (ECLI/pourvoi/CETATEXT verification).
+  `JURISEARCH_PHASE2_BENCHMARK`, **fully re-derived** against policy floors (status sets
+  `state=passed` itself from the validation and never trusts the artifact's self-reported `state`,
+  kept only as `artifact_reported_state`). The contract requires: `jurisdiction=france`, locked
+  `bge-m3:1024:normalize:true` fingerprint, non-empty evidence; **production provenance**
+  (`pipeline="production"`, non-empty `code_version` + `index_revision`, `sampled=false`, boolean
+  `human_in_gold`/`llm_in_gold`); and BOTH jurisprudence families plus citation coverage:
+  - `judicial_retrieval` `metric=recall_at_10` ≥ 0.50 over ≥ 15 queries (Cassation/appeal);
+  - `administrative_retrieval` `metric=recall_at_10` ≥ 0.50 over ≥ 15 queries;
+  - `decision_citation` `metric=decision_citation_accuracy` ≥ 0.95 over ≥ 30 queries, with
+    `identifiers` covering all of `ecli`, `pourvoi`, `cetatext`.
 
 Advisory: `pseudonymisation_preserved` — preserved verbatim by the juri parser (unit + real-archive
 tests); advisory until the release benchmark asserts no re-identification.

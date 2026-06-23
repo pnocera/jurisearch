@@ -492,7 +492,25 @@ pub fn compiled_schema() -> Value {
                         "type": "array",
                         "items": { "type": "string" }
                     },
-                    "benchmark": { "type": "object" }
+                    "benchmark": { "$ref": "#/schemas/Phase2BenchmarkGate" }
+                }
+            },
+            "Phase2BenchmarkGate": {
+                "properties": {
+                    "state": { "enum": ["pending", "passed", "failed"] },
+                    "source": { "type": "string" },
+                    "artifact_path": { "type": ["string", "null"] },
+                    "artifact_error": { "type": ["string", "null"] },
+                    "artifact_reported_state": { "type": ["string", "null"] },
+                    "jurisdiction": { "type": "string" },
+                    "fingerprint": { "type": "string" },
+                    "claim_scope": { "type": "string" },
+                    "required_evidence": { "type": "array", "items": { "type": "string" } },
+                    "floors": { "type": "object" },
+                    "categories": { "type": ["object", "null"] },
+                    "provenance": { "type": ["object", "null"] },
+                    "evidence": { "type": "array" },
+                    "reason": { "type": "string" }
                 }
             },
             "Phase1GateResponse": {
