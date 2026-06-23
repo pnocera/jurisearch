@@ -1,4 +1,4 @@
-# Handoff: BSARD External Benchmark Gate
+# Handoff: BSARD External Benchmark Proxy
 
 Date: 2026-06-22
 
@@ -8,6 +8,27 @@ Date: 2026-06-22
 - `jurisearch status` exposes `phase1_gate.external_benchmark` and reads a durable artifact from `JURISEARCH_PHASE1_EXTERNAL_BENCHMARK`.
 - The gate stays fail-closed unless the artifact is a full BSARD `test` run with valid metadata, non-empty evidence, the locked bge-m3 fingerprint, and status-enforced quality floors.
 - The external benchmark runner is Python, outside the Rust CLI: `external-benchmarks/bsard_benchmark.py`.
+- Important correction: BSARD is Belgian statutory law. It is useful as an external expert-annotated **French-language statutory retrieval proxy**, but it is not direct evidence that `jurisearch` retrieves French LEGI law correctly.
+- Therefore, even a future BSARD pass must not be treated as a broad French-law or France-LEGI validation unless the product claim is explicitly scoped down to "external French-language statutory retrieval proxy benchmark." A proper Phase 1 French LEGI claim still needs France-specific official-source/expert evidence or an explicit design decision accepting the narrower proxy scope.
+
+## Jurisdiction and Claim Scope
+
+BSARD has value because it provides all of the following:
+
+- French-language legal questions;
+- statutory/article-level retrieval;
+- expert-labeled relevance judgments;
+- civil-law style legislation;
+- a reproducible corpus/query/qrels benchmark that can be run without local human reviewers.
+
+But BSARD does **not** provide:
+
+- French jurisdictional coverage;
+- validation against DILA/LEGI article IDs;
+- evidence that French code structure, temporal versions, citations, or official Légifrance semantics are handled correctly;
+- proof that the production `jurisearch` Rust retrieval pipeline is good enough for a French-law release claim.
+
+Use BSARD as a diagnostic and proxy quality signal. Do not let a BSARD-only result unlock a broad "French law validated" claim.
 
 ## New Files
 
@@ -20,7 +41,7 @@ Date: 2026-06-22
   - `work/03-implementation/01-reviews/2026-06-22-bsard-external-benchmark-harness-claude-review.md`
   - `work/03-implementation/01-reviews/2026-06-22-bsard-external-benchmark-harness-claude-review-r2.md`
 
-## Gate Policy
+## Current Status Gate Policy
 
 Required artifact environment variable:
 
@@ -50,6 +71,8 @@ Status rejects artifacts unless all of these are true:
 - hybrid `mrr_at_20 >= threshold >= 0.50`
 
 The gate re-derives pass from metrics and thresholds; it does not trust artifact `state` alone.
+
+Policy caveat: the current status code can model a BSARD artifact as `external_expert_annotated_eval`, but this handoff now treats that as a proxy gate, not sufficient final evidence for a France-LEGI Phase 1 claim. Before any future passing BSARD artifact is allowed to open `claim_allowed`, the plan/code should be revisited so the exposed claim scope is honest.
 
 ## Commands Already Run
 
@@ -164,16 +187,18 @@ Detailed evidence is in `work/03-implementation/02-evidence/2026-06-22-bsard-ful
 
 Do not lower thresholds to make this artifact pass. The next step is a focused benchmark-quality investigation:
 
+- first decide the gate semantics: keep BSARD as a non-release diagnostic, explicitly narrow the Phase 1 claim to a French-language statutory proxy benchmark, or replace/add a France-specific LEGI release gate;
 - verify BSARD text/qrels/ID adaptation and whether title/metadata should be included;
 - compare dense-only, BM25-only, and hybrid variants because dense currently beats the benchmark harness RRF hybrid;
 - decide whether the eventual gate should keep using the standalone Python proxy harness or execute the production Rust retrieval pipeline against BSARD;
 - tune RRF/BM25 analyzer/query preprocessing on a development split or separate candidate set before rerunning the locked full test split;
 - measure whether the deferred reranker can clear the external benchmark with acceptable latency and fallback behavior;
-- keep LLeQA as a secondary external candidate under the same artifact/gate discipline.
+- keep LLeQA as a secondary external candidate under the same artifact/gate discipline, but apply the same jurisdiction/claim-scope scrutiny before using it for release.
 
 ## Open Risks
 
 - Full BSARD run completed on 2026-06-22, but the artifact failed the current quality floors.
 - The harness still writes the `.npz` cache only after all document and query embeddings succeed. Retries help, but a hard endpoint failure can require a rerun.
-- BSARD is Belgian statutory law. Passing the gate supports only the scoped external French-language statutory benchmark claim, not France-LEGI human-reviewed gold.
+- BSARD is Belgian statutory law. Passing it would support only a scoped external French-language statutory proxy-benchmark claim, not France-LEGI validation and not France-LEGI human-reviewed gold.
+- The current `status` field name `external_expert_annotated_eval` may be too broad if BSARD remains the only artifact behind it. Consider renaming/splitting the gate before any release claim depends on it.
 - BSARD/LLeQA are CC-BY-NC-SA-4.0; keep use eval-only and do not redistribute dataset content.
