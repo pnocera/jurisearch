@@ -647,6 +647,10 @@ fn eval_france_legi_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    // Verify query readiness ONCE for the whole sweep (the index is static during the run), so the
+    // per-query searches can skip the expensive coverage re-count. The runner uses hybrid search,
+    // which needs the dense `Search` readiness gate.
+    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
 
     let limits = FranceLegiGoldLimits {
         known_item: args.known_item,
@@ -860,6 +864,8 @@ fn france_legi_search_documents(
         None,
         &query_text,
         LegalKind::Code,
+        // The runner verifies query readiness once before the loop, so skip the per-query check.
+        false,
     ) {
         Ok(response) => response,
         Err(error) if error.code == ErrorCode::NoResults => return Ok(Vec::new()),
@@ -1106,6 +1112,7 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
         after_cursor.as_ref(),
         &query_text,
         kind,
+        true,
     )
 }
 
@@ -1123,13 +1130,19 @@ fn search_with_postgres(
     after_cursor: Option<&ParsedSearchCursor>,
     query_text: &str,
     kind: LegalKind,
+    // Whether to run the (relatively expensive) query-readiness coverage check. One-shot callers
+    // pass `true`; a batch caller that already verified readiness once can pass `false` to avoid
+    // re-counting coverage on every query.
+    verify_readiness: bool,
 ) -> Result<Value, ErrorObject> {
-    let readiness_gate = if retrieval_mode.uses_dense() {
-        QueryReadinessGate::Search
-    } else {
-        QueryReadinessGate::SearchLexical
-    };
-    ensure_query_readiness(postgres, readiness_gate)?;
+    if verify_readiness {
+        let readiness_gate = if retrieval_mode.uses_dense() {
+            QueryReadinessGate::Search
+        } else {
+            QueryReadinessGate::SearchLexical
+        };
+        ensure_query_readiness(postgres, readiness_gate)?;
+    }
     let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
         let embedding_config = embedding_config_from_env();
         ensure_embedding_runtime_ready(&embedding_config, false)?;
