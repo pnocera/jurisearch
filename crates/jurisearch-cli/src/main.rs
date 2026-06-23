@@ -70,8 +70,8 @@ use jurisearch_storage::{
         prepare_legi_projection_statements,
     },
     retrieval::{
-        CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy,
-        HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
+        CitationResolutionQuery, ContextDocumentsQuery, DecisionFilters, FetchDocumentsQuery,
+        GroupBy, HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
         RetrievalOptions, context_documents_json, corpus_source_coverage_json, corpus_stats_json,
         document_diff_json, document_versions_json, fetch_documents_json, hybrid_candidates_json,
         inspect_document_json, related_neighbours_json, resolve_legi_citation_json, rrf_weights,
@@ -269,6 +269,21 @@ struct SearchArgs {
     /// Override ivfflat.probes for dense ANN (per-request; default 4; higher = more recall, slower).
     #[arg(long)]
     probes: Option<u32>,
+    /// Decision filter: court / jurisdiction substring (e.g. "Cour de cassation", "CAA de PARIS").
+    #[arg(long)]
+    court: Option<String>,
+    /// Decision filter: chamber / formation substring (e.g. "chambre sociale").
+    #[arg(long)]
+    formation: Option<String>,
+    /// Decision filter: publication level (e.g. "oui" for published, "C" for recueil class).
+    #[arg(long)]
+    publication: Option<String>,
+    /// Decision filter: earliest decision date (inclusive, `YYYY-MM-DD`).
+    #[arg(long)]
+    decided_from: Option<String>,
+    /// Decision filter: latest decision date (inclusive, `YYYY-MM-DD`).
+    #[arg(long)]
+    decided_to: Option<String>,
 }
 
 impl SearchArgs {
@@ -277,6 +292,16 @@ impl SearchArgs {
             rrf_lexical_weight: self.rrf_lexical_weight,
             rrf_dense_weight: self.rrf_dense_weight,
             ivfflat_probes: self.probes,
+        }
+    }
+
+    fn decision_filters(&self) -> DecisionFilters<'_> {
+        DecisionFilters {
+            jurisdiction: self.court.as_deref(),
+            formation: self.formation.as_deref(),
+            publication: self.publication.as_deref(),
+            decided_from: self.decided_from.as_deref(),
+            decided_to: self.decided_to.as_deref(),
         }
     }
 }
@@ -348,6 +373,16 @@ struct SessionSearchArgs {
     rrf_dense_weight: Option<f64>,
     #[serde(default)]
     probes: Option<u32>,
+    #[serde(default)]
+    court: Option<String>,
+    #[serde(default)]
+    formation: Option<String>,
+    #[serde(default)]
+    publication: Option<String>,
+    #[serde(default)]
+    decided_from: Option<String>,
+    #[serde(default)]
+    decided_to: Option<String>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -1490,6 +1525,7 @@ fn eval_run_payload(
                     after_cursor: None,
                     as_of: as_of.as_str(),
                     kind_filter: Some("article"),
+                    decision_filters: DecisionFilters::default(),
                     lexical_limit: pool_limit,
                     dense_limit: pool_limit,
                     limit: args.top_k,
@@ -2064,6 +2100,11 @@ fn france_legi_search_documents(
         rrf_lexical_weight: None,
         rrf_dense_weight: None,
         probes: None,
+        court: None,
+        formation: None,
+        publication: None,
+        decided_from: None,
+        decided_to: None,
     };
     let response = match search_with_postgres(
         postgres,
@@ -2210,6 +2251,11 @@ fn eval_phase1_fixture_result(
             rrf_lexical_weight: None,
             rrf_dense_weight: None,
             probes: None,
+            court: None,
+            formation: None,
+            publication: None,
+            decided_from: None,
+            decided_to: None,
         },
         index_dir,
     );
@@ -2543,6 +2589,7 @@ fn search_with_postgres(
                 after_cursor: after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
                 as_of: as_of.as_str(),
                 kind_filter,
+                decision_filters: args.decision_filters(),
                 lexical_limit,
                 dense_limit,
                 limit: query_limit,
@@ -2782,6 +2829,7 @@ fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value,
                 after_cursor: None,
                 as_of: as_of.as_str(),
                 kind_filter,
+                decision_filters: DecisionFilters::default(),
                 lexical_limit: pool_limit,
                 dense_limit: pool_limit,
                 limit: args.top_k,
@@ -3046,6 +3094,11 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
             rrf_lexical_weight: args.rrf_lexical_weight,
             rrf_dense_weight: args.rrf_dense_weight,
             probes: args.probes,
+            court: args.court,
+            formation: args.formation,
+            publication: args.publication,
+            decided_from: args.decided_from,
+            decided_to: args.decided_to,
         },
         index_dir.as_deref(),
     )

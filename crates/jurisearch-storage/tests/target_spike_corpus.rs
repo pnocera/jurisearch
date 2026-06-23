@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
-    retrieval::{GroupBy, HybridCandidateQuery, RetrievalOptions, RetrievalMode, hybrid_candidates_json},
+    retrieval::{GroupBy, DecisionFilters, HybridCandidateQuery, RetrievalOptions, RetrievalMode, hybrid_candidates_json},
     runtime::{ManagedPostgres, StorageError},
 };
 
@@ -47,6 +47,7 @@ fn target_spike_corpus_retrieval_stays_under_latency_budget() -> Result<(), Stor
         after_cursor: None,
         as_of: "2024-06-01",
         kind_filter: None,
+        decision_filters: DecisionFilters::default(),
         lexical_limit: 50,
         dense_limit: 50,
         limit: 8,

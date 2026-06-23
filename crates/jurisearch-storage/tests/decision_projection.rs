@@ -11,7 +11,7 @@ use jurisearch_ingest::legi::SourceProvenance;
 use jurisearch_storage::{
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_decision_documents},
     retrieval::{
-        FetchDocumentsQuery, GroupBy, HybridCandidateQuery, RelatedQuery, RelatedRelation,
+        FetchDocumentsQuery, GroupBy, DecisionFilters, HybridCandidateQuery, RelatedQuery, RelatedRelation,
         RetrievalMode, RetrievalOptions, fetch_documents_json, hybrid_candidates_json,
         related_neighbours_json,
     },
@@ -147,6 +147,7 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
             after_cursor: None,
             as_of: "2025-12-31",
             kind_filter: Some("decision"),
+            decision_filters: DecisionFilters::default(),
             lexical_limit: 20,
             dense_limit: 20,
             limit: 5,
@@ -172,6 +173,7 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
             after_cursor: None,
             as_of: "2000-01-01",
             kind_filter: Some("decision"),
+            decision_filters: DecisionFilters::default(),
             lexical_limit: 20,
             dense_limit: 20,
             limit: 10,
@@ -199,6 +201,109 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
     assert_eq!(fetched["body"], judicial.body);
     // Pseudonymisation preserved end-to-end through storage.
     assert!(fetched["body"].as_str().unwrap().contains("M. [B]"));
+
+    postgres.stop()?;
+    Ok(())
+}
+
+#[test]
+fn decision_search_metadata_filters() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("decision search filters")? else {
+        return Ok(());
+    };
+
+    let judicial = decision(ArchiveSource::Cass, JUDI_XML); // Cour de cassation, CHAMBRE_SOCIALE, oui, 2025-06-04
+    let administrative = decision(ArchiveSource::Jade, ADMIN_XML); // CAA de PARIS, 9ème chambre, C, 2025-04-30
+    let decisions = vec![judicial.clone(), administrative.clone()];
+
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-decision-filters.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    insert_decision_documents(&postgres, &decisions, Some(EMBEDDING_FINGERPRINT))?;
+
+    // Give both decisions the SAME vector so ranking is filter-driven, not vector-driven.
+    let vector = vector_literal(0);
+    let embeddings: Vec<ChunkEmbeddingInsert> = judicial
+        .chunks
+        .iter()
+        .chain(administrative.chunks.iter())
+        .map(|chunk| ChunkEmbeddingInsert {
+            chunk_id: chunk.chunk_id.as_str(),
+            embedding_fingerprint: EMBEDDING_FINGERPRINT,
+            embedding_literal: vector.as_str(),
+            model: "bge-m3",
+            dimension: 1024,
+        })
+        .collect();
+    insert_chunk_embeddings(&postgres, &embeddings)?;
+
+    let search = |filters: DecisionFilters| -> Vec<String> {
+        let response = hybrid_candidates_json(
+            &postgres,
+            &HybridCandidateQuery {
+                query_text: "decision",
+                query_embedding: Some(&vector),
+                embedding_fingerprint: Some(EMBEDDING_FINGERPRINT),
+                retrieval_mode: RetrievalMode::Dense,
+                options: RetrievalOptions::default(),
+                group_by: GroupBy::Document,
+                after_cursor: None,
+                as_of: "2025-12-31",
+                kind_filter: Some("decision"),
+                decision_filters: filters,
+                lexical_limit: 20,
+                dense_limit: 20,
+                limit: 10,
+            },
+        )
+        .expect("search");
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        response["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate["document_id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // Court / jurisdiction substring.
+    let cassation = search(DecisionFilters {
+        jurisdiction: Some("cassation"),
+        ..DecisionFilters::default()
+    });
+    assert_eq!(cassation, vec!["cass:JURITEXT000051824029".to_owned()]);
+
+    let caa = search(DecisionFilters {
+        jurisdiction: Some("CAA"),
+        ..DecisionFilters::default()
+    });
+    assert_eq!(caa, vec!["jade:CETATEXT000051549953".to_owned()]);
+
+    // Formation / chamber substring.
+    let sociale = search(DecisionFilters {
+        formation: Some("sociale"),
+        ..DecisionFilters::default()
+    });
+    assert_eq!(sociale, vec!["cass:JURITEXT000051824029".to_owned()]);
+
+    // Publication level (judicial PUBLI_BULL=oui).
+    let published = search(DecisionFilters {
+        publication: Some("oui"),
+        ..DecisionFilters::default()
+    });
+    assert_eq!(published, vec!["cass:JURITEXT000051824029".to_owned()]);
+
+    // Decision-date range excludes the earlier administrative decision (2025-04-30).
+    let recent = search(DecisionFilters {
+        decided_from: Some("2025-05-01"),
+        ..DecisionFilters::default()
+    });
+    assert_eq!(recent, vec!["cass:JURITEXT000051824029".to_owned()]);
+
+    // No filters returns both.
+    assert_eq!(search(DecisionFilters::default()).len(), 2);
 
     postgres.stop()?;
     Ok(())

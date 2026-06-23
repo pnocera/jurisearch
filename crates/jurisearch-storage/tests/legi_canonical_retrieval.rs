@@ -20,7 +20,7 @@ use jurisearch_ingest::{
 use jurisearch_storage::{
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_legi_documents},
     retrieval::{
-        FetchDocumentsQuery, GroupBy, HybridCandidateQuery, RetrievalOptions, RetrievalMode, fetch_documents_json,
+        FetchDocumentsQuery, GroupBy, DecisionFilters, HybridCandidateQuery, RetrievalOptions, RetrievalMode, fetch_documents_json,
         hybrid_candidates_json,
     },
     runtime::ManagedPostgres,
@@ -142,6 +142,7 @@ fn real_legi_canonical_subset_is_searchable_and_fetchable() -> Result<(), Box<dy
             after_cursor: None,
             as_of: &target.valid_from,
             kind_filter: Some("article"),
+            decision_filters: DecisionFilters::default(),
             lexical_limit: 20,
             dense_limit: 20,
             limit: 5,
@@ -178,6 +179,7 @@ fn real_legi_canonical_subset_is_searchable_and_fetchable() -> Result<(), Box<dy
             after_cursor: None,
             as_of: &before_validity,
             kind_filter: Some("article"),
+            decision_filters: DecisionFilters::default(),
             lexical_limit: 20,
             dense_limit: 20,
             limit: 10,

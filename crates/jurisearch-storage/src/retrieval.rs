@@ -78,9 +78,66 @@ pub struct HybridCandidateQuery<'a> {
     pub after_cursor: Option<RetrievalCursor<'a>>,
     pub as_of: &'a str,
     pub kind_filter: Option<&'a str>,
+    /// Decision-metadata filters (court/formation/publication/decision-date). Empty by default.
+    pub decision_filters: DecisionFilters<'a>,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,
+}
+
+/// Optional jurisprudence-decision metadata filters applied alongside `kind_filter`. All `None` is a
+/// no-op (matches the prior behaviour), so existing call sites use `DecisionFilters::default()`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecisionFilters<'a> {
+    /// Court / `JURIDICTION` substring (case-insensitive).
+    pub jurisdiction: Option<&'a str>,
+    /// Chamber / `FORMATION` substring (case-insensitive).
+    pub formation: Option<&'a str>,
+    /// Publication level (`PUBLI_BULL@publie` / `PUBLI_RECUEIL`), exact (case-insensitive).
+    pub publication: Option<&'a str>,
+    /// Decision date lower bound (inclusive, ISO `YYYY-MM-DD`), against `valid_from`.
+    pub decided_from: Option<&'a str>,
+    /// Decision date upper bound (inclusive, ISO `YYYY-MM-DD`), against `valid_from`.
+    pub decided_to: Option<&'a str>,
+}
+
+impl DecisionFilters<'_> {
+    /// Build the SQL predicate fragment (each clause prefixed with `AND`) against `documents d`.
+    /// All values pass through `sql_string_literal`, so this is injection-safe.
+    fn predicate(&self) -> String {
+        let mut predicate = String::new();
+        if let Some(jurisdiction) = self.jurisdiction {
+            predicate.push_str(&format!(
+                " AND d.canonical_json->>'jurisdiction' ILIKE {}",
+                sql_string_literal(&format!("%{jurisdiction}%"))
+            ));
+        }
+        if let Some(formation) = self.formation {
+            predicate.push_str(&format!(
+                " AND d.canonical_json->>'formation' ILIKE {}",
+                sql_string_literal(&format!("%{formation}%"))
+            ));
+        }
+        if let Some(publication) = self.publication {
+            predicate.push_str(&format!(
+                " AND lower(d.canonical_json->>'publication') = lower({})",
+                sql_string_literal(publication)
+            ));
+        }
+        if let Some(decided_from) = self.decided_from {
+            predicate.push_str(&format!(
+                " AND d.valid_from >= {}::date",
+                sql_string_literal(decided_from)
+            ));
+        }
+        if let Some(decided_to) = self.decided_to {
+            predicate.push_str(&format!(
+                " AND d.valid_from <= {}::date",
+                sql_string_literal(decided_to)
+            ));
+        }
+        predicate
+    }
 }
 
 impl HybridCandidateQuery<'_> {
@@ -204,7 +261,9 @@ pub fn hybrid_candidates_json(
         .kind_filter
         .map(|kind| format!("AND d.kind = {}", sql_string_literal(kind)))
         .unwrap_or_default();
-    let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &kind_predicate)?;
+    // Decision-metadata filters are applied alongside the kind filter in every candidate CTE.
+    let filter_predicate = format!("{kind_predicate}{}", query.decision_filters.predicate());
+    let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &filter_predicate)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
         format!("SET ivfflat.probes = {};\n\n", query.effective_probes())
     } else {
