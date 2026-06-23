@@ -81,9 +81,10 @@ pub fn compiled_schema() -> Value {
                     "query": { "type": "string" },
                     "kind": { "enum": ["code", "decision", "all"], "default": "all" },
                     "mode": { "enum": ["hybrid", "bm25", "dense"], "default": "hybrid" },
+                    "group_by": { "enum": ["chunk", "document"], "default": "chunk", "description": "Result granularity: one row per passage, or one row per article." },
                     "format": { "enum": ["concise", "detailed"], "default": "concise" },
                     "top_k": { "type": "integer", "minimum": 1, "default": 10 },
-                    "cursor": { "type": "string" },
+                    "cursor": { "type": "string", "description": "Chunk cursor <score>:<chunk_id> or document cursor doc:<score>:<document_id>; must match --group-by." },
                     "as_of": { "type": "string", "format": "date" }
                 }
             },

@@ -59,6 +59,7 @@ use jurisearch_storage::{
         update_ingest_run_manifest_with_client,
     },
     france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
+    migrations::CURRENT_SCHEMA_VERSION,
     projection::{
         ChunkEmbeddingInsert, LegiHierarchyBackfillScope, LegiMetadataRoot, LegiProjectionStatements,
         backfill_legi_article_hierarchy_from_metadata,
@@ -148,7 +149,11 @@ enum Command {
     /// Output: `CiteResponse` (with `state` exact/normalized/ambiguous/stale_version/not_found).
     /// Example:  jurisearch cite "article 1240 du code civil" --as-of 2026-06-23
     Cite(CiteArgs),
-    /// Return bounded graph neighbours for a document (STUB — not yet implemented).
+    /// Return depth-1 graph neighbours of a document with authority signals.
+    ///
+    /// `--rel cites` (outgoing citations, default), `cited_by` (incoming), or `temporal` (version
+    /// family). Output: `RelatedResponse`. Example:
+    ///   jurisearch related legi:LEGIARTI000006850948@1994-08-21 --rel cites
     Related(RelatedArgs),
     /// Return structural neighbourhood (ancestry, siblings) for a document.
     ///
@@ -1038,8 +1043,10 @@ fn compute_eval_metric(
     let relevant: HashSet<&String> = pool.iter().filter(|uid| label_of(uid) >= rel_min).collect();
     match spec.kind {
         MetricKind::Precision => {
+            // Standard P@k: divide by k (missing ranks count as non-relevant), so a short page does
+            // not inflate precision (document grouping can exhaust the pool before k).
             let hits = topk.iter().filter(|uid| label_of(uid) >= rel_min).count();
-            Some(hits as f64 / topk.len().max(1) as f64)
+            Some(hits as f64 / spec.k as f64)
         }
         MetricKind::Recall => {
             if relevant.is_empty() {
@@ -1187,10 +1194,24 @@ fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value
         return Err(ErrorObject::bad_input("questions file is empty"));
     }
 
+    // A BM25-only eval must not require the embedding runtime: only build the embedder and embed
+    // when a dense/hybrid mode is requested, and use the lexical readiness gate otherwise.
+    let needs_dense = modes.iter().any(|mode| mode.uses_dense());
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
-    let embedder = PreparedQueryEmbedder::from_env()?;
+    ensure_query_readiness(
+        &postgres,
+        if needs_dense {
+            QueryReadinessGate::Search
+        } else {
+            QueryReadinessGate::SearchLexical
+        },
+    )?;
+    let embedder = if needs_dense {
+        Some(PreparedQueryEmbedder::from_env()?)
+    } else {
+        None
+    };
     let pool_limit = args.top_k.saturating_mul(20);
 
     // 1. Retrieval: per question, each mode's top docs + the pooled candidate set.
@@ -1203,18 +1224,19 @@ fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value
             ))
         })?;
         let as_of = question.as_of.clone().unwrap_or_else(today_utc);
-        let (embedding_literal, embedding_fingerprint) = embedder.embed(question.query.as_str())?;
+        let embedded = match &embedder {
+            Some(embedder) => Some(embedder.embed(question.query.as_str())?),
+            None => None,
+        };
         let mut per_mode: HashMap<&'static str, Vec<String>> = HashMap::new();
         let mut pool: Vec<PoolCandidate> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for mode in &modes {
-            let (embedding, fingerprint) = if mode.uses_dense() {
-                (
-                    Some(embedding_literal.as_str()),
-                    Some(embedding_fingerprint.as_str()),
-                )
-            } else {
-                (None, None)
+            let (embedding, fingerprint) = match (&embedded, mode.uses_dense()) {
+                (Some((literal, fingerprint)), true) => {
+                    (Some(literal.as_str()), Some(fingerprint.as_str()))
+                }
+                _ => (None, None),
             };
             let response = hybrid_candidates_json(
                 &postgres,
@@ -1333,11 +1355,17 @@ fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value
             let values: Vec<Option<f64>> = results
                 .iter()
                 .map(|result| {
-                    let pool_uids: Vec<String> =
+                    // Relevance universe for recall/IDCG = pooled candidates UNION every labeled
+                    // doc. For qrels this includes judged-relevant docs no retriever returned (so
+                    // recall/nDCG can't look perfect when a retriever missed gold); for an external
+                    // judge it equals the pool (the judge only labels pooled candidates).
+                    let mut universe: HashSet<String> =
                         result.pool.iter().map(|candidate| candidate.uid.clone()).collect();
+                    universe.extend(result.labels.keys().cloned());
+                    let universe: Vec<String> = universe.into_iter().collect();
                     let empty = Vec::new();
                     let top = result.per_mode.get(mode.as_str()).unwrap_or(&empty);
-                    compute_eval_metric(spec, top, &result.labels, &pool_uids, args.rel_min)
+                    compute_eval_metric(spec, top, &result.labels, &universe, args.rel_min)
                 })
                 .collect();
             per_question.insert((spec.name.clone(), mode.as_str()), values);
@@ -5497,11 +5525,36 @@ fn doctor_payload(index_dir: Option<&Path>) -> Value {
         )),
     }
 
+    // 6. Configured embedding fingerprint (non-owning config read). The index-side compatibility
+    // (stored vs configured fingerprint) requires opening the index, so it is deferred to `status`.
+    let fingerprint = loaded.config.manifest().fingerprint;
+    checks.push(doctor_check(
+        "embedding_fingerprint",
+        "pass",
+        json!({
+            "model": fingerprint.model,
+            "dimension": fingerprint.dimension,
+            "normalize": fingerprint.normalize,
+            "pooling": fingerprint.pooling,
+            "index_compatibility": "deferred — verified by `status` (opens the index)"
+        }),
+    ));
+
+    // 7. Index schema/migrations & query-readiness require opening the index (which doctor must not
+    // do), so they are reported explicitly as deferred rather than silently omitted.
+    checks.push(doctor_check(
+        "index_schema_and_readiness",
+        "warn",
+        json!(format!(
+            "migration version (binary expects {CURRENT_SCHEMA_VERSION}) and query/replay readiness require opening the index; run `status --deep`"
+        )),
+    ));
+
     json!({
         "schema_version": SCHEMA_VERSION,
         "ready": ready,
         "checks": checks,
-        "note": "Non-owning preflight: the index Postgres is not started. Run `status` for index/ingest readiness."
+        "note": "Non-owning preflight: the index Postgres is not started. Checks that require opening the index (schema/migrations, query-readiness, fingerprint compatibility) are deferred to `status --deep`."
     })
 }
 
