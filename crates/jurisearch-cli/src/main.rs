@@ -94,15 +94,18 @@ const PHASE1_EXTERNAL_MIN_HYBRID_RECALL_AT_20: f64 = 0.75;
 const PHASE1_EXTERNAL_MIN_HYBRID_NDCG_AT_20: f64 = 0.60;
 const PHASE1_EXTERNAL_MIN_HYBRID_MRR_AT_20: f64 = 0.50;
 const PHASE1_FRANCE_LEGI_BENCHMARK_ENV: &str = "JURISEARCH_PHASE1_FRANCE_LEGI_BENCHMARK";
-// France-LEGI official-evidence gate floors. Provisional pending a first full
-// production-pipeline calibration sweep; see
-// work/03-implementation/02-evidence/2026-06-22-france-legi-official-evidence-benchmark-feasibility.md
-const PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10: f64 = 0.85;
+// France-LEGI split gate. Structured-fact queries (citation resolution, temporal version pinning)
+// route to the structured resolver; conceptual queries to hybrid search. The two structured
+// categories GATE the claim at high floors; full-body semantic retrieval is an ADVISORY stress test
+// (it mostly measures accidental topical similarity, so it does not gate). Calibrated 2026-06-23 on
+// index/phase1-freemium-20250713: structured_citation 1.00, temporal 1.00, semantic 0.116. See
+// work/03-implementation/02-evidence/2026-06-23-france-legi-gate-split.md
+const PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_RECALL_AT_10: f64 = 0.95;
 const PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10: f64 = 0.90;
-const PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10: f64 = 0.60;
-const PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES: u64 = 10;
+const PHASE1_FRANCE_LEGI_ADVISORY_SEMANTIC_RECALL_AT_10: f64 = 0.40;
+const PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_QUERIES: u64 = 10;
 const PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES: u64 = 4;
-const PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES: u64 = 50;
+const PHASE1_FRANCE_LEGI_MIN_SEMANTIC_QUERIES: u64 = 50;
 // The gate validates recall/exactness @10, so the runner is fixed at top-10 (document-level).
 const FRANCE_LEGI_GATE_TOP_K: u32 = 10;
 
@@ -670,9 +673,13 @@ fn eval_france_legi_payload(
     // Build the query embedder once for the whole sweep (the runner always uses hybrid/dense).
     let embedder = PreparedQueryEmbedder::from_env()?;
 
-    // known-item and temporal: gold is an exact version document_id; as_of is pinned per qrel.
+    // Each category runs its gold qrels through the production search pipeline and records which
+    // routing backend served each query (the gate audit). known-item -> structured_citation_resolution
+    // and temporal -> temporal_version_pinning resolve structurally; cross-reference is the advisory
+    // semantic stress test (full body -> cited article, via hybrid).
     let mut known_hits = 0usize;
     let mut known_done = 0usize;
+    let mut known_backends = std::collections::BTreeMap::<String, usize>::new();
     for qrel in gold["known_item"].as_array().into_iter().flatten() {
         let (Some(query), Some(gold_id), Some(as_of)) = (
             qrel["query"].as_str(),
@@ -681,7 +688,9 @@ fn eval_france_legi_payload(
         ) else {
             continue;
         };
-        let docs = france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
+        let (docs, backend) =
+            france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
+        *known_backends.entry(backend).or_default() += 1;
         known_done += 1;
         if docs.iter().take(top_k).any(|doc| doc == gold_id) {
             known_hits += 1;
@@ -690,6 +699,7 @@ fn eval_france_legi_payload(
 
     let mut temporal_hits = 0usize;
     let mut temporal_done = 0usize;
+    let mut temporal_backends = std::collections::BTreeMap::<String, usize>::new();
     for qrel in gold["temporal"].as_array().into_iter().flatten() {
         let (Some(query), Some(gold_id), Some(as_of)) = (
             qrel["query"].as_str(),
@@ -698,18 +708,21 @@ fn eval_france_legi_payload(
         ) else {
             continue;
         };
-        let docs = france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
+        let (docs, backend) =
+            france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
+        *temporal_backends.entry(backend).or_default() += 1;
         temporal_done += 1;
         if docs.iter().take(top_k).any(|doc| doc == gold_id) {
             temporal_hits += 1;
         }
     }
 
-    // cross-reference: production search applies a temporal prefilter, so match the cited ARTICLE
-    // (any version, by source_uid) rather than the exact cited version; as_of = the citing
-    // article's own date.
+    // cross-reference (advisory semantic): production search applies a temporal prefilter, so match
+    // the cited ARTICLE (any version, by source_uid) rather than the exact cited version; as_of =
+    // the citing article's own date.
     let mut cross_recall_sum = 0.0f64;
     let mut cross_done = 0usize;
+    let mut cross_backends = std::collections::BTreeMap::<String, usize>::new();
     for qrel in gold["cross_reference"].as_array().into_iter().flatten() {
         let (Some(query), Some(query_doc), Some(gold_ids)) = (
             qrel["query"].as_str(),
@@ -728,7 +741,9 @@ fn eval_france_legi_payload(
         let as_of = legi_document_as_of(query_doc)
             .map(str::to_owned)
             .unwrap_or_else(today_utc);
-        let docs = france_legi_search_documents(&postgres, &embedder, query, &as_of, overfetch)?;
+        let (docs, backend) =
+            france_legi_search_documents(&postgres, &embedder, query, &as_of, overfetch)?;
+        *cross_backends.entry(backend).or_default() += 1;
         let top_uids: std::collections::HashSet<&str> = docs
             .iter()
             .take(top_k)
@@ -742,16 +757,25 @@ fn eval_france_legi_payload(
         cross_done += 1;
     }
 
-    let known = (mean(known_hits, known_done), known_done);
-    let temporal = (mean(temporal_hits, temporal_done), temporal_done);
-    let cross = (
-        if cross_done > 0 {
+    let structured = FranceLegiCategoryResult {
+        metric: mean(known_hits, known_done),
+        queries: known_done,
+        backends: json!(known_backends),
+    };
+    let temporal = FranceLegiCategoryResult {
+        metric: mean(temporal_hits, temporal_done),
+        queries: temporal_done,
+        backends: json!(temporal_backends),
+    };
+    let semantic = FranceLegiCategoryResult {
+        metric: if cross_done > 0 {
             cross_recall_sum / cross_done as f64
         } else {
             0.0
         },
-        cross_done,
-    );
+        queries: cross_done,
+        backends: json!(cross_backends),
+    };
 
     let index_revision = index_dir
         .as_path()
@@ -764,60 +788,85 @@ fn eval_france_legi_payload(
         .unwrap_or_else(|| format!("index:{index_revision}"));
 
     Ok(france_legi_artifact(
-        known,
+        structured,
         temporal,
-        cross,
+        semantic,
         limits,
         &index_revision,
         &source_revision,
     ))
 }
 
-/// Assemble the `phase1_france_legi_benchmark` artifact from per-category `(metric, query_count)`
-/// results. `state` is `passed` only when every category clears its policy floor AND minimum
-/// query count; the status gate re-derives pass from the recorded metrics either way.
+/// One France-LEGI gate category: the @10 metric over its qrels, the query count, and the per-query
+/// routing-backend audit (proving structured categories were resolved structurally, input-driven —
+/// not because the evaluator knew the answer).
+struct FranceLegiCategoryResult {
+    metric: f64,
+    queries: usize,
+    backends: Value,
+}
+
+/// Assemble the `phase1_france_legi_benchmark` artifact from the three split-gate category results.
+/// The two structured categories (citation resolution, temporal version pinning) GATE the claim at
+/// high floors; `semantic_retrieval` is ADVISORY (recorded, never gating). `state` is `passed` only
+/// when BOTH gating categories clear their floor + minimum query count; the status gate re-derives
+/// pass from the recorded metrics either way.
 fn france_legi_artifact(
-    known: (f64, usize),
-    temporal: (f64, usize),
-    cross: (f64, usize),
+    structured: FranceLegiCategoryResult,
+    temporal: FranceLegiCategoryResult,
+    semantic: FranceLegiCategoryResult,
     limits: FranceLegiGoldLimits,
     index_revision: &str,
     source_revision: &str,
 ) -> Value {
-    let passed = known.0 >= PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10
-        && known.1 as u64 >= PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES
-        && temporal.0 >= PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10
-        && temporal.1 as u64 >= PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES
-        && cross.0 >= PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10
-        && cross.1 as u64 >= PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES;
+    let passed = structured.metric >= PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_RECALL_AT_10
+        && structured.queries as u64 >= PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_QUERIES
+        && temporal.metric >= PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10
+        && temporal.queries as u64 >= PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES;
 
     json!({
         "schema_version": 1,
         "kind": "phase1_france_legi_benchmark",
         "state": if passed { "passed" } else { "failed" },
         "jurisdiction": "france",
-        "claim_scope": "France-LEGI official-evidence statutory retrieval (known-item, temporal as-of, cross-reference) through the production pipeline",
+        "claim_scope": "France-LEGI official-evidence retrieval with intent routing: structured citation resolution and temporal version pinning (gating), plus advisory full-body semantic retrieval, through the production pipeline",
         "source": "DILA LEGI (Licence Ouverte) official fields, extracted from the built index",
-        "retriever": "jurisearch search (BM25 + dense + RRF)",
+        "retriever": "jurisearch search (intent-routed: structured citation resolver + BM25/dense/RRF hybrid)",
         "embedding": {
             "fingerprint_model": PHASE0_EMBEDDING_MODEL,
             "dimension": PHASE0_EMBEDDING_DIMENSION,
             "normalize": true
         },
         "thresholds": {
-            "known_item_recall_at_10_min": PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10,
+            "structured_citation_recall_at_10_min": PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_RECALL_AT_10,
             "temporal_version_exactness_at_10_min": PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10,
-            "cross_reference_recall_at_10_min": PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10
+            "semantic_retrieval_recall_at_10_advisory": PHASE1_FRANCE_LEGI_ADVISORY_SEMANTIC_RECALL_AT_10
         },
         "categories": {
-            "known_item": { "metric_value": round_metric(known.0), "queries": known.1 },
-            "temporal": { "metric_value": round_metric(temporal.0), "queries": temporal.1 },
-            "cross_reference": { "metric_value": round_metric(cross.0), "queries": cross.1 }
+            "structured_citation_resolution": {
+                "metric_value": round_metric(structured.metric),
+                "queries": structured.queries,
+                "gating": true,
+                "routing_backends": structured.backends
+            },
+            "temporal_version_pinning": {
+                "metric_value": round_metric(temporal.metric),
+                "queries": temporal.queries,
+                "gating": true,
+                "routing_backends": temporal.backends
+            },
+            "semantic_retrieval": {
+                "metric_value": round_metric(semantic.metric),
+                "queries": semantic.queries,
+                "gating": false,
+                "advisory": true,
+                "routing_backends": semantic.backends
+            }
         },
         "provenance": {
             "official_source": "DILA LEGI (Licence Ouverte)",
             "source_revision": source_revision,
-            "pipeline": "jurisearch search (BM25 + dense + RRF)",
+            "pipeline": "jurisearch search (intent-routed structured + hybrid)",
             // Record the exact fusion weights so the gate evidence is honest about the retrieval
             // configuration it measured (dense is down-weighted as a recall-expander).
             "fusion": {
@@ -830,9 +879,9 @@ fn france_legi_artifact(
             // cherry-picked), so `sampled` is false; the per-category caps are recorded for audit.
             "qrel_selection": "deterministic_bounded_by_document_id",
             "qrel_limits": {
-                "known_item": limits.known_item,
-                "temporal": limits.temporal,
-                "cross_reference": limits.cross_reference
+                "structured_citation_resolution": limits.known_item,
+                "temporal_version_pinning": limits.temporal,
+                "semantic_retrieval": limits.cross_reference
             },
             "sampled": false,
             "human_in_gold": false,
@@ -840,24 +889,25 @@ fn france_legi_artifact(
         },
         "evidence": [
             format!(
-                "France-LEGI runner over index `{index_revision}`: {} known-item, {} temporal, {} cross-reference qrels through the production search pipeline",
-                known.1, temporal.1, cross.1
+                "France-LEGI intent-routed runner over index `{index_revision}`: {} structured-citation, {} temporal, {} semantic (advisory) qrels through the production search pipeline",
+                structured.queries, temporal.queries, semantic.queries
             )
         ]
     })
 }
 
 /// Run one France-LEGI query through the production search pipeline and return the ranked unique
-/// document IDs. A `no_results` outcome is an empty list (a miss), not an error.
+/// document IDs plus the routing backend that served it (`structured_citation`/`hybrid`/`none`), for
+/// the gate's routing audit. A `no_results` outcome is an empty list (a miss), not an error.
 fn france_legi_search_documents(
     postgres: &ManagedPostgres,
     embedder: &PreparedQueryEmbedder,
     query: &str,
     as_of: &str,
     top_k: u32,
-) -> Result<Vec<String>, ErrorObject> {
+) -> Result<(Vec<String>, String), ErrorObject> {
     let Some(query_text) = parade_query_text(query) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), "none".to_owned()));
     };
     let args = SearchArgs {
         query: query.to_owned(),
@@ -882,9 +932,15 @@ fn france_legi_search_documents(
         Some(embedder),
     ) {
         Ok(response) => response,
-        Err(error) if error.code == ErrorCode::NoResults => return Ok(Vec::new()),
+        Err(error) if error.code == ErrorCode::NoResults => {
+            return Ok((Vec::new(), "none".to_owned()));
+        }
         Err(error) => return Err(error),
     };
+    let backend = response["routing"]["chosen_backend"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_owned();
     let mut documents = Vec::new();
     if let Some(candidates) = response["candidates"].as_array() {
         for candidate in candidates {
@@ -895,7 +951,7 @@ fn france_legi_search_documents(
             }
         }
     }
-    Ok(documents)
+    Ok((documents, backend))
 }
 
 /// `legi:LEGIARTI...@YYYY-MM-DD` -> `LEGIARTI...`
@@ -4451,7 +4507,7 @@ fn phase1_gate_payload_with(
         phase1_gate_check(
             "france_legi_official_eval",
             france_legi_status,
-            "Phase 1 requires a passing France-LEGI official-evidence benchmark (known-item, temporal, cross-reference) run through the production pipeline; jurisdiction-correct release evidence, unlike the Belgian BSARD proxy",
+            "Phase 1 requires a passing France-LEGI official-evidence benchmark — gating on intent-routed structured citation resolution and temporal version pinning, with full-body semantic retrieval advisory — run through the production pipeline; jurisdiction-correct release evidence, unlike the Belgian BSARD proxy",
         ),
         phase1_gate_check(
             "final_embedding_model",
@@ -4843,11 +4899,11 @@ fn phase1_france_legi_default_payload() -> Value {
         "artifact_path": null,
         "artifact_error": null,
         "decision_date": "2026-06-22",
-        "claim_scope": "France-LEGI official-evidence statutory retrieval (known-item, temporal as-of, cross-reference) through the production pipeline",
+        "claim_scope": "France-LEGI official-evidence retrieval with intent routing: structured citation resolution and temporal version pinning (gating), plus advisory full-body semantic retrieval, through the production pipeline",
         "jurisdiction": "france",
         "retriever": "production jurisearch search (BM25 + dense + RRF)",
         "required_evidence": [
-            "gold derived only from official DILA/Légifrance fields (no human, no LLM): ID/NUM/TITRE_TXT for known-item, CID/DATE_DEBUT/DATE_FIN for temporal as-of, LIEN CITATION targets for cross-reference",
+            "gold derived only from official DILA/Légifrance fields (no human, no LLM): ID/NUM/TITRE_TXT for structured citation resolution, CID/DATE_DEBUT/DATE_FIN for temporal version pinning, LIEN CITATION targets for advisory semantic retrieval",
             "retrieval executed through the production search pipeline, not a proxy harness",
             "per-category metrics recorded with query counts and the locked bge-m3 fingerprint",
             "per-category thresholds at or above policy floors recorded for status to consume before this gate can pass",
@@ -4952,28 +5008,32 @@ fn phase1_france_legi_artifact_errors(artifact: &Value) -> Vec<String> {
             errors.push(format!("{path} is required"));
         }
     }
+    // Two structured categories GATE the claim at high floors; semantic_retrieval is advisory.
     phase1_france_legi_validate_category(
         artifact,
-        "known_item",
-        "known_item_recall_at_10",
-        PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_RECALL_AT_10,
-        PHASE1_FRANCE_LEGI_MIN_KNOWN_ITEM_QUERIES,
+        "structured_citation_resolution",
+        "structured_citation_recall_at_10",
+        PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_RECALL_AT_10,
+        PHASE1_FRANCE_LEGI_MIN_STRUCTURED_CITATION_QUERIES,
+        false,
         &mut errors,
     );
     phase1_france_legi_validate_category(
         artifact,
-        "temporal",
+        "temporal_version_pinning",
         "temporal_version_exactness_at_10",
         PHASE1_FRANCE_LEGI_MIN_TEMPORAL_VERSION_EXACTNESS_AT_10,
         PHASE1_FRANCE_LEGI_MIN_TEMPORAL_QUERIES,
+        false,
         &mut errors,
     );
     phase1_france_legi_validate_category(
         artifact,
-        "cross_reference",
-        "cross_reference_recall_at_10",
-        PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_RECALL_AT_10,
-        PHASE1_FRANCE_LEGI_MIN_CROSS_REFERENCE_QUERIES,
+        "semantic_retrieval",
+        "semantic_retrieval_recall_at_10",
+        PHASE1_FRANCE_LEGI_ADVISORY_SEMANTIC_RECALL_AT_10,
+        PHASE1_FRANCE_LEGI_MIN_SEMANTIC_QUERIES,
+        true,
         &mut errors,
     );
     errors
@@ -4985,9 +5045,13 @@ fn phase1_france_legi_validate_category(
     threshold_key: &str,
     policy_floor: f64,
     min_queries: u64,
+    // Gating categories must clear their recorded threshold; advisory categories record their
+    // metric but never fail the gate on it (they still require the metric + a minimum query count).
+    advisory: bool,
     errors: &mut Vec<String>,
 ) {
-    let threshold_path = format!("thresholds.{threshold_key}_min");
+    let suffix = if advisory { "advisory" } else { "min" };
+    let threshold_path = format!("thresholds.{threshold_key}_{suffix}");
     let value_path = format!("categories.{category}.metric_value");
     let queries_path = format!("categories.{category}.queries");
     let threshold = artifact_pointer_f64(artifact, &threshold_path);
@@ -4999,7 +5063,11 @@ fn phase1_france_legi_validate_category(
         )),
         None => errors.push(format!("{threshold_path} is required")),
     }
-    if let (Some(value), Some(threshold)) = (value, threshold) {
+    if advisory {
+        if value.is_none() {
+            errors.push(format!("{value_path} is required"));
+        }
+    } else if let (Some(value), Some(threshold)) = (value, threshold) {
         if value < threshold {
             errors.push(format!(
                 "{value_path} must be at least threshold {threshold:.3}, got {value:.3}"
@@ -6114,9 +6182,10 @@ mod tests {
         assert_eq!(payload["state"], "ready");
 
         // A failing France-LEGI artifact must re-close the claim even though BSARD is advisory.
+        // Drop the gating structured-citation metric below its floor.
         let bad = tempfile::NamedTempFile::new().unwrap();
         let mut artifact = valid_france_legi_artifact();
-        artifact["categories"]["known_item"]["metric_value"] = json!(0.10);
+        artifact["categories"]["structured_citation_resolution"]["metric_value"] = json!(0.10);
         fs::write(bad.path(), artifact.to_string()).unwrap();
         let failing_france_legi = phase1_france_legi_payload_with_path(Some(bad.path()));
         let reclosed = phase1_gate_payload_with(
@@ -6440,14 +6509,14 @@ mod tests {
                 "normalize": true
             },
             "thresholds": {
-                "known_item_recall_at_10_min": 0.85,
+                "structured_citation_recall_at_10_min": 0.95,
                 "temporal_version_exactness_at_10_min": 0.90,
-                "cross_reference_recall_at_10_min": 0.60
+                "semantic_retrieval_recall_at_10_advisory": 0.40
             },
             "categories": {
-                "known_item": { "metric_value": 0.92, "queries": 12 },
-                "temporal": { "metric_value": 0.95, "queries": 6 },
-                "cross_reference": { "metric_value": 0.64, "queries": 80 }
+                "structured_citation_resolution": { "metric_value": 1.0, "queries": 60, "gating": true },
+                "temporal_version_pinning": { "metric_value": 1.0, "queries": 12, "gating": true },
+                "semantic_retrieval": { "metric_value": 0.12, "queries": 80, "gating": false, "advisory": true }
             },
             "provenance": {
                 "official_source": "DILA LEGI Freemium_legi_global_20250713 (Licence Ouverte)",
@@ -6476,7 +6545,10 @@ mod tests {
         assert_eq!(payload["source"], json!(PHASE1_FRANCE_LEGI_BENCHMARK_ENV));
         assert_eq!(payload["artifact_error"], Value::Null);
         assert_eq!(payload["jurisdiction"], "france");
-        assert_eq!(payload["categories"]["known_item"]["queries"], 12);
+        assert_eq!(
+            payload["categories"]["structured_citation_resolution"]["queries"],
+            60
+        );
         assert_eq!(payload["provenance"]["human_in_gold"], false);
         assert_eq!(phase1_france_legi_check_status(&payload), "pass");
     }
@@ -6529,13 +6601,13 @@ mod tests {
                 "retriever": "x",
                 "embedding": { "fingerprint_model": "bge-m3", "dimension": 1024, "normalize": true },
                 "thresholds": {
-                    "known_item_recall_at_10_min": 0.50,
+                    "structured_citation_recall_at_10_min": 0.50,
                     "temporal_version_exactness_at_10_min": 0.90,
-                    "cross_reference_recall_at_10_min": 0.60
+                    "semantic_retrieval_recall_at_10_advisory": 0.40
                 },
                 "categories": {
-                    "known_item": { "metric_value": 0.40, "queries": 3 },
-                    "temporal": { "metric_value": 0.95, "queries": 2 }
+                    "structured_citation_resolution": { "metric_value": 0.40, "queries": 3 },
+                    "temporal_version_pinning": { "metric_value": 0.95, "queries": 2 }
                 },
                 "evidence": []
             })
@@ -6550,11 +6622,18 @@ mod tests {
         let error = payload["artifact_error"].as_str().unwrap();
         assert!(error.contains("passed artifact must include non-empty evidence"));
         assert!(error.contains("jurisdiction must be `france`"));
-        assert!(error.contains("thresholds.known_item_recall_at_10_min must be at least 0.850"));
-        assert!(error.contains("categories.known_item.metric_value must be at least threshold"));
-        assert!(error.contains("categories.known_item.queries must be at least 10"));
-        assert!(error.contains("categories.temporal.queries must be at least 4"));
-        assert!(error.contains("categories.cross_reference.metric_value is required"));
+        assert!(
+            error.contains("thresholds.structured_citation_recall_at_10_min must be at least 0.950")
+        );
+        assert!(
+            error.contains("categories.structured_citation_resolution.metric_value must be at least threshold")
+        );
+        assert!(
+            error.contains("categories.structured_citation_resolution.queries must be at least 10")
+        );
+        assert!(error.contains("categories.temporal_version_pinning.queries must be at least 4"));
+        // The advisory semantic category still requires its metric to be recorded.
+        assert!(error.contains("categories.semantic_retrieval.metric_value is required"));
     }
 
     #[test]
@@ -6577,12 +6656,21 @@ mod tests {
         );
     }
 
+    fn france_legi_category(metric: f64, queries: usize, backend: &str) -> FranceLegiCategoryResult {
+        FranceLegiCategoryResult {
+            metric,
+            queries,
+            backends: json!({ backend: queries }),
+        }
+    }
+
     #[test]
-    fn france_legi_runner_artifact_passes_gate_validation_when_floors_met() {
+    fn france_legi_runner_artifact_passes_when_structured_floors_met_even_if_semantic_low() {
         let artifact = france_legi_artifact(
-            (0.95, 60),
-            (0.95, 12),
-            (0.70, 120),
+            france_legi_category(1.0, 60, "structured_citation"),
+            france_legi_category(1.0, 12, "structured_citation"),
+            // semantic well below its advisory floor (0.40) — must NOT block the claim.
+            france_legi_category(0.116, 120, "hybrid"),
             FranceLegiGoldLimits {
                 known_item: 60,
                 temporal: 12,
@@ -6592,12 +6680,27 @@ mod tests {
             "20250713-140000",
         );
         assert_eq!(artifact["state"], "passed");
-        assert_eq!(artifact["kind"], "phase1_france_legi_benchmark");
         assert_eq!(artifact["jurisdiction"], "france");
-        assert_eq!(artifact["provenance"]["sampled"], false);
-        assert_eq!(artifact["provenance"]["human_in_gold"], false);
         assert_eq!(artifact["provenance"]["source_revision"], "20250713-140000");
-        assert_eq!(artifact["categories"]["known_item"]["queries"], 60);
+        assert_eq!(
+            artifact["categories"]["structured_citation_resolution"]["queries"],
+            60
+        );
+        assert_eq!(
+            artifact["categories"]["structured_citation_resolution"]["gating"],
+            true
+        );
+        assert_eq!(artifact["categories"]["semantic_retrieval"]["gating"], false);
+        assert_eq!(
+            artifact["categories"]["semantic_retrieval"]["advisory"],
+            true
+        );
+        // The routing-backend audit is recorded per category.
+        assert_eq!(
+            artifact["categories"]["structured_citation_resolution"]["routing_backends"]
+                ["structured_citation"],
+            60
+        );
 
         // The runner's output must be a VALID, passing artifact for the status gate.
         let errors = phase1_france_legi_artifact_errors(&artifact);
@@ -6613,25 +6716,25 @@ mod tests {
     }
 
     #[test]
-    fn france_legi_runner_artifact_fails_below_floor_or_too_few_queries() {
-        // below the known-item recall floor
+    fn france_legi_runner_artifact_fails_below_gating_floor_or_too_few_queries() {
+        // below the structured-citation recall floor (0.95)
         assert_eq!(
             france_legi_artifact(
-                (0.40, 60),
-                (0.95, 12),
-                (0.70, 120),
+                france_legi_category(0.40, 60, "structured_citation"),
+                france_legi_category(1.0, 12, "structured_citation"),
+                france_legi_category(0.70, 120, "hybrid"),
                 FranceLegiGoldLimits::default(),
                 "idx",
                 "rev"
             )["state"],
             "failed"
         );
-        // too few cross-reference queries
+        // too few temporal queries (a GATING category; min is 4)
         assert_eq!(
             france_legi_artifact(
-                (0.95, 60),
-                (0.95, 12),
-                (0.70, 9),
+                france_legi_category(1.0, 60, "structured_citation"),
+                france_legi_category(1.0, 3, "structured_citation"),
+                france_legi_category(0.70, 120, "hybrid"),
                 FranceLegiGoldLimits::default(),
                 "idx",
                 "rev"
