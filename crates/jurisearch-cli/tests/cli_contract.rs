@@ -3545,6 +3545,17 @@ PAR CES MOTIFS, la Cour REJETTE le pourvoi.</CONTENU></BLOC_TEXTUEL>
     assert_eq!(part["zone_provenance"], "unavailable");
     assert_eq!(part["available"], false);
 
+    // Visa is heuristic from leading "Vu …" lines.
+    let visa = fetch_part("visa");
+    let part = &visa["documents"][0]["part"];
+    assert_eq!(part["zone_provenance"], "heuristic");
+    assert_eq!(part["available"], true);
+    assert!(part["text"].as_str().unwrap().contains("1240"));
+
+    // Moyens has no bulk marker -> unavailable.
+    let moyens = fetch_part("moyens");
+    assert_eq!(moyens["documents"][0]["part"]["zone_provenance"], "unavailable");
+
     // Unknown part -> bad_input.
     Command::cargo_bin("jurisearch")
         .unwrap()
@@ -3553,6 +3564,32 @@ PAR CES MOTIFS, la Cour REJETTE le pourvoi.</CONTENU></BLOC_TEXTUEL>
         .args(["fetch", "cass:JURITEXT000051824099", "--part", "bogus"])
         .assert()
         .code(2);
+
+    // JSONL session forwards `part` (the per-request index_dir carries the index path).
+    let request = serde_json::json!({
+        "command": "fetch",
+        "args": {
+            "ids": ["cass:JURITEXT000051824099"],
+            "part": "summary",
+            "index_dir": index.path().to_string_lossy(),
+        }
+    });
+    let session_out = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .arg("session")
+        .arg("--jsonl")
+        .write_stdin(format!("{request}\n"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let line = String::from_utf8(session_out)?;
+    let session: Value = serde_json::from_str(line.lines().next().unwrap())?;
+    assert_eq!(
+        session["result"]["documents"][0]["part"]["zone_provenance"],
+        "sommaire"
+    );
 
     Ok(())
 }

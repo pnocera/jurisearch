@@ -3084,28 +3084,42 @@ fn extract_decision_part(part: DecisionPart, body: &str, summary: Option<&str>) 
 }
 
 /// Heuristic dispositif: text from the last dispositif marker to the end of the body. Markers are
-/// matched case-insensitively against the ORIGINAL body (no `to_uppercase`, which can shift byte
-/// offsets on accented French text and mis-slice/panic). Marker offsets are valid UTF-8 byte indices.
+/// matched against the ORIGINAL body (never via `to_uppercase`, which can shift byte offsets on
+/// accented French text and mis-slice/panic); every offset is a valid UTF-8 byte index. ASCII markers
+/// match case-insensitively (`DECIDE`/`Decide`/`decide`); the accented `Décide` form is matched
+/// exactly in its common casings since `rfind_ascii_ci` only folds ASCII bytes.
 fn heuristic_dispositif(body: &str) -> Option<String> {
-    const MARKERS: &[&str] = &["PAR CES MOTIFS", "D E C I D E", "DECIDE", "DÉCIDE"];
-    let start = MARKERS
+    const ASCII_MARKERS: &[&str] = &["PAR CES MOTIFS", "D E C I D E", "DECIDE"];
+    const ACCENTED_MARKERS: &[&str] = &["DÉCIDE", "Décide", "décide"];
+    let start = ASCII_MARKERS
         .iter()
         .filter_map(|marker| rfind_ascii_ci(body, marker))
+        .chain(ACCENTED_MARKERS.iter().filter_map(|marker| body.rfind(marker)))
         .max()?;
     let tail = body[start..].trim();
     (!tail.is_empty()).then(|| tail.to_owned())
 }
 
-/// Heuristic visa: the leading block of `Vu …` lines before the first numbered/considérant section.
+/// Heuristic visa: the FIRST contiguous block of `Vu …` lines (the opening visa), skipping any header
+/// lines before it and stopping at the first substantive non-`Vu` line. Restricting to the leading
+/// block prevents a later reasoning/quoted line that happens to start with `Vu` from being returned.
 fn heuristic_visa(body: &str) -> Option<String> {
-    let visa: Vec<&str> = body
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            let upper = line.to_uppercase();
-            upper.starts_with("VU ") || upper.starts_with("VU :") || upper == "VU"
-        })
-        .collect();
+    let mut visa = Vec::new();
+    let mut started = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let upper = trimmed.to_uppercase();
+        let is_vu = upper.starts_with("VU ") || upper.starts_with("VU :") || upper == "VU";
+        if is_vu {
+            started = true;
+            visa.push(trimmed);
+        } else if started {
+            break; // first substantive line after the opening Vu block ends the visa
+        }
+    }
     (!visa.is_empty()).then(|| visa.join("\n"))
 }
 
@@ -8903,11 +8917,22 @@ mod tests {
     }
 
     #[test]
-    fn heuristic_visa_collects_leading_vu_lines() {
-        let body = "Vu les articles 1240 et 1241 du code civil ;\nFaits et procédure\n1. Le demandeur...";
+    fn heuristic_visa_collects_only_the_leading_block() {
+        // A later reasoning line starting with "Vu" must NOT be included in the opening visa.
+        let body = "En-tête de l'arrêt\nVu les articles 1240 et 1241 du code civil ;\nVu le code de procédure civile ;\nFaits et procédure\n1. Le demandeur soutient. Vu ce qui précède, il conclut.";
         let visa = heuristic_visa(body).expect("visa found");
         assert!(visa.contains("1240"));
+        assert!(visa.contains("procédure civile"));
         assert!(!visa.contains("Faits"));
+        assert!(!visa.contains("conclut"), "a later 'Vu' line leaked: {visa}");
+    }
+
+    #[test]
+    fn heuristic_dispositif_matches_accented_decide() {
+        let body = "Considérant ce qui suit.\nDécide, la Cour annule l'arrêt attaqué.";
+        let dispositif = heuristic_dispositif(body).expect("accented dispositif found");
+        assert!(dispositif.starts_with("Décide"));
+        assert!(dispositif.contains("annule"));
     }
 
     #[test]
