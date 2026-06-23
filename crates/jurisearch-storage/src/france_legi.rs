@@ -80,6 +80,11 @@ FROM (
 }
 
 fn cross_reference_sql(limit: u32) -> String {
+    // Deterministic pool of citing articles to resolve. Citation edges are plentiful; resolving
+    // every one against `documents` before taking `limit` groups was wasteful. We pre-select the
+    // first `seed_pool` citing articles (by document_id) and resolve only those. Some seeds may
+    // have no target that resolves to a corpus article, so the pool is several times `limit`.
+    let seed_pool = (limit as u64).saturating_mul(20).max(2000);
     format!(
         r#"
 WITH cite AS (
@@ -90,18 +95,21 @@ WITH cite AS (
     WHERE e.edge_source = 'publisher'
       AND e.from_document_id IS NOT NULL
       AND e.payload->>'to_source_uid' LIKE 'LEGIARTI%'
-      AND EXISTS (
-          SELECT 1 FROM jsonb_array_elements(coalesce(e.payload->'attributes', '[]'::jsonb)) a
-          WHERE a->>'key' = 'typelien' AND a->>'value' = 'CITATION'
-      )
-      AND EXISTS (
-          SELECT 1 FROM jsonb_array_elements(coalesce(e.payload->'attributes', '[]'::jsonb)) a
-          WHERE a->>'key' = 'sens' AND a->>'value' = 'cible'
-      )
+      -- JSONB containment (single C-level test, no jsonb_array_elements SRF per edge):
+      -- the attributes array must hold an element with typelien=CITATION AND one with sens=cible.
+      AND e.payload->'attributes' @> '[{{"key":"typelien","value":"CITATION"}},{{"key":"sens","value":"cible"}}]'::jsonb
+),
+cite_seeds AS (
+    SELECT from_document_id
+    FROM cite
+    GROUP BY from_document_id
+    ORDER BY from_document_id
+    LIMIT {seed_pool}
 ),
 resolved AS (
     SELECT DISTINCT c.from_document_id, td.document_id AS gold_document_id
     FROM cite c
+    JOIN cite_seeds cs ON cs.from_document_id = c.from_document_id
     JOIN documents td
       ON td.source = 'legi' AND td.kind = 'article'
      AND td.source_uid = c.target_source_uid
@@ -133,37 +141,57 @@ JOIN LATERAL (
 }
 
 fn temporal_sql(limit: u32) -> String {
+    // Generous deterministic pool of seed articles to resolve fully. The corpus has ~4.18M
+    // version edges; resolving and aggregating all of them to emit `limit` cases ran for minutes.
+    // We instead pre-select the first `seed_pool` articles (by document_id) that carry >=2 version
+    // edges, then run the expensive document joins / family aggregation only over that pool. The
+    // exact family checks (>=2 distinct resolved versions + self-inclusion) still run downstream,
+    // so a seed that turns out not to form a valid family is simply dropped.
+    let seed_pool = (limit as u64).saturating_mul(200).max(4000);
     format!(
         r#"
-WITH version_edges AS (
-    SELECT
-        e.from_document_id,
-        e.payload->>'to_source_uid' AS version_source_uid
+WITH candidate_seeds AS (
+    -- One scan of graph_edges: the first `seed_pool` articles (by document_id) that carry >=2
+    -- version edges. A VERSIONS edge carries all four version attributes; JSONB containment (@>)
+    -- checks key presence with one C-level test per edge, replacing a per-edge jsonb_object_agg
+    -- over jsonb_array_elements. count(*) here is a loose pre-filter; the strict
+    -- count(DISTINCT resolved version) >= 2 + self-inclusion check is in `families`.
+    SELECT e.from_document_id
     FROM graph_edges e
-    CROSS JOIN LATERAL (
-        SELECT jsonb_object_agg(a->>'key', a->>'value') AS attrs
-        FROM jsonb_array_elements(coalesce(e.payload->'attributes', '[]'::jsonb)) a
-    ) attrs
     WHERE e.edge_source = 'publisher'
       AND e.from_document_id IS NOT NULL
       AND e.payload->>'source_tag' = 'LIEN_ART'
       AND e.payload->>'to_source_uid' LIKE 'LEGIARTI%'
-      AND attrs.attrs ?& ARRAY['debut', 'fin', 'num', 'etat']
+      AND e.payload->'attributes' @> '[{{"key":"debut"}},{{"key":"fin"}},{{"key":"num"}},{{"key":"etat"}}]'::jsonb
+    GROUP BY e.from_document_id
+    HAVING count(*) >= 2
+    ORDER BY e.from_document_id
+    LIMIT {seed_pool}
 ),
 resolved AS (
+    -- Resolve only the seed articles' version edges. Joining graph_edges on from_document_id uses
+    -- the graph_edges_from_idx index (seed_pool lookups), so this never re-scans the ~4.18M-edge
+    -- corpus. Postgres cannot estimate @> selectivity (it guesses 1 row), which previously turned
+    -- a CTE self-join over all version edges into a 4000 x 4.18M nested loop.
     SELECT
-        v.from_document_id,
+        cs.from_document_id,
         fd.source_uid AS from_source_uid,
         d.document_id AS gold_document_id,
         d.source_uid AS gold_source_uid,
         d.citation,
         d.valid_from,
         d.valid_to
-    FROM version_edges v
-    JOIN documents fd ON fd.document_id = v.from_document_id
+    FROM candidate_seeds cs
+    JOIN documents fd ON fd.document_id = cs.from_document_id
+    JOIN graph_edges e
+      ON e.from_document_id = cs.from_document_id
+     AND e.edge_source = 'publisher'
+     AND e.payload->>'source_tag' = 'LIEN_ART'
+     AND e.payload->>'to_source_uid' LIKE 'LEGIARTI%'
+     AND e.payload->'attributes' @> '[{{"key":"debut"}},{{"key":"fin"}},{{"key":"num"}},{{"key":"etat"}}]'::jsonb
     JOIN documents d
       ON d.source = 'legi' AND d.kind = 'article'
-     AND d.source_uid = v.version_source_uid
+     AND d.source_uid = e.payload->>'to_source_uid'
     -- only well-formed validity windows yield a usable as-of date
     WHERE d.valid_from IS NOT NULL
       AND (d.valid_to IS NULL OR d.valid_to > d.valid_from)

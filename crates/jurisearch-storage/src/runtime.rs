@@ -455,16 +455,32 @@ fn write_runtime_conf(
         "shared_preload_libraries = 'pg_search'\nlisten_addresses = '127.0.0.1'\nport = {port}\nunix_socket_directories = {}\n",
         sql_string_literal(&socket_dir.to_string_lossy())
     );
-    if profile == PostgresRuntimeProfile::BulkIngest {
-        runtime_conf.push_str(
-            "synchronous_commit = 'off'\n\
-             wal_compression = 'on'\n\
-             max_wal_size = '8GB'\n\
-             checkpoint_timeout = '30min'\n\
-             checkpoint_completion_target = '0.9'\n\
-             shared_buffers = '1GB'\n\
-             maintenance_work_mem = '1GB'\n",
-        );
+    // Analytical/parallel knobs applied to both profiles. The durable (search/eval) profile
+    // previously inherited stock Postgres defaults (work_mem=4MB, no parallelism), which made the
+    // France-LEGI gold CTEs and BM25/vector candidate fusion spill to disk and run single-threaded.
+    runtime_conf.push_str(
+        "effective_cache_size = '8GB'\n\
+         work_mem = '128MB'\n\
+         maintenance_work_mem = '1GB'\n\
+         temp_buffers = '64MB'\n\
+         max_parallel_workers_per_gather = '4'\n\
+         max_parallel_workers = '8'\n",
+    );
+    match profile {
+        PostgresRuntimeProfile::BulkIngest => {
+            runtime_conf.push_str(
+                "synchronous_commit = 'off'\n\
+                 wal_compression = 'on'\n\
+                 max_wal_size = '8GB'\n\
+                 checkpoint_timeout = '30min'\n\
+                 checkpoint_completion_target = '0.9'\n\
+                 shared_buffers = '1GB'\n",
+            );
+        }
+        PostgresRuntimeProfile::Durable => {
+            // Larger buffer pool for read-heavy search/eval; no bulk WAL relaxation.
+            runtime_conf.push_str("shared_buffers = '2GB'\n");
+        }
     }
 
     fs::write(data_dir.join("jurisearch.conf"), runtime_conf).map_err(StorageError::Io)
