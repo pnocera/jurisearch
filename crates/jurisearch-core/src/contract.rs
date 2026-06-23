@@ -177,6 +177,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         response_schema: "EvalFranceLegiResponse",
     },
     CommandSpec {
+        name: "eval run",
+        summary: "Run a custom retrieval eval (your questions + qrels or external judge) and emit an eval_run artifact (one-shot CLI only).",
+        status: CommandStatus::Implemented,
+        request_schema: "EvalRunRequest",
+        response_schema: "EvalRunResponse",
+    },
+    CommandSpec {
         name: "sync",
         summary: "Synchronize official sources through deltas or transactional histories.",
         status: CommandStatus::Stub,
@@ -203,7 +210,8 @@ pub const COMMANDS: &[CommandSpec] = &[
 /// or stubs not yet implemented anywhere. Kept in sync with the CLI's `dispatch_session_request`
 /// (the `not_implemented` arm) and enforced by tests. The `session --jsonl` / `batch --jsonl`
 /// entries are the protocol itself and are intentionally not listed here.
-pub const SESSION_EXCLUDED_COMMANDS: &[&str] = &["ingest", "eval france-legi", "sync"];
+pub const SESSION_EXCLUDED_COMMANDS: &[&str] =
+    &["ingest", "eval france-legi", "eval run", "sync"];
 
 /// True when `name` is callable over the warm session protocol.
 pub fn command_session_available(name: &str) -> bool {

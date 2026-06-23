@@ -462,6 +462,44 @@ enum EvalSubcommand {
     Phase1(EvalPhase1Args),
     /// Run the France-LEGI official-evidence benchmark and emit a phase1_france_legi_benchmark artifact.
     FranceLegi(EvalFranceLegiArgs),
+    /// Run a custom retrieval eval over your own questions with qrels or an external judge.
+    ///
+    /// Retrieves each question through the chosen modes (document grouping), pools candidates,
+    /// gets relevance labels from --qrels or an external --judge-cmd, and scores P@k / recall@k /
+    /// nDCG@k / MRR per mode with optional seed-free bootstrap CIs for between-mode deltas.
+    Run(EvalRunArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct EvalRunArgs {
+    /// JSON file: array of {"id","query","as_of"?}.
+    #[arg(long)]
+    questions: PathBuf,
+    /// JSON qrels file: array of {"query_id","document_id","label"}. Provide this OR --judge-cmd.
+    #[arg(long)]
+    qrels: Option<PathBuf>,
+    /// External judge command (run via `sh -c`): reads a blind JSON task on stdin, writes
+    /// {"<question_id>":{"<key>":label}} on stdout. Provide this OR --qrels.
+    #[arg(long)]
+    judge_cmd: Option<String>,
+    /// Comma-separated retrievers to compare.
+    #[arg(long, default_value = "bm25,dense,hybrid")]
+    modes: String,
+    /// Comma-separated metrics (p@K, recall@K, ndcg@K, mrr@K).
+    #[arg(long, default_value = "ndcg@10,recall@10,p@10,mrr@10")]
+    metrics: String,
+    /// Candidates retrieved per question per mode.
+    #[arg(long, default_value_t = 10)]
+    top_k: u32,
+    /// Minimum relevance label counted as relevant.
+    #[arg(long, default_value_t = 1)]
+    rel_min: i64,
+    /// Bootstrap resamples for between-mode delta CIs (0 = skip).
+    #[arg(long, default_value_t = 0)]
+    bootstrap: u32,
+    /// Write the eval_run artifact JSON to this path (also printed to stdout).
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -812,10 +850,559 @@ fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> 
                 Err(error) => emit_error(error),
             }
         }
+        Some(EvalSubcommand::Run(args)) => {
+            let out_path = args.out.clone();
+            match eval_run_payload(args, index_dir) {
+                Ok(response) => emit_artifact(response, out_path),
+                Err(error) => emit_error(error),
+            }
+        }
         None => emit_error(ErrorObject::bad_input(
-            "eval requires a subcommand; try `eval phase1` or `eval france-legi`",
+            "eval requires a subcommand; try `eval phase1`, `eval france-legi`, or `eval run`",
         )),
     }
+}
+
+/// Print an artifact to stdout, and additionally write it to `out` when given.
+fn emit_artifact(response: Value, out: Option<PathBuf>) -> anyhow::Result<()> {
+    if let Some(path) = out {
+        let rendered = match serde_json::to_string_pretty(&response) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                return emit_error(dependency_unavailable(format!(
+                    "failed to serialize artifact: {error}"
+                )));
+            }
+        };
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return emit_error(dependency_unavailable(format!(
+                "failed to create artifact directory {}: {error}",
+                parent.display()
+            )));
+        }
+        if let Err(error) = fs::write(&path, format!("{rendered}\n")) {
+            return emit_error(dependency_unavailable(format!(
+                "failed to write artifact to {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    write_json(&response)
+}
+
+// ---- General retrieval eval harness (`eval run`) -----------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct EvalQuestion {
+    id: String,
+    query: String,
+    #[serde(default)]
+    as_of: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvalQrel {
+    query_id: String,
+    document_id: String,
+    label: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MetricKind {
+    Precision,
+    Recall,
+    Ndcg,
+    Mrr,
+}
+
+#[derive(Debug, Clone)]
+struct MetricSpec {
+    kind: MetricKind,
+    k: usize,
+    name: String,
+}
+
+struct PoolCandidate {
+    uid: String,
+    title: Value,
+    snippet: Value,
+}
+
+struct EvalQuestionResult {
+    id: String,
+    query: String,
+    per_mode: HashMap<&'static str, Vec<String>>,
+    pool: Vec<PoolCandidate>,
+    labels: HashMap<String, i64>,
+}
+
+/// Deterministic xorshift64 RNG so bootstrap CIs are reproducible (no rand dependency, and
+/// `Math.random`-style nondeterminism would make eval artifacts unstable).
+struct XorShift64(u64);
+impl XorShift64 {
+    fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+}
+
+/// FNV-1a fold of a question id → a stable bootstrap/shuffle seed (reproducible across runs).
+fn eval_question_seed(id: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn load_eval_json<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Result<T, ErrorObject> {
+    let bytes = fs::read(path)
+        .map_err(|error| ErrorObject::bad_input(format!("failed to read {what} file {}: {error}", path.display())))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| ErrorObject::bad_input(format!("invalid {what} JSON in {}: {error}", path.display())))
+}
+
+fn parse_eval_modes(value: &str) -> Result<Vec<RetrievalMode>, ErrorObject> {
+    let mut modes = Vec::new();
+    for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+        let mode = match token {
+            "bm25" => RetrievalMode::Bm25,
+            "dense" => RetrievalMode::Dense,
+            "hybrid" => RetrievalMode::Hybrid,
+            other => {
+                return Err(ErrorObject::bad_input(format!(
+                    "unknown mode `{other}`; expected bm25, dense, or hybrid"
+                )));
+            }
+        };
+        if !modes.contains(&mode) {
+            modes.push(mode);
+        }
+    }
+    if modes.is_empty() {
+        return Err(ErrorObject::bad_input(
+            "--modes must list at least one of bm25, dense, hybrid",
+        ));
+    }
+    Ok(modes)
+}
+
+fn parse_eval_metric(value: &str) -> Result<MetricSpec, ErrorObject> {
+    let value = value.trim();
+    let (name, k_str) = value.split_once('@').unwrap_or((value, "10"));
+    let k: usize = k_str.parse().map_err(|_| {
+        ErrorObject::bad_input(format!("metric `{value}` has a non-numeric @k"))
+    })?;
+    if k == 0 {
+        return Err(ErrorObject::bad_input(format!("metric `{value}` @k must be >= 1")));
+    }
+    let kind = match name {
+        "p" | "precision" => MetricKind::Precision,
+        "recall" => MetricKind::Recall,
+        "ndcg" => MetricKind::Ndcg,
+        "mrr" => MetricKind::Mrr,
+        other => {
+            return Err(ErrorObject::bad_input(format!(
+                "unknown metric `{other}`; expected p, recall, ndcg, or mrr"
+            )));
+        }
+    };
+    Ok(MetricSpec {
+        kind,
+        k,
+        name: format!("{name}@{k}"),
+    })
+}
+
+/// Per-question metric value over a mode's ranked doc list. `recall` returns `None` when the pool
+/// has no relevant document (so it is excluded from the mean, not counted as 0).
+fn compute_eval_metric(
+    spec: &MetricSpec,
+    top: &[String],
+    labels: &HashMap<String, i64>,
+    pool: &[String],
+    rel_min: i64,
+) -> Option<f64> {
+    let label_of = |uid: &String| *labels.get(uid).unwrap_or(&0);
+    let topk: Vec<&String> = top.iter().take(spec.k).collect();
+    let relevant: HashSet<&String> = pool.iter().filter(|uid| label_of(uid) >= rel_min).collect();
+    match spec.kind {
+        MetricKind::Precision => {
+            let hits = topk.iter().filter(|uid| label_of(uid) >= rel_min).count();
+            Some(hits as f64 / topk.len().max(1) as f64)
+        }
+        MetricKind::Recall => {
+            if relevant.is_empty() {
+                None
+            } else {
+                let hits = topk.iter().filter(|uid| relevant.contains(*uid)).count();
+                Some(hits as f64 / relevant.len() as f64)
+            }
+        }
+        MetricKind::Ndcg => {
+            let gain = |label: i64| (2f64.powi(label.max(0) as i32)) - 1.0;
+            let dcg: f64 = topk
+                .iter()
+                .enumerate()
+                .map(|(i, uid)| gain(label_of(uid)) / ((i as f64) + 2.0).log2())
+                .sum();
+            let mut ideal: Vec<i64> = pool.iter().map(|uid| label_of(uid)).collect();
+            ideal.sort_unstable_by(|a, b| b.cmp(a));
+            let idcg: f64 = ideal
+                .iter()
+                .take(spec.k)
+                .enumerate()
+                .map(|(i, label)| gain(*label) / ((i as f64) + 2.0).log2())
+                .sum();
+            Some(if idcg > 0.0 { dcg / idcg } else { 0.0 })
+        }
+        MetricKind::Mrr => {
+            for (i, uid) in topk.iter().enumerate() {
+                if label_of(uid) >= rel_min {
+                    return Some(1.0 / ((i as f64) + 1.0));
+                }
+            }
+            Some(0.0)
+        }
+    }
+}
+
+fn mean_of(values: &[Option<f64>]) -> Option<f64> {
+    let present: Vec<f64> = values.iter().filter_map(|value| *value).collect();
+    if present.is_empty() {
+        None
+    } else {
+        Some(present.iter().sum::<f64>() / present.len() as f64)
+    }
+}
+
+/// Bootstrap a 95% CI for the mean difference (a - b), resampling QUESTIONS with replacement.
+fn bootstrap_delta_ci(a: &[Option<f64>], b: &[Option<f64>], resamples: u32) -> (f64, f64, f64) {
+    let n = a.len();
+    let resample_mean = |idx: &[usize], values: &[Option<f64>]| -> Option<f64> {
+        let present: Vec<f64> = idx.iter().filter_map(|&i| values[i]).collect();
+        if present.is_empty() {
+            None
+        } else {
+            Some(present.iter().sum::<f64>() / present.len() as f64)
+        }
+    };
+    let all: Vec<usize> = (0..n).collect();
+    let point = match (resample_mean(&all, a), resample_mean(&all, b)) {
+        (Some(x), Some(y)) => x - y,
+        _ => f64::NAN,
+    };
+    let mut rng = XorShift64::new(0x6a75_7269_7365_6172 ^ n as u64);
+    let mut deltas: Vec<f64> = Vec::with_capacity(resamples as usize);
+    for _ in 0..resamples {
+        let sample: Vec<usize> = (0..n)
+            .map(|_| (rng.next_u64() % n.max(1) as u64) as usize)
+            .collect();
+        if let (Some(x), Some(y)) = (resample_mean(&sample, a), resample_mean(&sample, b)) {
+            deltas.push(x - y);
+        }
+    }
+    if deltas.is_empty() {
+        return (point, f64::NAN, f64::NAN);
+    }
+    deltas.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    let lo = deltas[((0.025 * deltas.len() as f64) as usize).min(deltas.len() - 1)];
+    let hi = deltas[((0.975 * deltas.len() as f64) as usize).min(deltas.len() - 1)];
+    (point, lo, hi)
+}
+
+fn run_external_judge(command: &str, input: &Value) -> Result<Value, ErrorObject> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| dependency_unavailable(format!("failed to spawn judge: {error}")))?;
+    let payload = serde_json::to_vec(input)
+        .map_err(|error| dependency_unavailable(format!("failed to encode judge input: {error}")))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| dependency_unavailable("judge stdin unavailable"))?
+        .write_all(&payload)
+        .map_err(|error| dependency_unavailable(format!("failed to write judge stdin: {error}")))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| dependency_unavailable(format!("judge did not complete: {error}")))?;
+    if !output.status.success() {
+        return Err(dependency_unavailable(format!(
+            "judge command failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|error| {
+        ErrorObject::bad_input(format!("judge stdout was not a JSON label map: {error}"))
+    })
+}
+
+/// Custom retrieval eval: retrieve each question through the chosen modes (document grouping), pool
+/// candidates, get relevance labels from qrels or an external judge, score per mode, and optionally
+/// bootstrap between-mode delta CIs. Opens the index once.
+fn eval_run_payload(args: EvalRunArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+    if args.qrels.is_none() && args.judge_cmd.is_none() {
+        return Err(ErrorObject::bad_input(
+            "eval run needs relevance labels: provide --qrels or --judge-cmd",
+        ));
+    }
+    if args.qrels.is_some() && args.judge_cmd.is_some() {
+        return Err(ErrorObject::bad_input(
+            "provide --qrels OR --judge-cmd, not both",
+        ));
+    }
+    if args.top_k == 0 {
+        return Err(ErrorObject::bad_input("--top-k must be at least 1"));
+    }
+    let modes = parse_eval_modes(&args.modes)?;
+    let metrics: Vec<MetricSpec> = args
+        .metrics
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(parse_eval_metric)
+        .collect::<Result<Vec<_>, _>>()?;
+    if metrics.is_empty() {
+        return Err(ErrorObject::bad_input("--metrics must list at least one metric"));
+    }
+    let questions: Vec<EvalQuestion> = load_eval_json(&args.questions, "questions")?;
+    if questions.is_empty() {
+        return Err(ErrorObject::bad_input("questions file is empty"));
+    }
+
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
+    let embedder = PreparedQueryEmbedder::from_env()?;
+    let pool_limit = args.top_k.saturating_mul(20);
+
+    // 1. Retrieval: per question, each mode's top docs + the pooled candidate set.
+    let mut results: Vec<EvalQuestionResult> = Vec::with_capacity(questions.len());
+    for question in &questions {
+        let normalized = parade_query_text(&question.query).ok_or_else(|| {
+            ErrorObject::bad_input(format!(
+                "question `{}` has no searchable token: {:?}",
+                question.id, question.query
+            ))
+        })?;
+        let as_of = question.as_of.clone().unwrap_or_else(today_utc);
+        let (embedding_literal, embedding_fingerprint) = embedder.embed(question.query.as_str())?;
+        let mut per_mode: HashMap<&'static str, Vec<String>> = HashMap::new();
+        let mut pool: Vec<PoolCandidate> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for mode in &modes {
+            let (embedding, fingerprint) = if mode.uses_dense() {
+                (
+                    Some(embedding_literal.as_str()),
+                    Some(embedding_fingerprint.as_str()),
+                )
+            } else {
+                (None, None)
+            };
+            let response = hybrid_candidates_json(
+                &postgres,
+                &HybridCandidateQuery {
+                    query_text: &normalized,
+                    query_embedding: embedding,
+                    embedding_fingerprint: fingerprint,
+                    retrieval_mode: *mode,
+                    group_by: GroupBy::Document,
+                    after_cursor: None,
+                    as_of: as_of.as_str(),
+                    kind_filter: Some("article"),
+                    lexical_limit: pool_limit,
+                    dense_limit: pool_limit,
+                    limit: args.top_k,
+                },
+            )
+            .map_err(storage_error_object)?;
+            let response: Value = serde_json::from_str(&response)
+                .map_err(|error| dependency_unavailable(error.to_string()))?;
+            let candidates = response["candidates"].as_array().cloned().unwrap_or_default();
+            let mut top = Vec::new();
+            for candidate in &candidates {
+                let Some(uid) = candidate["document_id"].as_str() else {
+                    continue;
+                };
+                top.push(uid.to_owned());
+                if seen.insert(uid.to_owned()) {
+                    pool.push(PoolCandidate {
+                        uid: uid.to_owned(),
+                        title: candidate.get("title").cloned().unwrap_or(Value::Null),
+                        snippet: candidate.get("snippet").cloned().unwrap_or(Value::Null),
+                    });
+                }
+            }
+            per_mode.insert(mode.as_str(), top);
+        }
+        results.push(EvalQuestionResult {
+            id: question.id.clone(),
+            query: question.query.clone(),
+            per_mode,
+            pool,
+            labels: HashMap::new(),
+        });
+    }
+
+    // 2. Relevance labels: qrels lookup, or a single blind external-judge invocation.
+    let judge_source;
+    if let Some(qrels_path) = &args.qrels {
+        let qrels: Vec<EvalQrel> = load_eval_json(qrels_path, "qrels")?;
+        let mut by_query: HashMap<String, HashMap<String, i64>> = HashMap::new();
+        for qrel in qrels {
+            by_query
+                .entry(qrel.query_id)
+                .or_default()
+                .insert(qrel.document_id, qrel.label);
+        }
+        for result in &mut results {
+            if let Some(labels) = by_query.get(&result.id) {
+                result.labels = labels.clone();
+            }
+        }
+        judge_source = "qrels".to_owned();
+    } else {
+        let command = args.judge_cmd.as_deref().unwrap_or_default();
+        let mut judge_questions = Vec::new();
+        let mut keymaps: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for result in &results {
+            let mut candidates = Vec::new();
+            let mut keymap = HashMap::new();
+            // Deterministic per-question shuffle: the pool is built mode-by-mode (bm25 first), so
+            // unshuffled keys would leak provenance and bias a position-sensitive judge. Seeded by
+            // the question id for reproducibility.
+            let mut order: Vec<usize> = (0..result.pool.len()).collect();
+            let mut rng = XorShift64::new(eval_question_seed(&result.id));
+            for i in (1..order.len()).rev() {
+                let j = (rng.next_u64() % (i as u64 + 1)) as usize;
+                order.swap(i, j);
+            }
+            for (slot, &pool_index) in order.iter().enumerate() {
+                let candidate = &result.pool[pool_index];
+                let key = format!("c{:02}", slot + 1);
+                keymap.insert(key.clone(), candidate.uid.clone());
+                candidates.push(json!({
+                    "key": key,
+                    "title": candidate.title,
+                    "snippet": candidate.snippet,
+                }));
+            }
+            judge_questions.push(json!({
+                "question_id": result.id,
+                "question": result.query,
+                "candidates": candidates,
+            }));
+            keymaps.insert(result.id.clone(), keymap);
+        }
+        let judge_output = run_external_judge(command, &json!({ "questions": judge_questions }))?;
+        for result in &mut results {
+            let Some(per_key) = judge_output.get(&result.id).and_then(Value::as_object) else {
+                continue;
+            };
+            let keymap = &keymaps[&result.id];
+            for (key, label) in per_key {
+                if let (Some(uid), Some(label)) = (keymap.get(key), label.as_i64()) {
+                    result.labels.insert(uid.clone(), label);
+                }
+            }
+        }
+        judge_source = format!("external:{command}");
+    }
+
+    // 3. Score per metric per mode (per-question values, then mean).
+    let mut per_question: HashMap<(String, &'static str), Vec<Option<f64>>> = HashMap::new();
+    for spec in &metrics {
+        for mode in &modes {
+            let values: Vec<Option<f64>> = results
+                .iter()
+                .map(|result| {
+                    let pool_uids: Vec<String> =
+                        result.pool.iter().map(|candidate| candidate.uid.clone()).collect();
+                    let empty = Vec::new();
+                    let top = result.per_mode.get(mode.as_str()).unwrap_or(&empty);
+                    compute_eval_metric(spec, top, &result.labels, &pool_uids, args.rel_min)
+                })
+                .collect();
+            per_question.insert((spec.name.clone(), mode.as_str()), values);
+        }
+    }
+
+    let mut metrics_out = serde_json::Map::new();
+    for mode in &modes {
+        let mut mode_metrics = serde_json::Map::new();
+        for spec in &metrics {
+            let values = &per_question[&(spec.name.clone(), mode.as_str())];
+            let value = mean_of(values).map(|v| (v * 1000.0).round() / 1000.0);
+            mode_metrics.insert(
+                spec.name.clone(),
+                value.map(Value::from).unwrap_or(Value::Null),
+            );
+        }
+        metrics_out.insert(mode.as_str().to_owned(), Value::Object(mode_metrics));
+    }
+
+    // 4. Optional bootstrap CIs for between-mode deltas on each metric.
+    let bootstrap_out = if args.bootstrap > 0 && modes.len() >= 2 {
+        let mut entries = Vec::new();
+        for spec in &metrics {
+            for i in 0..modes.len() {
+                for j in (i + 1)..modes.len() {
+                    let a = modes[i].as_str();
+                    let b = modes[j].as_str();
+                    let (point, lo, hi) = bootstrap_delta_ci(
+                        &per_question[&(spec.name.clone(), a)],
+                        &per_question[&(spec.name.clone(), b)],
+                        args.bootstrap,
+                    );
+                    let round = |x: f64| (x * 1000.0).round() / 1000.0;
+                    entries.push(json!({
+                        "metric": spec.name,
+                        "a": a,
+                        "b": b,
+                        "delta": round(point),
+                        "ci_lo": round(lo),
+                        "ci_hi": round(hi),
+                        "significant": !(lo <= 0.0 && 0.0 <= hi),
+                    }));
+                }
+            }
+        }
+        json!({ "resamples": args.bootstrap, "method": "question-resampled percentile", "deltas": entries })
+    } else {
+        Value::Null
+    };
+
+    let total_pool: usize = results.iter().map(|result| result.pool.len()).sum();
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "kind": "eval_run_benchmark",
+        "questions": results.len(),
+        "modes": modes.iter().map(|mode| mode.as_str()).collect::<Vec<_>>(),
+        "group_by": "document",
+        "top_k": args.top_k,
+        "rel_min": args.rel_min,
+        "judge": judge_source,
+        "pool": { "total_pairs": total_pool },
+        "metrics": Value::Object(metrics_out),
+        "bootstrap": bootstrap_out,
+    }))
 }
 
 /// Run the France-LEGI official-evidence benchmark over the production pipeline and assemble a

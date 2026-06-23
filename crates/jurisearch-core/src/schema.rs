@@ -807,6 +807,40 @@ pub fn compiled_schema() -> Value {
                     "evidence": { "type": "array", "items": { "type": "string" } }
                 }
             },
+            "EvalRunRequest": {
+                "required": ["questions"],
+                "properties": {
+                    "questions": { "type": "string", "description": "Path to a JSON array of {id, query, as_of?}." },
+                    "qrels": { "type": ["string", "null"], "description": "Path to JSON [{query_id, document_id, label}] (XOR judge_cmd)." },
+                    "judge_cmd": { "type": ["string", "null"], "description": "External judge: reads a blind JSON task on stdin, writes {question_id:{key:label}} on stdout." },
+                    "modes": { "type": "string", "default": "bm25,dense,hybrid" },
+                    "metrics": { "type": "string", "default": "ndcg@10,recall@10,p@10,mrr@10" },
+                    "top_k": { "type": "integer", "minimum": 1, "default": 10 },
+                    "rel_min": { "type": "integer", "default": 1 },
+                    "bootstrap": { "type": "integer", "minimum": 0, "default": 0 },
+                    "out": { "type": ["string", "null"] }
+                }
+            },
+            "EvalRunResponse": {
+                "description": "eval_run artifact (also written to --out when given).",
+                "properties": {
+                    "schema_version": { "type": "string" },
+                    "kind": { "const": "eval_run_benchmark" },
+                    "questions": { "type": "integer" },
+                    "modes": { "type": "array", "items": { "enum": ["bm25", "dense", "hybrid"] } },
+                    "group_by": { "const": "document" },
+                    "top_k": { "type": "integer" },
+                    "rel_min": { "type": "integer" },
+                    "judge": { "type": "string" },
+                    "pool": { "type": "object" },
+                    "metrics": {
+                        "type": "object",
+                        "description": "Per-mode metric means; recall is null when no question has a relevant pooled doc.",
+                        "additionalProperties": { "type": "object" }
+                    },
+                    "bootstrap": { "type": ["object", "null"] }
+                }
+            },
             "FranceLegiCategory": {
                 "properties": {
                     "metric_value": { "type": "number" },
