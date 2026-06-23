@@ -7,8 +7,9 @@ use jurisearch_storage::{
         IngestResumeAction, IngestRunInput, IngestRunStatus, ReplaySnapshotMode, finish_ingest_run,
         ingest_resume_decision, invalidate_cached_query_readiness, load_cached_query_readiness,
         load_ingest_embedding_coverage, load_ingest_health,
-        load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness, record_ingest_error,
-        record_ingest_member, start_ingest_run, store_query_readiness, update_ingest_member_status,
+        load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness,
+        load_or_compute_query_readiness, record_ingest_error, record_ingest_member, start_ingest_run,
+        store_query_readiness, update_ingest_member_status,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -374,6 +375,46 @@ fn query_readiness_cache_round_trips_and_invalidates() -> Result<(), StorageErro
         },
     )?;
     assert!(load_cached_query_readiness(&postgres)?.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn query_readiness_cache_is_trusted_until_invalidated() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("query readiness staleness")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-readiness-stale.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    insert_ready_fixture(&postgres)?;
+
+    // First call computes coverage live and caches it (index is fully ready).
+    let (computed, from_cache) = load_or_compute_query_readiness(&postgres)?;
+    assert!(!from_cache);
+    assert_eq!(computed.embedding_coverage.covered, 1);
+    assert_eq!(computed.embedding_coverage.total, 1);
+    // Second call serves the cache without recomputing.
+    let (_, from_cache) = load_or_compute_query_readiness(&postgres)?;
+    assert!(from_cache);
+
+    // A coverage-breaking mutation WITHOUT invalidation leaves the cache trusted (stale). This is
+    // the invariant every mutation path must uphold: invalidate after changing coverage, or the
+    // hot path will keep reporting the index ready (the bug that allowed a standalone hierarchy
+    // backfill to leave a stale "ready" entry).
+    postgres.execute_sql("DELETE FROM chunk_embeddings;")?;
+    let (stale, from_cache) = load_or_compute_query_readiness(&postgres)?;
+    assert!(from_cache);
+    assert_eq!(stale.embedding_coverage.covered, 1, "stale cache still reports complete");
+
+    // After invalidation the next check recomputes and sees the now-incomplete embedding coverage.
+    invalidate_cached_query_readiness(&postgres)?;
+    let (recomputed, from_cache) = load_or_compute_query_readiness(&postgres)?;
+    assert!(!from_cache);
+    assert_eq!(recomputed.embedding_coverage.covered, 0);
+    assert_eq!(recomputed.embedding_coverage.total, 1);
 
     Ok(())
 }

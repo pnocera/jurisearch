@@ -2495,6 +2495,10 @@ fn legi_article_id_from_member_path(member_path: &str) -> Option<&str> {
 fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    // Hierarchy backfill can delete chunk_embeddings / clear embedding fingerprints, making the
+    // index no longer query-ready; drop the readiness cache up front so a stale "ready" entry can
+    // never let a subsequent search skip the live coverage check.
+    invalidate_cached_query_readiness(&postgres).map_err(storage_error_object)?;
     let report =
         backfill_legi_article_hierarchy_from_metadata(&postgres).map_err(storage_error_object)?;
     let replay_snapshot = refresh_replay_snapshot(&postgres).map_err(storage_error_object)?;

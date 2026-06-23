@@ -1003,7 +1003,7 @@ fn load_replay_snapshot(
         "SELECT key AS row_key, \
                 md5(concat_ws(chr(31), key, value::text)) AS row_hash \
          FROM index_manifest \
-         WHERE key <> 'replay_snapshot'",
+         WHERE key NOT IN ('replay_snapshot', 'query_readiness')",
     )?;
     let signature_input = format!(
         "documents:{}:{}|chunks:{}:{}|publisher_edges:{}:{}|embeddings:{}:{}|manifests:{}:{}",
