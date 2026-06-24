@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 10;
+pub const CURRENT_SCHEMA_VERSION: i32 = 11;
 
 struct Migration {
     version: i32,
@@ -391,6 +391,47 @@ WHERE edge_source = 'publisher'
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 10), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 11,
+        name: "decision_citation_lookup_indexes",
+        // Decision citation lookups by ECLI and pourvoi/NUMERO_AFFAIRE were full scans of the
+        // ~1.1M-decision `documents` set (measured ECLI ~22s, pourvoi ~108s). Two partial
+        // decision-only indexes remove the scans:
+        //  - ECLI: expression index on upper(canonical_json->>'ecli'). citation.rs already filters
+        //    `kind='decision' AND upper(canonical_json->>'ecli') = …`, which matches this index.
+        //  - pourvoi: an IMMUTABLE function returns the dot/space-normalized case_numbers array, and
+        //    a GIN index over it serves the rewritten `… @> ARRAY[…]` containment predicate instead
+        //    of expanding the jsonb array row by row.
+        // Migrations run inside a transaction, so these are plain CREATE INDEX (not CONCURRENTLY).
+        sql: r#"
+CREATE INDEX IF NOT EXISTS documents_decision_ecli_idx
+ON documents (upper(canonical_json->>'ecli'))
+WHERE kind = 'decision';
+
+CREATE OR REPLACE FUNCTION jurisearch_normalized_case_numbers(doc jsonb)
+RETURNS text[]
+LANGUAGE sql
+IMMUTABLE
+PARALLEL SAFE
+AS $$
+  SELECT coalesce(
+           array_agg(replace(replace(cn, '.', ''), ' ', '')),
+           ARRAY[]::text[]
+         )
+  FROM jsonb_array_elements_text(coalesce(doc->'case_numbers', '[]'::jsonb)) AS cn
+$$;
+
+CREATE INDEX IF NOT EXISTS documents_decision_case_numbers_idx
+ON documents USING gin (jurisearch_normalized_case_numbers(canonical_json))
+WHERE kind = 'decision';
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 11), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

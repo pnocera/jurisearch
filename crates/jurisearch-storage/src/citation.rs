@@ -90,13 +90,13 @@ pub fn citation_lookup_json(
                 .filter(|character| !matches!(character, '.' | ' '))
                 .collect();
             let literal = sql_string_literal(&normalized);
+            // Array-containment against the dot/space-normalized case_numbers, served by the partial
+            // GIN index `documents_decision_case_numbers_idx` over
+            // `jurisearch_normalized_case_numbers(canonical_json)` (migration v11). Equivalent to the
+            // previous per-row EXISTS scan but index-backed.
             let predicate = format!(
-                "d.kind = 'decision' AND EXISTS ( \
-                    SELECT 1 FROM jsonb_array_elements_text( \
-                        coalesce(d.canonical_json->'case_numbers', '[]'::jsonb) \
-                    ) AS cn \
-                    WHERE replace(replace(cn, '.', ''), ' ', '') = {literal} \
-                 )"
+                "d.kind = 'decision' \
+                 AND jurisearch_normalized_case_numbers(d.canonical_json) @> ARRAY[{literal}]::text[]"
             );
             document_lookup_sql(&predicate, "TRUE")
         }
