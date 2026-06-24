@@ -43,7 +43,12 @@ pub fn enrich_zone_candidates_json(
         .map(|cursor| format!("AND d.document_id > {}", sql_string_literal(cursor)))
         .unwrap_or_default();
     let since_predicate = since
-        .map(|since| format!("OR z.fetched_at < {}::timestamptz", sql_string_literal(since)))
+        .map(|since| {
+            format!(
+                "OR z.fetched_at < {}::timestamptz",
+                sql_string_literal(since)
+            )
+        })
         .unwrap_or_default();
     let limit = limit.max(1);
     postgres.execute_sql(&format!(
@@ -452,9 +457,10 @@ pub fn finalize_zone_dense_rebuild(
     }
 
     transaction
-        .execute("UPDATE zone_units SET embedding_fingerprint = $1;", &[
-            &spec.embedding_fingerprint,
-        ])
+        .execute(
+            "UPDATE zone_units SET embedding_fingerprint = $1;",
+            &[&spec.embedding_fingerprint],
+        )
         .map_err(StorageError::PostgresClient)?;
     transaction
         .batch_execute(&format!(

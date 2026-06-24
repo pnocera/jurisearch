@@ -25,7 +25,17 @@ fn seed_decision(
     text_hash: Option<&str>,
     zones_json: &str,
 ) -> Result<(), StorageError> {
-    seed_decision_full(postgres, document_id, "cass", "decision", pourvoi, status, text_hash, zones_json, false)
+    seed_decision_full(
+        postgres,
+        document_id,
+        "cass",
+        "decision",
+        pourvoi,
+        status,
+        text_hash,
+        zones_json,
+        false,
+    )
 }
 
 /// Full control over the seeded decision: source/kind, pourvoi, status, hash, and whether the
@@ -145,19 +155,25 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
     assert_eq!(unit_count.trim(), "3");
 
     // After derivation, the decision is no longer derivable (units current).
-    let none: serde_json::Value =
-        serde_json::from_str(&load_derivable_decision_zones_json(&postgres, BUILDER, false, None, 100)?)
-            .expect("derivable JSON");
+    let none: serde_json::Value = serde_json::from_str(&load_derivable_decision_zones_json(
+        &postgres, BUILDER, false, None, 100,
+    )?)
+    .expect("derivable JSON");
     assert_eq!(none["candidates"].as_array().expect("candidates").len(), 0);
     // A builder-version bump makes it derivable again.
     let stale: serde_json::Value = serde_json::from_str(&load_derivable_decision_zones_json(
-        &postgres, "zone-units:v2", false, None, 100,
+        &postgres,
+        "zone-units:v2",
+        false,
+        None,
+        100,
     )?)
     .expect("derivable JSON");
     assert_eq!(stale["candidates"].as_array().expect("candidates").len(), 1);
 
     // Embedding inputs: 3 pending units in stable order.
-    let inputs = load_zone_unit_embedding_inputs(&postgres, EMBEDDING_FINGERPRINT, "bge-m3", 1024, None)?;
+    let inputs =
+        load_zone_unit_embedding_inputs(&postgres, EMBEDDING_FINGERPRINT, "bge-m3", 1024, None)?;
     assert_eq!(inputs.len(), 3);
     assert_eq!(inputs[0].zone_unit_id, "cass:JURITEXT0001#motivations#0");
     assert_eq!(inputs[0].embedding_text, "motif un");
@@ -228,20 +244,34 @@ fn enrich_candidates_reenrich_fresh_ok_rows_with_null_text_hash() -> Result<(), 
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
 
     // A: fresh ok row WITH a hash -> not a candidate. B: fresh ok row with NULL hash -> a candidate.
-    seed_decision(&postgres, "cass:WITHHASH", "11-11111", "ok", Some("h"), "{}")?;
+    seed_decision(
+        &postgres,
+        "cass:WITHHASH",
+        "11-11111",
+        "ok",
+        Some("h"),
+        "{}",
+    )?;
     seed_decision(&postgres, "cass:NULLHASH", "22-22222", "ok", None, "{}")?;
 
-    let page: serde_json::Value =
-        serde_json::from_str(&enrich_zone_candidates_json(&postgres, "cass", None, None, 100)?)
-            .expect("candidates JSON");
+    let page: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
+        &postgres, "cass", None, None, 100,
+    )?)
+    .expect("candidates JSON");
     let ids: Vec<&str> = page["candidates"]
         .as_array()
         .expect("candidates")
         .iter()
         .map(|c| c["document_id"].as_str().expect("id"))
         .collect();
-    assert!(ids.contains(&"cass:NULLHASH"), "null-hash ok row must be re-enriched: {ids:?}");
-    assert!(!ids.contains(&"cass:WITHHASH"), "hashed fresh ok row must be skipped: {ids:?}");
+    assert!(
+        ids.contains(&"cass:NULLHASH"),
+        "null-hash ok row must be re-enriched: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&"cass:WITHHASH"),
+        "hashed fresh ok row must be skipped: {ids:?}"
+    );
 
     Ok(())
 }
@@ -259,27 +289,43 @@ fn expired_ok_rows_are_refresh_candidates_not_derivable() -> Result<(), StorageE
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
     seed_decision_full(
-        &postgres, "cass:EXPIRED", "cass", "decision", "33-33333", "ok", Some("h"), "{}", true,
+        &postgres,
+        "cass:EXPIRED",
+        "cass",
+        "decision",
+        "33-33333",
+        "ok",
+        Some("h"),
+        "{}",
+        true,
     )?;
 
-    let derivable: serde_json::Value =
-        serde_json::from_str(&load_derivable_decision_zones_json(&postgres, BUILDER, false, None, 100)?)
-            .expect("derivable JSON");
+    let derivable: serde_json::Value = serde_json::from_str(&load_derivable_decision_zones_json(
+        &postgres, BUILDER, false, None, 100,
+    )?)
+    .expect("derivable JSON");
     assert_eq!(
-        derivable["candidates"].as_array().expect("candidates").len(),
+        derivable["candidates"]
+            .as_array()
+            .expect("candidates")
+            .len(),
         0,
         "expired ok row must not be derivable"
     );
-    let enrich: serde_json::Value =
-        serde_json::from_str(&enrich_zone_candidates_json(&postgres, "cass", None, None, 100)?)
-            .expect("candidates JSON");
+    let enrich: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
+        &postgres, "cass", None, None, 100,
+    )?)
+    .expect("candidates JSON");
     let ids: Vec<&str> = enrich["candidates"]
         .as_array()
         .expect("candidates")
         .iter()
         .map(|c| c["document_id"].as_str().expect("id"))
         .collect();
-    assert!(ids.contains(&"cass:EXPIRED"), "expired ok row must be a refresh candidate: {ids:?}");
+    assert!(
+        ids.contains(&"cass:EXPIRED"),
+        "expired ok row must be a refresh candidate: {ids:?}"
+    );
     Ok(())
 }
 
@@ -296,13 +342,25 @@ fn derivation_enforces_cassation_scope() -> Result<(), StorageError> {
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
     seed_decision_full(
-        &postgres, "capp:FOREIGN", "capp", "decision", "44-44444", "ok", Some("h"), "{}", false,
+        &postgres,
+        "capp:FOREIGN",
+        "capp",
+        "decision",
+        "44-44444",
+        "ok",
+        Some("h"),
+        "{}",
+        false,
     )?;
-    let derivable: serde_json::Value =
-        serde_json::from_str(&load_derivable_decision_zones_json(&postgres, BUILDER, false, None, 100)?)
-            .expect("derivable JSON");
+    let derivable: serde_json::Value = serde_json::from_str(&load_derivable_decision_zones_json(
+        &postgres, BUILDER, false, None, 100,
+    )?)
+    .expect("derivable JSON");
     assert_eq!(
-        derivable["candidates"].as_array().expect("candidates").len(),
+        derivable["candidates"]
+            .as_array()
+            .expect("candidates")
+            .len(),
         0,
         "non-cass/inca ok row must not be derivable"
     );
