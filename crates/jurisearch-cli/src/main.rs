@@ -82,7 +82,12 @@ use jurisearch_storage::{
         inspect_document_json, related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
-    zone_units::{enrich_zone_candidates_json, zone_retrieval_coverage_json},
+    zone_units::{
+        ZoneUnitEmbeddingInsert, ZoneUnitRow, enrich_zone_candidates_json,
+        finalize_zone_dense_rebuild, insert_zone_unit_embeddings, load_derivable_decision_zones_json,
+        load_zone_unit_embedding_inputs, replace_zone_units_for_document,
+        zone_retrieval_coverage_json,
+    },
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -104,6 +109,10 @@ const EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY: usize = 4;
 const ENRICH_ZONES_DEFAULT_CONCURRENCY: usize = 6;
 /// Candidate page size for the zone backfill keyset scan.
 const ENRICH_ZONES_PAGE_SIZE: u32 = 200;
+/// Derivation-logic version stamped on `zone_units`; bump to force a full re-derive on a logic change.
+const ZONE_UNIT_BUILDER_VERSION: &str = "zone-units:v1";
+/// Candidate page size for the zone-unit derivation keyset scan.
+const BUILD_ZONE_UNITS_PAGE_SIZE: u32 = 500;
 const PHASE1_EXTERNAL_BENCHMARK_ENV: &str = "JURISEARCH_PHASE1_EXTERNAL_BENCHMARK";
 const PHASE1_EXTERNAL_MIN_BSARD_DOCUMENTS: u64 = 22_000;
 const PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS: u64 = 200;
@@ -914,6 +923,32 @@ enum IngestSubcommand {
         /// Conservative bound on concurrent Judilibre requests (stay well under ~20 req/s).
         #[arg(long, default_value_t = ENRICH_ZONES_DEFAULT_CONCURRENCY)]
         concurrency: usize,
+    },
+    /// Derive `zone_units` retrieval units from the cached official Judilibre zones in `decision_zones`
+    /// (after `enrich-zones`). Idempotent; re-derives only stale decisions unless `--rebuild`.
+    BuildZoneUnits {
+        /// Maximum decisions to derive this run (omit to process all derivable).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Re-derive every eligible decision regardless of existing-unit state (builder-version bump).
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Embed `zone_units` and finalize the zone-unit dense ANN index (the parallel zone retrieval index;
+    /// uses the same embedding pool + fingerprint as `embed-chunks`, separate physical tables/index).
+    EmbedZoneUnits {
+        /// Maximum zone-unit count allowed for this run; refuses larger sets instead of partial finalize.
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Number of ivfflat lists for the zone-unit dense index.
+        #[arg(long, default_value_t = 32)]
+        index_lists: u32,
+        /// Number of zone-unit texts sent per embeddings request.
+        #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_BATCH_SIZE)]
+        batch_size: usize,
+        /// Maximum concurrent embedding requests across the endpoint pool.
+        #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY)]
+        pool_concurrency: usize,
     },
     /// Rebuild LEGI article hierarchy from persisted metadata across the full index.
     BackfillLegiHierarchy,
@@ -4412,6 +4447,49 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                 Err(error) => emit_error(error),
             }
         }
+        Some(IngestSubcommand::BuildZoneUnits { limit, rebuild }) => {
+            if limit == Some(0) {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest build-zone-units --limit must be at least 1 when provided",
+                ));
+            }
+            match build_zone_units_payload(index_dir, limit, rebuild) {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
+        Some(IngestSubcommand::EmbedZoneUnits {
+            limit,
+            index_lists,
+            batch_size,
+            pool_concurrency,
+        }) => {
+            if limit == Some(0) {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-zone-units --limit must be at least 1 when provided",
+                ));
+            }
+            if index_lists == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-zone-units --index-lists must be at least 1",
+                ));
+            }
+            if batch_size == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-zone-units --batch-size must be at least 1",
+                ));
+            }
+            if pool_concurrency == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest embed-zone-units --pool-concurrency must be at least 1",
+                ));
+            }
+            match embed_zone_units_payload(index_dir, limit, index_lists, batch_size, pool_concurrency)
+            {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
         Some(IngestSubcommand::BackfillLegiHierarchy) => {
             match backfill_legi_hierarchy_payload(index_dir) {
                 Ok(response) => write_json(&response),
@@ -6197,6 +6275,265 @@ fn worker_outcomes_or_errors(
     returned.unwrap_or_else(|| vec![ZoneEnrichOutcome::Error; group_len])
 }
 
+/// Derive a decision's `zone_units` rows from its cached `zones_json` object (motivations/moyens/
+/// dispositif fragment text). One row per non-empty fragment with a contiguous per-zone `fragment_index`.
+/// Borrows the fragment text from `zones`, so the returned rows must be used before `zones` is dropped.
+fn derive_zone_unit_rows<'a>(
+    document_id: &'a str,
+    source: &'a str,
+    text_hash: &'a str,
+    zones: &'a Value,
+) -> Vec<ZoneUnitRow<'a>> {
+    let mut rows = Vec::new();
+    for zone in ["motivations", "moyens", "dispositif"] {
+        let Some(fragments) = zones[zone].as_array() else {
+            continue;
+        };
+        let mut fragment_index = 0i32;
+        for fragment in fragments {
+            let Some(text) = fragment["text"].as_str() else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            rows.push(ZoneUnitRow {
+                document_id,
+                zone,
+                fragment_index,
+                body: text,
+                search_body: text,
+                source,
+                text_hash,
+                builder_version: ZONE_UNIT_BUILDER_VERSION,
+            });
+            fragment_index += 1;
+        }
+    }
+    rows
+}
+
+/// `ingest build-zone-units`: derive `zone_units` from the cached official zones in `decision_zones`.
+/// Pages the derivable set (fresh `ok` Cassation rows with stale/absent units), deriving each decision's
+/// units in one idempotent `replace_zone_units_for_document` transaction.
+fn build_zone_units_payload(
+    index_dir: Option<&Path>,
+    limit: Option<u32>,
+    rebuild: bool,
+) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+
+    let mut decisions: u64 = 0;
+    let mut units_written: u64 = 0;
+    let mut cursor: Option<String> = None;
+    loop {
+        let page_limit = match limit {
+            Some(limit) => {
+                let done = u32::try_from(decisions).unwrap_or(u32::MAX);
+                if done >= limit {
+                    break;
+                }
+                (limit - done).min(BUILD_ZONE_UNITS_PAGE_SIZE)
+            }
+            None => BUILD_ZONE_UNITS_PAGE_SIZE,
+        };
+        let page_json = load_derivable_decision_zones_json(
+            &postgres,
+            ZONE_UNIT_BUILDER_VERSION,
+            rebuild,
+            cursor.as_deref(),
+            page_limit,
+        )
+        .map_err(storage_error_object)?;
+        let page: Value = serde_json::from_str(&page_json)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+        let candidates = page["candidates"].as_array().cloned().unwrap_or_default();
+        if candidates.is_empty() {
+            break;
+        }
+        for candidate in &candidates {
+            let document_id = candidate["document_id"].as_str().unwrap_or_default();
+            if document_id.is_empty() {
+                continue;
+            }
+            let source = candidate["source"].as_str().unwrap_or_default();
+            let text_hash = candidate["text_hash"].as_str().unwrap_or_default();
+            let rows = derive_zone_unit_rows(document_id, source, text_hash, &candidate["zones"]);
+            replace_zone_units_for_document(&postgres, document_id, &rows)
+                .map_err(storage_error_object)?;
+            decisions += 1;
+            units_written += rows.len() as u64;
+            if let Some(limit) = limit
+                && decisions >= u64::from(limit)
+            {
+                break;
+            }
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let coverage: Value =
+        serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest build-zone-units",
+        "index_dir": index_dir.display().to_string(),
+        "builder_version": ZONE_UNIT_BUILDER_VERSION,
+        "rebuild": rebuild,
+        "decisions_derived": decisions,
+        "zone_units_written": units_written,
+        "coverage": coverage,
+    }))
+}
+
+/// `ingest embed-zone-units`: embed `zone_units` via the SAME OpenRouter pool + fingerprint as
+/// `embed-chunks`, then finalize the separate zone-unit dense ANN index. Mirrors the embed-chunks
+/// streaming/finalize flow against the zone tables; the chunk dense path is untouched.
+fn embed_zone_units_payload(
+    index_dir: Option<&Path>,
+    limit: Option<u32>,
+    index_lists: u32,
+    batch_size: usize,
+    pool_concurrency: usize,
+) -> Result<Value, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    let loaded_embedding = loaded_embedding_config();
+    let embedding_config = loaded_embedding.config;
+    ensure_embedding_runtime_ready(&embedding_config, false)?;
+    let expected_fingerprint = embedding_config.fingerprint();
+    let embedding_fingerprint = embedding_config.storage_embedding_fingerprint();
+    let endpoint_configs = embedding_endpoint_pool_configs(
+        &embedding_config,
+        &loaded_embedding.pool_endpoints,
+        &expected_fingerprint,
+        embedding_fingerprint.as_str(),
+    )?;
+    let dimension = i32::try_from(embedding_config.dimension).map_err(|_| {
+        dependency_unavailable(format!(
+            "embedding dimension {} is too large for dense rebuild metadata",
+            embedding_config.dimension
+        ))
+    })?;
+    if dimension != DENSE_VECTOR_DIMENSION {
+        return Err(dependency_unavailable(format!(
+            "embedding dimension {} does not match storage vector({})",
+            embedding_config.dimension, DENSE_VECTOR_DIMENSION
+        )));
+    }
+
+    let to_chunk_inputs = |inputs: Vec<jurisearch_storage::zone_units::ZoneUnitEmbeddingInput>| {
+        inputs
+            .into_iter()
+            .map(|input| ChunkEmbeddingInput {
+                chunk_id: input.zone_unit_id,
+                embedding_text: input.embedding_text,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let embedding_run = if let Some(limit) = limit {
+        let inputs = load_zone_unit_embedding_inputs(
+            &postgres,
+            embedding_fingerprint.as_str(),
+            embedding_config.model.as_str(),
+            dimension,
+            Some(limit.saturating_add(1)),
+        )
+        .map_err(storage_error_object)?;
+        if inputs.len() > usize::try_from(limit).unwrap_or(usize::MAX) {
+            return Err(ErrorObject::bad_input(
+                "ingest embed-zone-units --limit would leave zone units unembedded; run on a smaller smoke index or omit --limit to finalize the full zone index",
+            ));
+        }
+        if inputs.is_empty() {
+            return Err(no_results("no zone units are available to embed"));
+        }
+        embed_and_insert_zone_units_with_pool(
+            &postgres,
+            to_chunk_inputs(inputs),
+            &endpoint_configs,
+            embedding_fingerprint.as_str(),
+            &embedding_config,
+            batch_size,
+            pool_concurrency,
+        )?
+    } else {
+        let mut run = EmbeddingPoolRun {
+            chunks_considered: 0,
+            embeddings_inserted: 0,
+            embedding_inputs_truncated: 0,
+            endpoint_stats: Vec::new(),
+        };
+        loop {
+            let page = load_zone_unit_embedding_inputs(
+                &postgres,
+                embedding_fingerprint.as_str(),
+                embedding_config.model.as_str(),
+                dimension,
+                Some(EMBED_STREAM_PAGE_SIZE),
+            )
+            .map_err(storage_error_object)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_run = embed_and_insert_zone_units_with_pool(
+                &postgres,
+                to_chunk_inputs(page),
+                &endpoint_configs,
+                embedding_fingerprint.as_str(),
+                &embedding_config,
+                batch_size,
+                pool_concurrency,
+            )?;
+            run.chunks_considered += page_run.chunks_considered;
+            run.embeddings_inserted += page_run.embeddings_inserted;
+            run.embedding_inputs_truncated += page_run.embedding_inputs_truncated;
+            merge_embedding_endpoint_stats(&mut run.endpoint_stats, page_run.endpoint_stats);
+        }
+        if run.chunks_considered == 0 {
+            return Err(no_results("no zone units are available to embed"));
+        }
+        run
+    };
+
+    let rebuild = finalize_zone_dense_rebuild(
+        &postgres,
+        &DenseRebuildSpec {
+            embedding_fingerprint: embedding_fingerprint.as_str(),
+            model: embedding_config.model.as_str(),
+            dimension,
+            normalize: embedding_config.normalize,
+            provisional: embedding_config.provisional,
+            reembeddable: embedding_config.reembeddable,
+            index_lists,
+        },
+    )
+    .map_err(storage_error_object)?;
+
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest embed-zone-units",
+        "index_dir": index_dir.display().to_string(),
+        "embedding_fingerprint": rebuild.embedding_fingerprint,
+        "zone_units": rebuild.zone_units,
+        "embeddings": rebuild.embeddings,
+        "zone_units_considered": embedding_run.chunks_considered,
+        "embeddings_inserted": embedding_run.embeddings_inserted,
+        "embedding_inputs_truncated": embedding_run.embedding_inputs_truncated,
+        "vector_index": {
+            "name": rebuild.index_name,
+            "index_lists": rebuild.index_lists
+        },
+        "endpoint_stats": embedding_run.endpoint_stats,
+    }))
+}
+
 fn embed_chunks_payload(
     index_dir: Option<&Path>,
     limit: Option<u32>,
@@ -6550,15 +6887,19 @@ fn merge_embedding_endpoint_stats(accumulator: &mut Vec<Value>, page: Vec<Value>
     }
 }
 
-fn embed_and_insert_chunks_with_pool(
-    postgres: &ManagedPostgres,
+/// Generic embedding-pool driver: embeds `inputs` across the endpoint pool and applies `insert_batch`
+/// to each completed batch's `(id, literal)` results. Identical for chunks and zone units (the workers
+/// are id/text-agnostic); only the storage insert differs, so it is injected by the caller.
+fn embed_and_insert_with_pool<F>(
     inputs: Vec<ChunkEmbeddingInput>,
     endpoint_configs: &[EmbeddingEndpointPoolConfig],
-    embedding_fingerprint: &str,
-    embedding_config: &EmbeddingConfig,
     batch_size: usize,
     pool_concurrency: usize,
-) -> Result<EmbeddingPoolRun, ErrorObject> {
+    insert_batch: F,
+) -> Result<EmbeddingPoolRun, ErrorObject>
+where
+    F: Fn(&[OwnedChunkEmbedding]) -> Result<usize, ErrorObject>,
+{
     let chunks_considered = inputs.len();
     let work_queue = inputs
         .chunks(batch_size)
@@ -6616,18 +6957,7 @@ fn embed_and_insert_chunks_with_pool(
                     continue;
                 }
                 embedding_inputs_truncated += success.truncated_inputs;
-                let inserts = success
-                    .embeddings
-                    .iter()
-                    .map(|embedding| ChunkEmbeddingInsert {
-                        chunk_id: embedding.chunk_id.as_str(),
-                        embedding_fingerprint,
-                        embedding_literal: embedding.embedding_literal.as_str(),
-                        model: embedding_config.model.as_str(),
-                        dimension: embedding_config.dimension,
-                    })
-                    .collect::<Vec<_>>();
-                match insert_chunk_embeddings(postgres, &inserts).map_err(storage_error_object) {
+                match insert_batch(&success.embeddings) {
                     Ok(inserted) => {
                         embeddings_inserted += inserted;
                     }
@@ -6678,6 +7008,71 @@ fn embed_and_insert_chunks_with_pool(
         embedding_inputs_truncated,
         endpoint_stats,
     })
+}
+
+/// Embed chunk inputs across the pool and upsert into `chunk_embeddings` (thin wrapper over the generic
+/// driver; behaviour unchanged).
+fn embed_and_insert_chunks_with_pool(
+    postgres: &ManagedPostgres,
+    inputs: Vec<ChunkEmbeddingInput>,
+    endpoint_configs: &[EmbeddingEndpointPoolConfig],
+    embedding_fingerprint: &str,
+    embedding_config: &EmbeddingConfig,
+    batch_size: usize,
+    pool_concurrency: usize,
+) -> Result<EmbeddingPoolRun, ErrorObject> {
+    embed_and_insert_with_pool(
+        inputs,
+        endpoint_configs,
+        batch_size,
+        pool_concurrency,
+        |embeddings| {
+            let inserts = embeddings
+                .iter()
+                .map(|embedding| ChunkEmbeddingInsert {
+                    chunk_id: embedding.chunk_id.as_str(),
+                    embedding_fingerprint,
+                    embedding_literal: embedding.embedding_literal.as_str(),
+                    model: embedding_config.model.as_str(),
+                    dimension: embedding_config.dimension,
+                })
+                .collect::<Vec<_>>();
+            insert_chunk_embeddings(postgres, &inserts).map_err(storage_error_object)
+        },
+    )
+}
+
+/// Embed zone-unit inputs across the SAME pool and upsert into `zone_unit_embeddings` (parallel to the
+/// chunk wrapper; the only difference is the storage target). `OwnedChunkEmbedding.chunk_id` carries the
+/// `zone_unit_id` here.
+fn embed_and_insert_zone_units_with_pool(
+    postgres: &ManagedPostgres,
+    inputs: Vec<ChunkEmbeddingInput>,
+    endpoint_configs: &[EmbeddingEndpointPoolConfig],
+    embedding_fingerprint: &str,
+    embedding_config: &EmbeddingConfig,
+    batch_size: usize,
+    pool_concurrency: usize,
+) -> Result<EmbeddingPoolRun, ErrorObject> {
+    embed_and_insert_with_pool(
+        inputs,
+        endpoint_configs,
+        batch_size,
+        pool_concurrency,
+        |embeddings| {
+            let inserts = embeddings
+                .iter()
+                .map(|embedding| ZoneUnitEmbeddingInsert {
+                    zone_unit_id: embedding.chunk_id.as_str(),
+                    embedding_fingerprint,
+                    embedding_literal: embedding.embedding_literal.as_str(),
+                    model: embedding_config.model.as_str(),
+                    dimension: embedding_config.dimension,
+                })
+                .collect::<Vec<_>>();
+            insert_zone_unit_embeddings(postgres, &inserts).map_err(storage_error_object)
+        },
+    )
 }
 
 fn embedding_pool_worker(
@@ -10625,6 +11020,28 @@ mod tests {
             "src",
         );
         assert!(!phase2_benchmark_artifact_errors(&few_citations).is_empty());
+    }
+
+    #[test]
+    fn derive_zone_unit_rows_handles_multi_fragment_and_skips_empty() {
+        // T3.1: one row per non-empty fragment, contiguous per-zone fragment_index; empty zones/blank
+        // fragments produce no rows.
+        let zones = json!({
+            "motivations": [{ "text": "premier motif" }, { "text": "  " }, { "text": "second motif" }],
+            "moyens": [{ "text": "un moyen" }],
+            "dispositif": []
+        });
+        let rows = derive_zone_unit_rows("cass:X", "cass", "h", &zones);
+        // 2 motivations (the blank one skipped) + 1 moyens + 0 dispositif.
+        assert_eq!(rows.len(), 3);
+        let motivations: Vec<_> = rows.iter().filter(|r| r.zone == "motivations").collect();
+        assert_eq!(motivations.len(), 2);
+        assert_eq!(motivations[0].fragment_index, 0);
+        assert_eq!(motivations[0].body, "premier motif");
+        assert_eq!(motivations[1].fragment_index, 1); // contiguous despite the skipped blank
+        assert_eq!(motivations[1].body, "second motif");
+        assert!(rows.iter().all(|r| r.builder_version == ZONE_UNIT_BUILDER_VERSION));
+        assert!(rows.iter().all(|r| r.body == r.search_body && r.source == "cass" && r.text_hash == "h"));
     }
 
     #[test]
