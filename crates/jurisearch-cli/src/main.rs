@@ -6055,15 +6055,14 @@ fn enrich_zones_payload(
             "ingest enrich-zones --source must be 'cass' or 'inca' (Judilibre covers only Cour de cassation)",
         ));
     }
-    // Preflight: zone enrichment resolves decisions on Judilibre (KeyId auth), so a PISTE API key is
-    // required up front rather than failing every decision into an `upstream_error` cache row.
-    if std::env::var("PISTE_API_KEY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .is_none()
-    {
+    // Preflight: validate Judilibre (KeyId) credentials via the SAME config the workers use
+    // (`OfficialApiConfig::from_env`), which accepts `JURISEARCH_PISTE_JUDILIBRE_KEY_ID` / `PISTE_API_KEY`
+    // in production and `PISTE_SANDBOX_API_KEY` in sandbox — so a supported deployment is not rejected up
+    // front and the message matches the real credential contract.
+    if OfficialApiConfig::from_env().judilibre_key_id.is_none() {
         return Err(dependency_unavailable(
-            "PISTE_API_KEY is not set; zone enrichment requires Judilibre (PISTE) API access",
+            "no Judilibre (PISTE) API key configured; set JURISEARCH_PISTE_JUDILIBRE_KEY_ID or \
+             PISTE_API_KEY (PISTE_SANDBOX_API_KEY in sandbox) before running zone enrichment",
         ));
     }
     let index_dir = require_existing_index_dir(index_dir)?;
@@ -6153,10 +6152,11 @@ fn enrich_zone_page_concurrently(
     }
     std::thread::scope(|scope| {
         let connection_string = &connection_string;
-        let handles: Vec<_> = groups
+        let handles: Vec<(usize, _)> = groups
             .into_iter()
             .map(|group| {
-                scope.spawn(move || {
+                let group_len = group.len();
+                let handle = scope.spawn(move || {
                     let mut db =
                         match postgres::Client::connect(connection_string, postgres::NoTls) {
                             Ok(db) => db,
@@ -6175,14 +6175,26 @@ fn enrich_zone_page_concurrently(
                             }
                         })
                         .collect::<Vec<_>>()
-                })
+                });
+                (group_len, handle)
             })
             .collect();
         handles
             .into_iter()
-            .flat_map(|handle| handle.join().unwrap_or_default())
+            .flat_map(|(group_len, handle)| {
+                worker_outcomes_or_errors(handle.join().ok(), group_len)
+            })
             .collect()
     })
+}
+
+/// Map a scoped worker's join result to per-decision outcomes. A panicked worker (join `None`) counts
+/// its WHOLE slice as errors rather than silently dropping those decisions from the backfill accounting.
+fn worker_outcomes_or_errors(
+    returned: Option<Vec<ZoneEnrichOutcome>>,
+    group_len: usize,
+) -> Vec<ZoneEnrichOutcome> {
+    returned.unwrap_or_else(|| vec![ZoneEnrichOutcome::Error; group_len])
 }
 
 fn embed_chunks_payload(
@@ -10613,6 +10625,17 @@ mod tests {
             "src",
         );
         assert!(!phase2_benchmark_artifact_errors(&few_citations).is_empty());
+    }
+
+    #[test]
+    fn worker_join_error_counts_whole_slice_as_errors() {
+        // Z2-fix: a panicked backfill worker (join -> None) must count its whole slice as errors, not
+        // silently drop those decisions from accounting.
+        let panicked = worker_outcomes_or_errors(None, 3);
+        assert_eq!(panicked.len(), 3);
+        assert!(panicked.iter().all(|o| matches!(o, ZoneEnrichOutcome::Error)));
+        let returned = vec![ZoneEnrichOutcome::Official, ZoneEnrichOutcome::Fallback];
+        assert_eq!(worker_outcomes_or_errors(Some(returned), 2).len(), 2);
     }
 
     #[test]
