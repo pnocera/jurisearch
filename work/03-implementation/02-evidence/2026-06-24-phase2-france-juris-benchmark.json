@@ -1,0 +1,65 @@
+{
+  "categories": {
+    "administrative_retrieval": {
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 0.7
+    },
+    "decision_citation": {
+      "by_identifier": {
+        "cetatext": {
+          "metric": "decision_citation_accuracy",
+          "queries": 30,
+          "value": 1.0
+        },
+        "ecli": {
+          "metric": "decision_citation_accuracy",
+          "queries": 30,
+          "value": 1.0
+        },
+        "pourvoi": {
+          "metric": "decision_citation_accuracy",
+          "queries": 30,
+          "value": 1.0
+        }
+      },
+      "metric": "decision_citation_accuracy"
+    },
+    "judicial_retrieval": {
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 1.0
+    }
+  },
+  "claim_scope": "full French juridic search (statutes + jurisprudence): judicial (Cassation/appeal) AND administrative retrieval AND ECLI/pourvoi/CETATEXT decision-citation verification, through the production pipeline",
+  "evidence": [
+    "France-jurisprudence runner over index `phase2-juris:md5:29d17c3dc1b95678199bbe8248640f20`: 60 judicial + 60 administrative retrieval recall@10, 30 ECLI / 30 pourvoi / 30 CETATEXT citation-accuracy qrels through the production search/cite pipeline"
+  ],
+  "fingerprint": "bge-m3:1024:normalize:true",
+  "jurisdiction": "france",
+  "kind": "phase2_france_juris_benchmark",
+  "provenance": {
+    "code_version": "jurisearch-cli:0.1.0",
+    "human_in_gold": false,
+    "index_revision": "phase2-juris:md5:29d17c3dc1b95678199bbe8248640f20",
+    "llm_in_gold": false,
+    "official_source": "DILA CASS/CAPP/INCA/JADE bulk XML (Licence Ouverte), extracted from the built index",
+    "pipeline": "production",
+    "pseudonymisation": "preserved: gold and identifiers come from the pseudonymised official bulk fields; no re-identification, no cross-source linking",
+    "qrel_limits": {
+      "administrative_retrieval": 60,
+      "cetatext": 30,
+      "ecli": 30,
+      "judicial_retrieval": 60,
+      "pourvoi": 30
+    },
+    "qrel_selection": "deterministic_bounded_by_document_id_from_official_index_fields",
+    "sampled": false,
+    "source_revision": "phase2-full-juridic@2026-06-24"
+  },
+  "reason": "all Phase 2 categories cleared their floors through the production pipeline",
+  "retriever": "jurisearch search (hybrid BM25/dense/RRF, kind=decision) + citation resolver",
+  "schema_version": 1,
+  "source": "DILA CASS/CAPP/INCA/JADE bulk XML (Licence Ouverte) official fields, extracted from the built index",
+  "state": "passed"
+}
