@@ -129,6 +129,29 @@ fn help_schema_json_is_valid_and_lists_commands() {
         json["schemas"]["SearchResponse"]["properties"]["expanded_terms"]["type"],
         "array"
     );
+    // Z4: the official-zone search surface must be discoverable through the schema — the `zone`
+    // request field and the zone routing values (query_type=zone, backend=official_zone_retrieval).
+    let zone_request_values =
+        json["schemas"]["SearchRequest"]["properties"]["zone"]["enum"].as_array();
+    assert!(
+        zone_request_values.is_some_and(|values| values.iter().any(|value| value == "motivations")
+            && values.iter().any(|value| value == "moyens")
+            && values.iter().any(|value| value == "dispositif")),
+        "SearchRequest.zone must advertise motivations/moyens/dispositif"
+    );
+    let routing = &json["schemas"]["SearchResponse"]["properties"]["routing"]["properties"];
+    assert!(
+        routing["query_type"]["enum"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == "zone")),
+        "routing.query_type must include zone"
+    );
+    assert!(
+        routing["chosen_backend"]["enum"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == "official_zone_retrieval")),
+        "routing.chosen_backend must include official_zone_retrieval"
+    );
     assert_eq!(
         json["schemas"]["SearchResponse"]["properties"]["expansion_seed_version"]["type"],
         "string"

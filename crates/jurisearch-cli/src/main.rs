@@ -2901,6 +2901,32 @@ fn eval_phase1_fixture_search_result(fixture: &LegalRetrievalFixture, search: Va
     })
 }
 
+/// The shared `pagination` block (cursor note + guidance) used by both the whole-decision search and
+/// the zone search, so the two surfaces stay consistent.
+fn search_pagination_value(
+    requested_top_k: u32,
+    after_cursor: Option<&str>,
+    returned: usize,
+    cursor_supported: bool,
+    next_cursor: Option<&str>,
+) -> Value {
+    let has_more = next_cursor.is_some();
+    json!({
+        "requested_top_k": requested_top_k,
+        "after_cursor": after_cursor,
+        "returned": returned,
+        "possibly_truncated": has_more,
+        "cursor_supported": cursor_supported,
+        "next_cursor": next_cursor,
+        "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
+        "guidance": if has_more {
+            Some("Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.")
+        } else {
+            None
+        }
+    })
+}
+
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     validate_retrieval_options(&args.retrieval_options())?;
     // Explicit opt-in: --zone routes to the parallel official-zone subsystem (Cassation-only), which
@@ -3070,8 +3096,12 @@ fn zone_search_payload(
     let coverage: Value =
         serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
             .map_err(|error| dependency_unavailable(error.to_string()))?;
+    // Shared search decoration (expansion, format, limit) so the zone surface matches ordinary search.
+    let expansion = expand_query(&args.query);
     response["format"] = json!(output_format.as_str());
     response["limit"] = json!(args.top_k);
+    response["expansion_seed_version"] = json!(expansion.seed_version);
+    response["expanded_terms"] = json!(expansion.expanded_terms);
     response["scope"] = json!({
         "mode": "official_zone_retrieval",
         "zone": zone.as_str(),
@@ -3092,21 +3122,43 @@ fn zone_search_payload(
             .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
     }
     let returned = response["candidates"].as_array().map_or(0, Vec::len);
-    let has_more = next_cursor.is_some();
-    response["pagination"] = json!({
-        "requested_top_k": args.top_k,
-        "after_cursor": args.cursor.as_deref(),
-        "returned": returned,
-        "possibly_truncated": has_more,
-        "cursor_supported": true,
-        "next_cursor": next_cursor.as_deref(),
-    });
+    // Zone candidates always carry a ranking cursor, so paging is always supported.
+    response["pagination"] = search_pagination_value(
+        args.top_k,
+        args.cursor.as_deref(),
+        returned,
+        true,
+        next_cursor.as_deref(),
+    );
     response["routing"] = json!({
         "query_type": "zone",
         "chosen_backend": "official_zone_retrieval",
         "zone": zone.as_str(),
         "candidate_count": returned,
+        "fallback_path": "none",
     });
+    if matches!(output_format, OutputFormat::Detailed) {
+        response["diagnostics"] = json!({
+            "query_input": args.query.clone(),
+            "lexical_query_text": if retrieval_mode.uses_lexical() {
+                Some(query_text.as_str())
+            } else {
+                None
+            },
+            "retrieval": {
+                "mode": retrieval_mode.as_str(),
+                "uses_lexical": retrieval_mode.uses_lexical(),
+                "uses_dense": needs_dense,
+                "lexical_limit": lexical_limit,
+                "dense_limit": dense_limit,
+                "query_limit": query_limit,
+                "zone": zone.as_str(),
+                "as_of": as_of.as_str(),
+                "embedding_fingerprint": expected_fingerprint.as_deref(),
+                "after_cursor": args.cursor.as_deref(),
+            }
+        });
+    }
     if response["candidates"]
         .as_array()
         .is_some_and(|candidates| candidates.is_empty())
@@ -3380,24 +3432,16 @@ fn search_with_postgres(
             .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
     }
     let returned = response["candidates"].as_array().map_or(0, Vec::len);
-    let has_more = next_cursor.is_some();
     // Structured citation results are an exact, fully-returned resolution set with no ranking
     // cursor, so cursor paging does not apply to them.
     let cursor_supported = chosen_backend != "structured_citation";
-    response["pagination"] = json!({
-        "requested_top_k": args.top_k,
-        "after_cursor": args.cursor.as_deref(),
-        "returned": returned,
-        "possibly_truncated": has_more,
-        "cursor_supported": cursor_supported,
-        "next_cursor": next_cursor.as_deref(),
-        "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
-        "guidance": if has_more {
-            Some("Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.")
-        } else {
-            None
-        }
-    });
+    response["pagination"] = search_pagination_value(
+        args.top_k,
+        args.cursor.as_deref(),
+        returned,
+        cursor_supported,
+        next_cursor.as_deref(),
+    );
     // Intent-routing audit: prove the resolver was used because the input is structurally
     // resolvable (query_type=citation, backend=structured_citation), not because the evaluator
     // knew the answer. Recorded on every search, structured and hybrid alike.

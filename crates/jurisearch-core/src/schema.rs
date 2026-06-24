@@ -88,7 +88,8 @@ pub fn compiled_schema() -> Value {
                     "as_of": { "type": "string", "format": "date" },
                     "rrf_lexical_weight": { "type": "number", "minimum": 0, "description": "Per-request hybrid RRF lexical weight (default from env, else 1.0)." },
                     "rrf_dense_weight": { "type": "number", "minimum": 0, "description": "Per-request hybrid RRF dense weight (default from env, else 0.3)." },
-                    "probes": { "type": "integer", "minimum": 1, "maximum": 4096, "description": "Per-request ivfflat.probes for dense ANN (default 4)." }
+                    "probes": { "type": "integer", "minimum": 1, "maximum": 4096, "description": "Per-request ivfflat.probes for dense ANN (default 4)." },
+                    "zone": { "enum": ["motivations", "moyens", "dispositif"], "description": "Official Cour de cassation zone scope (case-law only): restrict retrieval to a decision part — `motivations` (reasoning), `moyens` (grounds raised), or `dispositif` (holding). Routes to the coverage-bounded official-zone subsystem (cass+inca only); incompatible with kind=code." }
                 }
             },
             "SearchResponse": {
@@ -119,14 +120,27 @@ pub fn compiled_schema() -> Value {
                     },
                     "as_of": { "type": "string", "format": "date" },
                     "limit": { "type": "integer" },
+                    "scope": {
+                        "type": "object",
+                        "description": "Present only for `zone` searches: the coverage-bounded official-zone scope (Cour de cassation only).",
+                        "properties": {
+                            "mode": { "const": "official_zone_retrieval" },
+                            "zone": { "enum": ["motivations", "moyens", "dispositif"] },
+                            "coverage": { "type": "string" },
+                            "zone_accurate": { "type": "boolean" },
+                            "indexed_decisions": { "type": ["integer", "null"] },
+                            "note": { "type": "string" }
+                        }
+                    },
                     "routing": {
                         "type": "object",
                         "description": "Intent-routing audit: how the query was classified and which backend served it.",
                         "properties": {
-                            "query_type": { "enum": ["citation", "semantic"] },
-                            "chosen_backend": { "enum": ["hybrid", "bm25", "dense", "structured_citation"] },
+                            "query_type": { "enum": ["citation", "semantic", "zone"] },
+                            "chosen_backend": { "enum": ["hybrid", "bm25", "dense", "structured_citation", "official_zone_retrieval"] },
                             "candidate_count": { "type": "integer" },
-                            "fallback_path": { "enum": ["none", "hybrid_fallback"] }
+                            "fallback_path": { "enum": ["none", "hybrid_fallback"] },
+                            "zone": { "enum": ["motivations", "moyens", "dispositif"], "description": "Present only on zone routes." }
                         }
                     },
                     "pagination": {
