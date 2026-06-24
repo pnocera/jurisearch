@@ -4,7 +4,9 @@ use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     decision_zones::{UpsertDecisionZones, upsert_decision_zones},
     dense::DenseRebuildSpec,
+    retrieval::{DecisionFilters, RetrievalMode, RetrievalOptions},
     runtime::{ManagedPostgres, StorageError},
+    zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
     zone_units::{
         ZONE_UNIT_VECTOR_INDEX_NAME, ZoneUnitEmbeddingInsert, ZoneUnitRow,
         enrich_zone_candidates_json, finalize_zone_dense_rebuild, insert_zone_unit_embeddings,
@@ -227,6 +229,86 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
     assert_eq!(coverage["embeddings"]["total"], 3);
     assert_eq!(coverage["embeddings"]["units_pending"], 0);
 
+    Ok(())
+}
+
+#[test]
+fn zone_candidates_json_scopes_to_zone_with_official_provenance() -> Result<(), StorageError> {
+    // Z4: zone retrieval returns the decision under the matched zone (zone_accurate=true, judilibre),
+    // and a query whose term lives in another zone (or an empty zone) returns nothing under this scope.
+    let Some(pg_config) = discover_pg_config("zone candidates")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-candidates.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision(&postgres, "cass:Q1", "12-34567", "ok", Some("h"), "{}")?;
+    let rows = vec![
+        ZoneUnitRow {
+            document_id: "cass:Q1",
+            zone: "motivations",
+            fragment_index: 0,
+            body: "la responsabilite civile du gardien de la chose",
+            search_body: "la responsabilite civile du gardien de la chose",
+            source: "cass",
+            text_hash: "h",
+            builder_version: BUILDER,
+        },
+        ZoneUnitRow {
+            document_id: "cass:Q1",
+            zone: "moyens",
+            fragment_index: 0,
+            body: "le moyen tire de la prescription quinquennale",
+            search_body: "le moyen tire de la prescription quinquennale",
+            source: "cass",
+            text_hash: "h",
+            builder_version: BUILDER,
+        },
+    ];
+    replace_zone_units_for_document(&postgres, "cass:Q1", &rows)?;
+
+    let base = ZoneCandidateQuery {
+        query_text: "responsabilite",
+        query_embedding: None,
+        embedding_fingerprint: None,
+        retrieval_mode: RetrievalMode::Bm25,
+        options: RetrievalOptions::default(),
+        after_cursor: None,
+        zone: "motivations",
+        decision_filters: DecisionFilters::default(),
+        lexical_limit: 50,
+        dense_limit: 50,
+        limit: 10,
+    };
+    let hit: serde_json::Value =
+        serde_json::from_str(&zone_candidates_json(&postgres, &base)?).expect("json");
+    let candidates = hit["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["document_id"], "cass:Q1");
+    assert_eq!(candidates[0]["zone"], "motivations");
+    assert_eq!(candidates[0]["zone_accurate"], true);
+    assert_eq!(candidates[0]["provider"], "judilibre");
+    assert_eq!(hit["zone"], "motivations");
+
+    // "responsabilite" lives in motivations, not moyens -> empty under the moyens scope.
+    let moyens = ZoneCandidateQuery {
+        zone: "moyens",
+        ..base
+    };
+    let none: serde_json::Value =
+        serde_json::from_str(&zone_candidates_json(&postgres, &moyens)?).expect("json");
+    assert_eq!(none["candidates"].as_array().expect("c").len(), 0);
+
+    // dispositif has no units at all -> empty.
+    let dispositif = ZoneCandidateQuery {
+        zone: "dispositif",
+        ..base
+    };
+    let empty: serde_json::Value =
+        serde_json::from_str(&zone_candidates_json(&postgres, &dispositif)?).expect("json");
+    assert_eq!(empty["candidates"].as_array().expect("c").len(), 0);
     Ok(())
 }
 

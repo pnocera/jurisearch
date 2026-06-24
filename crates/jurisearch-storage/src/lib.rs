@@ -8,4 +8,5 @@ pub mod migrations;
 pub mod projection;
 pub mod retrieval;
 pub mod runtime;
+pub mod zone_retrieval;
 pub mod zone_units;

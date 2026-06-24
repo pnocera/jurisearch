@@ -82,6 +82,7 @@ use jurisearch_storage::{
         inspect_document_json, related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
+    zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
     zone_units::{
         ZoneUnitEmbeddingInsert, ZoneUnitRow, enrich_zone_candidates_json,
         finalize_zone_dense_rebuild, insert_zone_unit_embeddings, load_derivable_decision_zones_json,
@@ -324,6 +325,31 @@ struct SearchArgs {
     /// Decision filter: latest decision date (inclusive, `YYYY-MM-DD`).
     #[arg(long)]
     decided_to: Option<String>,
+    /// Official-zone scope (Cour de cassation ONLY): restrict retrieval to a decision part —
+    /// `motivations` (the court's reasoning), `moyens` (grounds raised), or `dispositif` (holding).
+    /// Coverage-bounded: searches only resolver-reachable cass/inca decisions with official Judilibre
+    /// zones, ranked within that zone. Cannot be combined with `--kind code`.
+    #[arg(long)]
+    zone: Option<CliZone>,
+}
+
+/// Official Judilibre zone scopes available to `search --zone` (Cour de cassation only).
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum CliZone {
+    Motivations,
+    Moyens,
+    Dispositif,
+}
+
+impl CliZone {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Motivations => "motivations",
+            Self::Moyens => "moyens",
+            Self::Dispositif => "dispositif",
+        }
+    }
 }
 
 impl SearchArgs {
@@ -434,6 +460,8 @@ struct SessionSearchArgs {
     decided_from: Option<String>,
     #[serde(default)]
     decided_to: Option<String>,
+    #[serde(default)]
+    zone: Option<CliZone>,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -2316,6 +2344,7 @@ fn france_legi_search_documents(
         publication: None,
         decided_from: None,
         decided_to: None,
+        zone: None,
     };
     let response = match search_with_postgres(
         postgres,
@@ -2510,6 +2539,7 @@ fn france_juris_search_documents(
         publication: None,
         decided_from: None,
         decided_to: None,
+        zone: None,
     };
     let response = match search_with_postgres(
         postgres,
@@ -2779,6 +2809,7 @@ fn eval_phase1_fixture_result(
             publication: None,
             decided_from: None,
             decided_to: None,
+            zone: None,
         },
         index_dir,
     );
@@ -2872,6 +2903,12 @@ fn eval_phase1_fixture_search_result(fixture: &LegalRetrievalFixture, search: Va
 
 fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     validate_retrieval_options(&args.retrieval_options())?;
+    // Explicit opt-in: --zone routes to the parallel official-zone subsystem (Cassation-only), which
+    // bypasses the chunk readiness gate and uses its own zone index. Absent --zone, behaviour is
+    // byte-identical to the whole-decision search below.
+    if let Some(zone) = args.zone {
+        return zone_search_payload(args, zone, index_dir);
+    }
     let retrieval_mode: RetrievalMode = args.mode.into();
     let output_format: OutputFormat = args.format.into();
     let after_cursor = args
@@ -2906,6 +2943,154 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
         true,
         None,
     )
+}
+
+/// Dedicated zone readiness gate (NOT the chunk-corpus `ensure_query_readiness`): the zone subsystem
+/// has its own coverage. Requires materialized `zone_units`; for dense/hybrid also requires the
+/// zone-unit embeddings to be complete (no pending units).
+fn ensure_zone_retrieval_readiness(
+    postgres: &ManagedPostgres,
+    needs_dense: bool,
+) -> Result<(), ErrorObject> {
+    let coverage: Value =
+        serde_json::from_str(&zone_retrieval_coverage_json(postgres).map_err(storage_error_object)?)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    if coverage["zone_units"]["total"].as_u64().unwrap_or(0) == 0 {
+        return Err(index_unavailable(
+            "no official zone units are indexed; run `ingest enrich-zones` then `ingest build-zone-units` \
+             (and `ingest embed-zone-units` for hybrid/dense) before `search --zone`",
+        ));
+    }
+    if needs_dense {
+        let pending = coverage["embeddings"]["units_pending"].as_u64().unwrap_or(u64::MAX);
+        let embedded = coverage["embeddings"]["total"].as_u64().unwrap_or(0);
+        if embedded == 0 || pending != 0 {
+            return Err(index_unavailable(format!(
+                "the zone-unit dense index is incomplete ({pending} units pending); run \
+                 `ingest embed-zone-units`, or use `--mode bm25` for lexical zone search"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run a zone-scoped search against the official-zone subsystem. Explicit opt-in only (`--zone`); the
+/// result is self-labeling (a `scope` block stating the Cassation-only coverage and `zone_accurate`).
+fn zone_search_payload(
+    args: SearchArgs,
+    zone: CliZone,
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
+    // Zone scope is Cour de cassation case law; an explicit statute kind is a contradiction.
+    if matches!(args.kind, CliKind::Code) {
+        return Err(ErrorObject::bad_input(
+            "--zone is Cour de cassation case-law scope and cannot be combined with --kind code",
+        ));
+    }
+    let retrieval_mode: RetrievalMode = args.mode.into();
+    let output_format: OutputFormat = args.format.into();
+    // Zone retrieval always groups by decision; a chunk cursor from the main path is rejected.
+    let after_cursor = args
+        .cursor
+        .as_deref()
+        .map(|cursor| parse_search_cursor(cursor, CliGroupBy::Document))
+        .transpose()?;
+    let normalized_query_text = parade_query_text(&args.query);
+    let query_text = if retrieval_mode.uses_lexical() {
+        normalized_query_text.ok_or_else(|| {
+            ErrorObject::bad_input("search query must contain at least one searchable token")
+        })?
+    } else if normalized_query_text.is_none() {
+        return Err(ErrorObject::bad_input(
+            "search query must contain at least one searchable token",
+        ));
+    } else {
+        args.query.trim().to_owned()
+    };
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_zone_retrieval_readiness(&postgres, retrieval_mode.uses_dense())?;
+
+    let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
+        let (literal, fingerprint) = PreparedQueryEmbedder::from_env()?.embed(args.query.as_str())?;
+        (Some(literal), Some(fingerprint))
+    } else {
+        (None, None)
+    };
+
+    // Group by decision -> overfetch a deeper pool to still yield up to top_k UNIQUE decisions.
+    let lexical_limit = args.top_k.saturating_mul(20);
+    let dense_limit = args.top_k.saturating_mul(20);
+    let query_limit = args.top_k.saturating_add(1);
+
+    let response = zone_candidates_json(
+        &postgres,
+        &ZoneCandidateQuery {
+            query_text: query_text.as_str(),
+            query_embedding: query_embedding.as_deref(),
+            embedding_fingerprint: embedding_fingerprint.as_deref(),
+            retrieval_mode,
+            options: args.retrieval_options(),
+            after_cursor: after_cursor.as_ref().map(ParsedSearchCursor::as_retrieval_cursor),
+            zone: zone.as_str(),
+            decision_filters: args.decision_filters(),
+            lexical_limit,
+            dense_limit,
+            limit: query_limit,
+        },
+    )
+    .map_err(storage_error_object)?;
+    let mut response: Value = serde_json::from_str(&response)
+        .map_err(|error| dependency_unavailable(error.to_string()))?;
+
+    let coverage: Value =
+        serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    response["format"] = json!(output_format.as_str());
+    response["limit"] = json!(args.top_k);
+    response["scope"] = json!({
+        "mode": "official_zone_retrieval",
+        "zone": zone.as_str(),
+        "coverage": "cour_de_cassation (cass+inca)",
+        "zone_accurate": true,
+        "indexed_decisions": coverage["zone_units"]["decisions"].clone(),
+        "note": "Coverage-bounded: searches ONLY resolver-reachable Cour de cassation decisions that have official Judilibre zones — not a corpus-wide search. Other courts/administrative decisions are not covered."
+    });
+
+    let mut next_cursor = None;
+    let top_k = args.top_k as usize;
+    if let Some(candidates) = response["candidates"].as_array_mut()
+        && candidates.len() > top_k
+    {
+        candidates.truncate(top_k);
+        next_cursor = candidates
+            .last()
+            .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
+    }
+    let returned = response["candidates"].as_array().map_or(0, Vec::len);
+    let has_more = next_cursor.is_some();
+    response["pagination"] = json!({
+        "requested_top_k": args.top_k,
+        "after_cursor": args.cursor.as_deref(),
+        "returned": returned,
+        "possibly_truncated": has_more,
+        "cursor_supported": true,
+        "next_cursor": next_cursor.as_deref(),
+    });
+    response["routing"] = json!({
+        "query_type": "zone",
+        "chosen_backend": "official_zone_retrieval",
+        "zone": zone.as_str(),
+        "candidate_count": returned,
+    });
+    if response["candidates"]
+        .as_array()
+        .is_some_and(|candidates| candidates.is_empty())
+    {
+        Err(no_results("zone search returned no candidates"))
+    } else {
+        Ok(response)
+    }
 }
 
 /// A query-embedding client built once and reused across many searches. Building an
@@ -4182,6 +4367,7 @@ fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
             publication: args.publication,
             decided_from: args.decided_from,
             decided_to: args.decided_to,
+            zone: args.zone,
         },
         index_dir.as_deref(),
     )
