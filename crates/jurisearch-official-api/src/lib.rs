@@ -1226,6 +1226,23 @@ mod tests {
     }
 
     #[test]
+    fn legifrance_search_exchange_archives_missing_credential_as_upstream_error() {
+        // Slice-2 review fix: a missing OAuth credential must NOT short-circuit; the exchange must be a
+        // durable UpstreamError (no panic, no network) so the caller can archive every attempt uniformly.
+        let mut client = PisteClient::new(OfficialApiConfig::for_environment(
+            PisteEnvironment::Sandbox,
+        ));
+        let exchange = client.legifrance_search_exchange(&json!({ "query": "609 code de procédure civile" }));
+        assert_eq!(exchange.provider, "legifrance");
+        assert_eq!(exchange.http_method, "POST");
+        assert!(matches!(exchange.outcome, super::OfficialApiOutcome::UpstreamError));
+        assert!(exchange.http_status.is_none(), "no HTTP request was made");
+        assert!(exchange.response_json.is_none());
+        assert!(exchange.error.is_some(), "the missing-credential reason is recorded");
+        assert!(exchange.request_fingerprint.contains("609 code de procédure civile"));
+    }
+
+    #[test]
     fn from_env_uses_sandbox_fallbacks_and_ignores_empty_base_overrides() {
         let _env = EnvGuard::new(&[
             ("JURISEARCH_PISTE_ENV", Some("sandbox")),

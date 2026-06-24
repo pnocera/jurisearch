@@ -4673,12 +4673,10 @@ fn enrich_legislation_citations_payload(
     limit: Option<u32>,
     retry_errors: bool,
 ) -> Result<Value, ErrorObject> {
-    if OfficialApiConfig::from_env().legifrance_client_id.is_none() {
-        return Err(dependency_unavailable(
-            "no Legifrance (PISTE OAuth) client configured; set PISTE_OAUTH_CLIENT_ID / \
-             PISTE_OAUTH_CLIENT_SECRET before resolving legislation citations",
-        ));
-    }
+    // No preflight credential guard: `legifrance_search_exchange` converts a missing OAuth client or a
+    // token-acquisition failure into an archivable `UpstreamError` exchange, so EVERY attempt (incl.
+    // missing-credential) is durably recorded in official_api_responses + the resolution row — uniform
+    // with token/HTTP failures (slice-2 review fix). The command summary surfaces the error count.
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
@@ -4770,6 +4768,12 @@ fn enrich_legislation_citations_payload(
     let coverage: Value =
         serde_json::from_str(&legislation_citations_coverage_json(&postgres).map_err(storage_error_object)?)
             .map_err(|error| dependency_unavailable(error.to_string()))?;
+    // Operator hint when every attempt failed (commonly missing/invalid Legifrance OAuth creds) — the
+    // failures are still archived as upstream_error rows; this just points at the likely cause.
+    let note = (considered > 0 && resolved_ok == 0 && not_found == 0 && errors == considered).then(|| {
+        "all Legifrance calls failed (archived as upstream_error); check PISTE_OAUTH_CLIENT_ID / \
+         PISTE_OAUTH_CLIENT_SECRET and the Legifrance subscription"
+    });
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "command": "ingest enrich-legislation-citations",
@@ -4778,6 +4782,7 @@ fn enrich_legislation_citations_payload(
         "resolved_ok": resolved_ok,
         "not_found": not_found,
         "errors": errors,
+        "note": note,
         "coverage": coverage,
     }))
 }

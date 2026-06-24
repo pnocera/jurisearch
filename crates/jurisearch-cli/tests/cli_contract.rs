@@ -4785,6 +4785,71 @@ fn ingest_juri_archives_compatible_replay_skips_inserted_members()
     Ok(())
 }
 
+#[test]
+fn enrich_legislation_citations_archives_missing_credential_attempt() -> Result<(), StorageError> {
+    // Slice-2 review fix: with NO Legifrance OAuth credential, the command must NOT short-circuit — it
+    // must still archive every attempt as an upstream_error in official_api_responses AND record the
+    // resolution as upstream_error (uniform durable accounting, not a silent skip).
+    let Some(pg_config) = discover_pg_config("CLI legislation missing cred")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-legi-cred.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    {
+        let postgres = jurisearch_storage::runtime::ManagedPostgres::start_durable(
+            pg_config.clone(),
+            root.path(),
+        )?;
+        // Migrations must have reached v17 (the resolution table exists).
+        postgres.execute_sql(
+            "INSERT INTO legislation_citation_resolutions \
+                 (citation_key, article_number_norm, code_name_norm, canonical_query) \
+             VALUES ('legi-cite:test','609','code de procédure civile','609 code de procédure civile');",
+        )?;
+    }
+
+    let output = jurisearch_command_without_embedding_env()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .env_remove("PISTE_ENV")
+        .env_remove("JURISEARCH_PISTE_ENV")
+        .env_remove("PISTE_OAUTH_CLIENT_ID")
+        .env_remove("JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID")
+        .arg("--index-dir")
+        .arg(root.path())
+        .arg("ingest")
+        .arg("enrich-legislation-citations")
+        .arg("--limit")
+        .arg("1")
+        .output()
+        .expect("run enrich-legislation-citations");
+    assert!(
+        output.status.success(),
+        "command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["considered"], 1);
+    assert_eq!(report["errors"], 1);
+    assert_eq!(report["resolved_ok"], 0);
+
+    // The missing-credential attempt is durably archived, not skipped.
+    let postgres =
+        jurisearch_storage::runtime::ManagedPostgres::start_durable(pg_config, root.path())?;
+    let archived = postgres.execute_sql(
+        "SELECT count(*)::text FROM official_api_responses \
+         WHERE provider='legifrance' AND outcome='upstream_error';",
+    )?;
+    assert_eq!(archived.trim(), "1", "the failed Legifrance attempt is archived");
+    let status = postgres.execute_sql(
+        "SELECT legifrance_status FROM legislation_citation_resolutions \
+         WHERE citation_key='legi-cite:test';",
+    )?;
+    assert_eq!(status.trim(), "upstream_error", "resolution recorded as upstream_error");
+    Ok(())
+}
+
 fn discover_pg_config(test_name: &str) -> Result<Option<PgConfig>, StorageError> {
     let pg_config = match PgConfig::discover() {
         Ok(pg_config) => pg_config,
