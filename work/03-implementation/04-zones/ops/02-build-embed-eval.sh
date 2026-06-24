@@ -9,6 +9,10 @@ CLONE=${CLONE:-/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-202
 OPS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGDIR="$OPS_DIR/logs/build-embed"
 mkdir -p "$LOGDIR"
+# Run-in-wezterm launches with cwd=$HOME, so cd to the repo root (ops is at work/03-…/04-zones/ops, 4 up)
+# to make the relative `eval --out work/…` artifact path resolve correctly.
+REPO="$(cd "$OPS_DIR/../../../.." && pwd)"
+cd "$REPO" || { echo "cannot cd to repo root $REPO"; exit 1; }
 export JURISEARCH_EMBED_POOL="https://openrouter.ai/api/v1|baai/bge-m3|OPENROUTER_API_KEY"
 
 echo "=== 1. build-zone-units $(date -u +%H:%M:%S) ==="
