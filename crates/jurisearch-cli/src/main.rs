@@ -45,6 +45,10 @@ use jurisearch_official_api::{OfficialApiConfig, PisteClient};
 use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
     citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
+    decision_zones::{
+        UpsertDecisionZones, decision_resolution_metadata_json, decision_zones_json,
+        upsert_decision_zones,
+    },
     dense::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
@@ -373,6 +377,11 @@ struct FetchArgs {
     /// `heuristic` (or `unavailable`); each part reports its `zone_provenance`.
     #[arg(long)]
     part: Option<String>,
+    /// Consult Judilibre for OFFICIAL Cassation decision zones (lazy, cached). Network is used only
+    /// with this flag and only for judicial (cass) decisions resolvable by pourvoi; otherwise the
+    /// heuristic/unavailable fallback is returned. JADE (administrative) is not covered by Judilibre.
+    #[arg(long)]
+    online: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -421,6 +430,8 @@ struct SessionFetchArgs {
     ids: Vec<String>,
     #[serde(default)]
     part: Option<String>,
+    #[serde(default)]
+    online: bool,
     #[serde(default)]
     index_dir: Option<PathBuf>,
 }
@@ -3403,7 +3414,7 @@ fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, Err
         ));
     }
     if let Some(part) = part {
-        annotate_fetched_parts(&mut response, part)?;
+        annotate_fetched_parts(&postgres, &mut response, part, args.online)?;
     }
     Ok(response)
 }
@@ -3445,7 +3456,39 @@ impl DecisionPart {
 /// `not_applicable`. DILA bulk decisions have NO official Judilibre zones, so `summary` comes from the
 /// `SOMMAIRE` chunk and every other part is best-effort `heuristic` (or `unavailable`) — never claimed
 /// as an official zone. Each part reports `zone_provenance` and `official_zones: false`.
-fn annotate_fetched_parts(response: &mut Value, part: DecisionPart) -> Result<(), ErrorObject> {
+fn annotate_fetched_parts(
+    postgres: &ManagedPostgres,
+    response: &mut Value,
+    part: DecisionPart,
+    online: bool,
+) -> Result<(), ErrorObject> {
+    // Collect (document_id, source) for decisions first so the official-zone lookups don't fight the
+    // mutable borrow of the documents array.
+    let decisions: Vec<(String, String)> = response["documents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|document| document["kind"].as_str() == Some("decision"))
+        .map(|document| {
+            (
+                document["document_id"].as_str().unwrap_or_default().to_owned(),
+                document["source"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .collect();
+    // Look up each DISTINCT decision once (fetch preserves duplicate requested IDs), then apply the
+    // result to every matching copy below — so duplicate IDs get identical `part` blocks.
+    let mut official: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let mut looked_up: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (document_id, source) in &decisions {
+        if !looked_up.insert(document_id.as_str()) {
+            continue;
+        }
+        if let Some(block) = official_decision_part(postgres, document_id, source, part, online)? {
+            official.insert(document_id.clone(), block);
+        }
+    }
+
     let Some(documents) = response["documents"].as_array_mut() else {
         return Ok(());
     };
@@ -3459,9 +3502,19 @@ fn annotate_fetched_parts(response: &mut Value, part: DecisionPart) -> Result<()
             });
             continue;
         }
+        let document_id = document["document_id"].as_str().unwrap_or_default();
+        // `get().cloned()` (not `remove`) so duplicate requested IDs each receive the official block.
+        if let Some(block) = official.get(document_id).cloned() {
+            document["part"] = block;
+            continue;
+        }
+        // Fallback: source SOMMAIRE / heuristic / unavailable (no official zones).
         let body = document["body"].as_str().unwrap_or_default();
         let summary = collect_decision_summary(document);
         let extracted = extract_decision_part(part, body, summary.as_deref());
+        // Whether an official zone COULD be obtained for this part with --online (judicial zone parts).
+        let online_available =
+            judilibre_zone_key(part).is_some() && document["source"].as_str() == Some("cass");
         document["part"] = json!({
             "requested": part.name(),
             "applicable": true,
@@ -3469,10 +3522,318 @@ fn annotate_fetched_parts(response: &mut Value, part: DecisionPart) -> Result<()
             "zone_provenance": extracted.provenance,
             "available": extracted.text.is_some(),
             "text": extracted.text,
-            "note": extracted.note
+            "note": extracted.note,
+            "official_zones_available": online_available && !online,
+            "official_zones_hint": if online_available && !online {
+                json!("re-run with --online to fetch the official Judilibre zone for this Cassation decision")
+            } else {
+                Value::Null
+            }
         });
     }
     Ok(())
+}
+
+/// The Judilibre `zones` key that backs a requested part, or `None` for parts not served by an
+/// official zone offset (summary stays SOMMAIRE; visa has no primary Judilibre zone).
+fn judilibre_zone_key(part: DecisionPart) -> Option<&'static str> {
+    match part {
+        DecisionPart::Motivations => Some("motivations"),
+        DecisionPart::Moyens => Some("moyens"),
+        DecisionPart::Dispositif => Some("dispositif"),
+        DecisionPart::Summary | DecisionPart::Visa => None,
+    }
+}
+
+/// Return an official-zone part block for a decision when available — from the `decision_zones` cache,
+/// or (when `online`) by resolving the decision on Judilibre and caching the result. `None` means "no
+/// official zone; use the heuristic/unavailable fallback". A transient upstream failure is cached and
+/// returns `None` (it never fails the whole `fetch`).
+fn official_decision_part(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+    source: &str,
+    part: DecisionPart,
+    online: bool,
+) -> Result<Option<Value>, ErrorObject> {
+    let Some(zone_key) = judilibre_zone_key(part) else {
+        return Ok(None);
+    };
+    let cached: Value = serde_json::from_str(
+        &decision_zones_json(postgres, document_id).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
+    match zone_cache_action(&cached, part, zone_key, online, source) {
+        // Fresh cache row honored without network (a fresh `ok` row already holds every zone, so an
+        // absent part is genuinely "no official zone", not a reason to re-fetch; a fresh negative row
+        // suppresses repeat lookups for its TTL).
+        ZoneCacheAction::Official(block) => Ok(Some(block)),
+        ZoneCacheAction::Fallback => Ok(None),
+        // No cache row, or an expired one: (re)fetch from Judilibre.
+        ZoneCacheAction::Enrich => {
+            let enriched = enrich_decision_from_judilibre(postgres, document_id)?;
+            Ok(enriched.and_then(|cached| part_block_from_cached_zones(&cached, part, zone_key)))
+        }
+    }
+}
+
+/// What to do for a requested part given its cached `decision_zones` row (pure, so the cache/TTL
+/// policy is unit-testable). A FRESH `ok` row serves the part (or falls back if that zone is empty);
+/// a FRESH negative row suppresses network for its TTL; a missing/expired row triggers enrichment when
+/// `--online` and the source is Cassation.
+#[derive(Debug)]
+enum ZoneCacheAction {
+    Official(Value),
+    Fallback,
+    Enrich,
+}
+
+fn zone_cache_action(
+    cached: &Value,
+    part: DecisionPart,
+    zone_key: &str,
+    online: bool,
+    source: &str,
+) -> ZoneCacheAction {
+    let expired = cached["expired"].as_bool() == Some(true);
+    match cached["status"].as_str() {
+        Some("ok") if !expired => match part_block_from_cached_zones(cached, part, zone_key) {
+            Some(block) => ZoneCacheAction::Official(block),
+            None => ZoneCacheAction::Fallback,
+        },
+        Some(_) if !expired => ZoneCacheAction::Fallback,
+        // status is null (no row) or the row is expired -> enrich when we can, else fall back.
+        _ if online && source == "cass" => ZoneCacheAction::Enrich,
+        _ => ZoneCacheAction::Fallback,
+    }
+}
+
+/// Build the official-part response block from a cached zones row, or `None` if that part has no
+/// non-empty official zone.
+fn part_block_from_cached_zones(cached: &Value, part: DecisionPart, zone_key: &str) -> Option<Value> {
+    let fragments = cached["zones"][zone_key].as_array()?;
+    if fragments.is_empty() {
+        return None;
+    }
+    let text = fragments
+        .iter()
+        .filter_map(|fragment| fragment["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(json!({
+        "requested": part.name(),
+        "applicable": true,
+        "available": true,
+        "official_zones": true,
+        "zone_accurate": true,
+        "zone_provenance": "judilibre",
+        "provider": cached["provider"].clone(),
+        "provider_decision_id": cached["provider_decision_id"].clone(),
+        "fetched_at": cached["fetched_at"].clone(),
+        "upstream_update_date": cached["upstream_update_date"].clone(),
+        "fragments": Value::Array(fragments.clone()),
+        "text": text,
+        "note": "Official Judilibre zone offsets (character indices) for this Cassation decision."
+    }))
+}
+
+/// Resolve a Cassation decision on Judilibre by pourvoi (+ date), fetch its zones, normalize and cache
+/// them, and return the cached row. Errors are cached and yield `Ok(None)` (never fail `fetch`).
+fn enrich_decision_from_judilibre(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+) -> Result<Option<Value>, ErrorObject> {
+    // Local resolution metadata: a parser-valid pourvoi, the decision date (= valid_from), source_uid.
+    let meta: Value = serde_json::from_str(
+        &decision_resolution_metadata_json(postgres, document_id).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
+
+    let source_uid = meta["source_uid"].as_str().unwrap_or_default();
+    let ecli = meta["ecli"].as_str();
+    let decision_date = meta["decision_date"].as_str();
+    let Some(pourvoi) = meta["pourvoi"].as_str() else {
+        // No parser-valid pourvoi -> cannot resolve on Judilibre; cache as unsupported.
+        cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "unsupported", None)?;
+        return Ok(None);
+    };
+
+    let client = PisteClient::new(OfficialApiConfig::from_env());
+    let normalized_pourvoi: String = pourvoi.chars().filter(|c| !matches!(c, '.' | ' ')).collect();
+
+    // Resolve: search by pourvoi (free-text exact); accept the result whose normalized number matches
+    // and whose date matches when we have one.
+    let provider_id = match client.judilibre_search_params(&[
+        ("query", pourvoi),
+        ("operator", "exact"),
+        ("page_size", "10"),
+    ]) {
+        Ok(search) => find_matching_judilibre_id(&search, &normalized_pourvoi, decision_date),
+        Err(error) => {
+            cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
+            return Ok(None);
+        }
+    };
+    let Some(provider_id) = provider_id else {
+        cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "not_found", None)?;
+        return Ok(None);
+    };
+
+    let decision = match client.judilibre_decision(&provider_id, None) {
+        Ok(decision) => decision,
+        Err(error) => {
+            cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
+            return Ok(None);
+        }
+    };
+
+    let (zones_json, valid_zones) = normalize_judilibre_zones(&decision);
+    let status = if valid_zones { "ok" } else { "invalid_offsets" };
+    let ttl_days: i64 = env_i64("JURISEARCH_JUDILIBRE_ZONE_TTL_DAYS", 30);
+    let row = UpsertDecisionZones {
+        document_id,
+        provider: "judilibre",
+        provider_decision_id: Some(provider_id.as_str()),
+        source_uid,
+        ecli,
+        status,
+        upstream_update_date: decision["update_date"].as_str(),
+        upstream_decision_date: decision["decision_date"].as_str(),
+        text_hash: None,
+        offset_unit: Some("char"),
+        zones_json: &zones_json,
+        raw_json: &decision,
+        error: None,
+        ttl_seconds: Some(ttl_days.max(0) * 86_400),
+    };
+    upsert_decision_zones(postgres, &row).map_err(storage_error_object)?;
+    if status != "ok" {
+        return Ok(None);
+    }
+    // Return a cached-shaped value so the caller can read the part it asked for.
+    Ok(Some(json!({
+        "status": "ok",
+        "provider": "judilibre",
+        "provider_decision_id": provider_id,
+        "upstream_update_date": decision["update_date"].clone(),
+        "zones": zones_json,
+    })))
+}
+
+/// Pick the Judilibre search result whose normalized `numbers` contains the local pourvoi and (when
+/// available) whose `decision_date` matches — guarding against pourvoi collisions across years.
+fn find_matching_judilibre_id(
+    search: &Value,
+    normalized_pourvoi: &str,
+    decision_date: Option<&str>,
+) -> Option<String> {
+    let results = search["results"].as_array()?;
+    let normalize = |value: &str| -> String { value.chars().filter(|c| !matches!(c, '.' | ' ')).collect() };
+    let mut date_agnostic: Option<String> = None;
+    for result in results {
+        let numbers_match = result["numbers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|number| number.as_str())
+            .any(|number| normalize(number) == normalized_pourvoi)
+            || result["number"].as_str().map(normalize).as_deref() == Some(normalized_pourvoi);
+        if !numbers_match {
+            continue;
+        }
+        let Some(id) = result["id"].as_str() else { continue };
+        match (decision_date, result["decision_date"].as_str()) {
+            // Local date known: require an exact remote-date match — never resolve by number alone
+            // (guards pourvoi collisions across years even if a result is missing its date).
+            (Some(local), Some(remote)) if local == remote => return Some(id.to_owned()),
+            (Some(_), _) => continue,
+            // No local date: accept the first number match as a date-agnostic fallback.
+            (None, _) => {
+                date_agnostic.get_or_insert_with(|| id.to_owned());
+            }
+        };
+    }
+    date_agnostic
+}
+
+/// Normalize Judilibre `zones` (character-index offsets into `text`) into
+/// `{motivations:[{start,end,text}], moyens:[…], dispositif:[…]}`. Returns `(zones_json, any_valid)`.
+/// Offsets are CHARACTER indices (verified against the live API), so slicing is char-safe.
+fn normalize_judilibre_zones(decision: &Value) -> (Value, bool) {
+    let text_chars: Vec<char> = decision["text"].as_str().unwrap_or_default().chars().collect();
+    let mut zones = serde_json::Map::new();
+    let mut any_valid = false;
+    for key in ["motivations", "moyens", "dispositif"] {
+        let mut fragments = Vec::new();
+        if let Some(offsets) = decision["zones"][key].as_array() {
+            for offset in offsets {
+                let (Some(start), Some(end)) =
+                    (offset["start"].as_u64(), offset["end"].as_u64())
+                else {
+                    continue;
+                };
+                let (start, end) = (start as usize, end as usize);
+                if start > end || end > text_chars.len() {
+                    continue; // out-of-range -> skip this fragment (offset_unit mismatch guard)
+                }
+                let fragment_text: String = text_chars[start..end].iter().collect();
+                if fragment_text.trim().is_empty() {
+                    continue;
+                }
+                any_valid = true;
+                fragments.push(json!({ "start": start, "end": end, "text": fragment_text }));
+            }
+        }
+        zones.insert(key.to_owned(), Value::Array(fragments));
+    }
+    (Value::Object(zones), any_valid)
+}
+
+/// Cache a non-`ok` zone status (unsupported / not_found / upstream_error) so repeat fetches do not
+/// re-hit the API. Negative results get the negative TTL; upstream errors are not cached long.
+fn cache_zone_status(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+    source_uid: &str,
+    ecli: Option<&str>,
+    decision_date: Option<&str>,
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), ErrorObject> {
+    let ttl_seconds = match status {
+        // Transient failures get a SHORT explicit TTL so they suppress hammering but retry soon (never
+        // a permanent NULL-expiry row).
+        "upstream_error" => Some(env_i64("JURISEARCH_JUDILIBRE_ZONE_ERROR_TTL_SECONDS", 3600).max(0)),
+        _ => Some(env_i64("JURISEARCH_JUDILIBRE_ZONE_NEGATIVE_TTL_DAYS", 7).max(0) * 86_400),
+    };
+    let empty = json!({});
+    let row = UpsertDecisionZones {
+        document_id,
+        provider: "judilibre",
+        provider_decision_id: None,
+        source_uid,
+        ecli,
+        status,
+        upstream_update_date: None,
+        upstream_decision_date: decision_date,
+        text_hash: None,
+        offset_unit: None,
+        zones_json: &empty,
+        raw_json: &empty,
+        error,
+        ttl_seconds,
+    };
+    upsert_decision_zones(postgres, &row).map_err(storage_error_object)
+}
+
+fn env_i64(name: &str, default: i64) -> i64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(default)
 }
 
 struct ExtractedPart {
@@ -3727,6 +4088,7 @@ fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
         FetchArgs {
             ids: args.ids,
             part: args.part,
+            online: args.online,
         },
         index_dir.as_deref(),
     )
@@ -9995,6 +10357,119 @@ mod tests {
             "src",
         );
         assert!(!phase2_benchmark_artifact_errors(&few_citations).is_empty());
+    }
+
+    #[test]
+    fn judilibre_zones_normalize_with_char_safe_offsets() {
+        // Multibyte text: Judilibre offsets are CHARACTER indices, so slicing must be char-safe.
+        // "Évidence motivée" — accented leading chars shift byte offsets vs char offsets.
+        let text = "Évidence. MOTIVATIONS: la cour. DISPOSITIF: rejette.";
+        let chars: Vec<char> = text.chars().collect();
+        let m_start = text.chars().position(|c| c == 'M').unwrap(); // "MOTIVATIONS" begins here (char index)
+        let m_end = text.chars().position(|c| c == 'D').unwrap() - 1; // up to before " DISPOSITIF"
+        let d_start = text.chars().position(|c| c == 'D').unwrap();
+        let d_end = chars.len();
+        let decision = json!({
+            "text": text,
+            "zones": {
+                "motivations": [{ "start": m_start, "end": m_end }],
+                "dispositif": [{ "start": d_start, "end": d_end }],
+                // out-of-range fragment must be skipped, not panic
+                "moyens": [{ "start": 1000, "end": 2000 }],
+            }
+        });
+        let (zones, any_valid) = normalize_judilibre_zones(&decision);
+        assert!(any_valid);
+        let mot = zones["motivations"][0]["text"].as_str().unwrap();
+        assert_eq!(mot, &chars[m_start..m_end].iter().collect::<String>());
+        assert!(mot.starts_with("MOTIVATIONS"));
+        assert!(zones["dispositif"][0]["text"].as_str().unwrap().contains("DISPOSITIF"));
+        // moyens had only an out-of-range fragment -> empty array
+        assert_eq!(zones["moyens"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn judilibre_match_requires_number_and_date() {
+        let search = json!({"results": [
+            {"id": "wrong_date", "numbers": ["24-13.470"], "decision_date": "2020-01-01"},
+            {"id": "right", "numbers": ["24-13.470"], "decision_date": "2025-06-04"},
+            {"id": "other", "numbers": ["99-99.999"], "decision_date": "2025-06-04"},
+        ]});
+        // Normalization strips dots/spaces but KEEPS the hyphen ("24-13.470" -> "24-13470").
+        // Date provided -> only the number+date match wins (guards pourvoi collisions across years).
+        assert_eq!(
+            find_matching_judilibre_id(&search, "24-13470", Some("2025-06-04")).as_deref(),
+            Some("right")
+        );
+        // No local date -> first number match accepted (date-agnostic fallback).
+        assert_eq!(
+            find_matching_judilibre_id(&search, "24-13470", None).as_deref(),
+            Some("wrong_date")
+        );
+        // Unknown number -> no match.
+        assert!(find_matching_judilibre_id(&search, "11-11111", Some("2025-06-04")).is_none());
+    }
+
+    #[test]
+    fn cached_zone_part_block_is_official_only_when_present() {
+        let cached = json!({
+            "status": "ok",
+            "provider": "judilibre",
+            "provider_decision_id": "abc",
+            "fetched_at": "2026-06-24T00:00:00Z",
+            "zones": {
+                "motivations": [{ "start": 0, "end": 5, "text": "Motif" }],
+                "dispositif": []
+            }
+        });
+        let block = part_block_from_cached_zones(&cached, DecisionPart::Motivations, "motivations").unwrap();
+        assert_eq!(block["official_zones"], json!(true));
+        assert_eq!(block["zone_accurate"], json!(true));
+        assert_eq!(block["zone_provenance"], json!("judilibre"));
+        assert_eq!(block["text"], json!("Motif"));
+        // dispositif present but empty -> not an official part
+        assert!(part_block_from_cached_zones(&cached, DecisionPart::Dispositif, "dispositif").is_none());
+        // summary/visa are not Judilibre-zone parts
+        assert!(judilibre_zone_key(DecisionPart::Summary).is_none());
+        assert!(judilibre_zone_key(DecisionPart::Visa).is_none());
+        assert_eq!(judilibre_zone_key(DecisionPart::Motivations), Some("motivations"));
+    }
+
+    #[test]
+    fn zone_cache_action_honors_status_and_ttl() {
+        let part = DecisionPart::Motivations;
+        let key = "motivations";
+        let ok_fresh = json!({"status":"ok","expired":false,"zones":{"motivations":[{"start":0,"end":3,"text":"abc"}]}});
+        let ok_no_zone = json!({"status":"ok","expired":false,"zones":{"motivations":[]}});
+        let ok_expired = json!({"status":"ok","expired":true,"zones":{"motivations":[{"start":0,"end":3,"text":"abc"}]}});
+        let neg_fresh = json!({"status":"not_found","expired":false,"zones":{}});
+        let err_fresh = json!({"status":"upstream_error","expired":false,"zones":{}});
+        let err_expired = json!({"status":"upstream_error","expired":true,"zones":{}});
+        let no_row = Value::Null; // decision_zones_json returns `null` when uncached
+
+        let is = |a: ZoneCacheAction, want: &str| match (a, want) {
+            (ZoneCacheAction::Official(_), "official") => true,
+            (ZoneCacheAction::Fallback, "fallback") => true,
+            (ZoneCacheAction::Enrich, "enrich") => true,
+            _ => false,
+        };
+
+        // Fresh ok with the zone -> official, regardless of --online.
+        assert!(is(zone_cache_action(&ok_fresh, part, key, false, "cass"), "official"));
+        // Fresh ok but that zone is empty -> fallback (decision genuinely has no such zone; no re-fetch).
+        assert!(is(zone_cache_action(&ok_no_zone, part, key, true, "cass"), "fallback"));
+        // Expired ok -> re-enrich when online+cass, else fallback.
+        assert!(is(zone_cache_action(&ok_expired, part, key, true, "cass"), "enrich"));
+        assert!(is(zone_cache_action(&ok_expired, part, key, false, "cass"), "fallback"));
+        // Fresh negative -> suppress network even when online.
+        assert!(is(zone_cache_action(&neg_fresh, part, key, true, "cass"), "fallback"));
+        // Fresh upstream error -> suppress (short TTL); expired upstream error -> retry.
+        assert!(is(zone_cache_action(&err_fresh, part, key, true, "cass"), "fallback"));
+        assert!(is(zone_cache_action(&err_expired, part, key, true, "cass"), "enrich"));
+        // No cache row -> enrich only when online+cass; offline or non-cass -> fallback.
+        assert!(is(zone_cache_action(&no_row, part, key, true, "cass"), "enrich"));
+        assert!(is(zone_cache_action(&no_row, part, key, false, "cass"), "fallback"));
+        assert!(is(zone_cache_action(&no_row, part, key, true, "jade"), "fallback"));
     }
 
     #[test]

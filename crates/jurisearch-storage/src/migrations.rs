@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 11;
+pub const CURRENT_SCHEMA_VERSION: i32 = 12;
 
 struct Migration {
     version: i32,
@@ -432,6 +432,48 @@ WHERE kind = 'decision';
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 11), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 12,
+        name: "decision_zones_cache",
+        // Lazy Judilibre official-zone cache for `fetch --part --online`. A SEPARATE table (not
+        // canonical_json) keeps the immutable bulk ingest/projection and the corpus-level
+        // `zone_accurate=false` honesty intact: enrichment is a per-decision overlay that can refresh,
+        // cache misses/errors, and be re-fetched without contaminating canonical records. Judicial
+        // (Cassation) only for now — Judilibre does not cover administrative (JADE/Conseil d'Etat).
+        sql: r#"
+CREATE TABLE IF NOT EXISTS decision_zones (
+    document_id text PRIMARY KEY REFERENCES documents(document_id) ON DELETE CASCADE,
+    provider text NOT NULL,
+    provider_decision_id text,
+    source_uid text NOT NULL,
+    ecli text,
+    status text NOT NULL CHECK (status IN ('ok','not_found','unsupported','invalid_offsets','upstream_error')),
+    fetched_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz,
+    upstream_update_date text,
+    upstream_decision_date text,
+    text_hash text,
+    offset_unit text,
+    zones_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    raw_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    error text,
+    zone_schema_version text NOT NULL DEFAULT 'judilibre:v1'
+);
+
+CREATE INDEX IF NOT EXISTS decision_zones_provider_idx
+ON decision_zones (provider, provider_decision_id);
+
+CREATE INDEX IF NOT EXISTS decision_zones_ecli_idx
+ON decision_zones (upper(ecli))
+WHERE ecli IS NOT NULL;
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 12), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

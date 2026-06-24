@@ -1,4 +1,5 @@
 pub mod citation;
+pub mod decision_zones;
 pub mod dense;
 pub mod france_juris;
 pub mod france_legi;

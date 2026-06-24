@@ -237,6 +237,36 @@ impl PisteClient {
     }
 
     pub fn judilibre_get(&self, path: &str) -> Result<Value, OfficialApiError> {
+        self.judilibre_get_with_query(path, &[])
+    }
+
+    /// Judilibre `/search` with query parameters (e.g. `query`, `operator`, `page_size`). ureq
+    /// percent-encodes each value.
+    pub fn judilibre_search_params(
+        &self,
+        params: &[(&str, &str)],
+    ) -> Result<Value, OfficialApiError> {
+        self.judilibre_get_with_query("/cassation/judilibre/v1.0/search", params)
+    }
+
+    /// Judilibre `/decision?id=…` — full decision text, official `zones`, and `visa`.
+    pub fn judilibre_decision(
+        &self,
+        provider_id: &str,
+        query: Option<&str>,
+    ) -> Result<Value, OfficialApiError> {
+        let mut params: Vec<(&str, &str)> = vec![("id", provider_id), ("resolve_references", "false")];
+        if let Some(query) = query {
+            params.push(("query", query));
+        }
+        self.judilibre_get_with_query("/cassation/judilibre/v1.0/decision", &params)
+    }
+
+    fn judilibre_get_with_query(
+        &self,
+        path: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Value, OfficialApiError> {
         let key_id = self
             .config
             .judilibre_key_id
@@ -248,11 +278,15 @@ impl PisteClient {
         let url = join_url(&self.config.api_base_url, path);
         let policy = self.retry;
         let response = send_with_retry(policy, || {
-            self.agent
+            let mut request = self
+                .agent
                 .get(&url)
                 .set("Accept", "application/json")
-                .set("KeyId", key_id)
-                .call()
+                .set("KeyId", key_id);
+            for (key, value) in params {
+                request = request.query(key, value);
+            }
+            request.call()
         })
         .map_err(official_api_error)?;
         response_json(response)
