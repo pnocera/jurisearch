@@ -122,7 +122,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
         "legi-cite:art609cpc",
         "ok",
         None,
-        Some("legifrance-search:609 code de procédure civile"),
+        Some("legifrance-search:sha256:0000000000000000000000000000000000000000000000000000000000000000"),
         None,
     )?;
     let still_pending: serde_json::Value = serde_json::from_str(&load_pending_citation_resolutions_json(

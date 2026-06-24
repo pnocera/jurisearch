@@ -394,10 +394,7 @@ impl PisteClient {
         let endpoint = "/dila/legifrance/lf-engine-app/search".to_owned();
         let url = join_url(&self.config.api_base_url, &endpoint);
         let request_body = body.to_string();
-        let fingerprint = format!(
-            "legifrance-search:{}",
-            body.get("query").and_then(Value::as_str).unwrap_or_default()
-        );
+        let fingerprint = legifrance_search_fingerprint(&request_body);
         let token = match self.legifrance_bearer_token() {
             Ok(token) => token,
             Err(error) => {
@@ -661,6 +658,18 @@ fn query_fingerprint(params: &[(&str, &str)]) -> String {
     parts.join("&")
 }
 
+/// Stable per-request fingerprint for an archived Legifrance `/search` exchange: a sha256 over the
+/// exact serialized request body. Body-shape-agnostic on purpose — the previous version read a now-absent
+/// top-level `query` field, so every real-contract (`recherche.champs[*]…`) request collapsed to the same
+/// empty `legifrance-search:` fingerprint, destroying the per-row audit/dedup signal.
+fn legifrance_search_fingerprint(request_body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(request_body.as_bytes());
+    let hex: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("legifrance-search:sha256:{hex}")
+}
+
 /// GET query params as a JSON object, for the archive's `request_json` column.
 fn query_params_json(params: &[(&str, &str)]) -> Value {
     Value::Object(
@@ -870,7 +879,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment, RetryPolicy};
+    use super::{
+        OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment, RetryPolicy,
+        legifrance_search_fingerprint,
+    };
     use jurisearch_core::error::ErrorCode;
     use std::time::Duration;
 
@@ -1232,14 +1244,33 @@ mod tests {
         let mut client = PisteClient::new(OfficialApiConfig::for_environment(
             PisteEnvironment::Sandbox,
         ));
-        let exchange = client.legifrance_search_exchange(&json!({ "query": "609 code de procédure civile" }));
+        // Real-contract body (no top-level `query` field) — exactly what the enrichment now sends.
+        let body = json!({
+            "fond": "CODE_DATE",
+            "recherche": { "champs": [{ "typeChamp": "ALL", "criteres": [
+                { "typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP", "valeur": "609 code de procédure civile" }
+            ]}]}
+        });
+        let exchange = client.legifrance_search_exchange(&body);
         assert_eq!(exchange.provider, "legifrance");
         assert_eq!(exchange.http_method, "POST");
         assert!(matches!(exchange.outcome, super::OfficialApiOutcome::UpstreamError));
         assert!(exchange.http_status.is_none(), "no HTTP request was made");
         assert!(exchange.response_json.is_none());
         assert!(exchange.error.is_some(), "the missing-credential reason is recorded");
-        assert!(exchange.request_fingerprint.contains("609 code de procédure civile"));
+        // Regression: the fingerprint must be a non-empty, body-derived sha256 — NOT the old empty
+        // `legifrance-search:` that resulted from reading a now-absent top-level `query` field.
+        assert!(exchange.request_fingerprint.starts_with("legifrance-search:sha256:"));
+        assert_ne!(exchange.request_fingerprint, "legifrance-search:");
+        // Stable & body-sensitive: same body -> same fingerprint; different body -> different fingerprint.
+        assert_eq!(exchange.request_fingerprint, legifrance_search_fingerprint(&body.to_string()));
+        let other = json!({ "fond": "CODE_DATE", "recherche": { "champs": [{ "typeChamp": "ALL",
+            "criteres": [{ "typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP", "valeur": "1147 code civil" }]}]}});
+        assert_ne!(
+            exchange.request_fingerprint,
+            legifrance_search_fingerprint(&other.to_string()),
+            "distinct queries must produce distinct fingerprints"
+        );
     }
 
     #[test]

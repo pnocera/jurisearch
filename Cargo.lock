@@ -906,6 +906,7 @@ dependencies = [
  "jurisearch-core",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "ureq",
 ]

@@ -4553,12 +4553,41 @@ fn parse_visa_citation(title: &str) -> Option<ParsedVisaCitation> {
     None
 }
 
+/// Cap (in chars) on the Legifrance `/search` `valeur`. The engine returns HTTP 500 on very long values
+/// (empirically anything past ~450 chars — pathological multi-article visa concatenations like
+/// "S16DELADÉCLARATION…ET695-9-22"); any real "article X of code Y" query is well under 100 chars. We
+/// truncate rather than skip so every citation still gets a real, archived attempt (the over-long garbage
+/// simply resolves to `not_found` instead of a noisy `upstream_error` + wasted `--retry-errors` reruns).
+const LEGIFRANCE_QUERY_MAX_CHARS: usize = 200;
+
+/// Narrow input hygiene for a Legifrance `/search` value: replace control chars with spaces, collapse
+/// whitespace runs, trim, and cap the length (see [`LEGIFRANCE_QUERY_MAX_CHARS`]). Deliberately does NOT
+/// rewrite article prefixes (`511-8`→`R.511-8`), split multi-article citations, or strip prose tails —
+/// those are `parse_visa_citation` concerns (the dominant recall lever) handled in a separate pass, not
+/// here. The unsanitized `canonical_query` stays on the resolution row, and the sanitized body is what
+/// the archive records, so the transform is auditable by comparing the two.
+fn sanitize_legifrance_query(query: &str) -> String {
+    let cleaned: String = query
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(LEGIFRANCE_QUERY_MAX_CHARS)
+        .collect()
+}
+
 /// Build the Legifrance `/search` request body for a code-article citation query. Uses the REAL
 /// Legifrance contract (`fond=CODE_DATE` + `recherche.champs` with `TOUS_LES_MOTS_DANS_UN_CHAMP` over
 /// all fields). The previous `{query, pageSize}` shape was rejected by the Legifrance engine with HTTP
 /// 500 ("Une exception non gérée"); `TOUS_LES_MOTS_DANS_UN_CHAMP` is also far more precise and ~1s vs
-/// ~10s for `UN_DES_MOTS` (validated against the live API). Our citations are all "code …" (collect
-/// skips non-code legislation), so `CODE_DATE` is the right fond; no date filter ⇒ current version.
+/// ~10s for `UN_DES_MOTS`, and beat separate `NUM_ARTICLE`+`TITLE` champs on a live 120-citation recall
+/// sample (validated against the live API). Our citations are all "code …" (collect skips non-code
+/// legislation), so `CODE_DATE` is the right fond; no date filter ⇒ current version. The value is run
+/// through [`sanitize_legifrance_query`] first to avoid the engine's HTTP-500-on-very-long-input.
 fn legifrance_code_search_body(query: &str) -> Value {
     json!({
         "fond": "CODE_DATE",
@@ -4573,7 +4602,7 @@ fn legifrance_code_search_body(query: &str) -> Value {
                 "operateur": "ET",
                 "criteres": [{
                     "typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP",
-                    "valeur": query,
+                    "valeur": sanitize_legifrance_query(query),
                     "operateur": "ET"
                 }]
             }]
@@ -11680,11 +11709,11 @@ fn apply_online_citation_confirmation(
     query: &str,
 ) -> Result<(), ErrorObject> {
     let mut client = PisteClient::new(OfficialApiConfig::from_env());
+    // Share the real-contract body builder with the enrichment path. The old inline `{query,pageSize}`
+    // shape was live-validated to return HTTP 500 from the Legifrance engine, so cite --online would have
+    // surfaced an online-check failure instead of a summary.
     let upstream = client
-        .legifrance_search(&json!({
-            "query": query,
-            "pageSize": 1,
-        }))
+        .legifrance_search(&legifrance_code_search_body(query))
         .map_err(|error| error.to_error_object())?;
     response["online"] = json!({
         "requested": true,
@@ -12068,6 +12097,38 @@ mod tests {
         assert_eq!(critere["typeRecherche"], "TOUS_LES_MOTS_DANS_UN_CHAMP");
         assert_eq!(critere["valeur"], "609 code de procédure civile");
         assert_eq!(body["recherche"]["champs"][0]["typeChamp"], "ALL");
+    }
+
+    #[test]
+    fn cite_online_shares_real_contract_body() {
+        // WARN#2 regression: cite --online (apply_online_citation_confirmation) now builds its Legifrance
+        // body via the shared legifrance_code_search_body, so the known-bad {query,pageSize} shape (live
+        // HTTP 500) cannot reappear on that user-facing path.
+        let body = legifrance_code_search_body("L. 121-1 du code de la consommation");
+        assert!(body.get("query").is_none(), "no top-level query (the bad cite --online shape)");
+        assert!(body.get("pageSize").is_none(), "no top-level pageSize (the bad cite --online shape)");
+        assert_eq!(body["fond"], "CODE_DATE");
+    }
+
+    #[test]
+    fn sanitize_legifrance_query_caps_length_and_collapses_whitespace() {
+        // Whitespace/control runs collapse to single spaces and trim (a clean citation is untouched).
+        assert_eq!(
+            sanitize_legifrance_query("  609 \t code de\nprocédure   civile  "),
+            "609 code de procédure civile"
+        );
+        // The HTTP-500 trigger: an over-long multi-article concatenation is capped to the safe max,
+        // so it reaches Legifrance as a (non-matching) 200 instead of a 500 / wasted upstream_error.
+        let huge = format!("{} code pénal", "L.123-456,".repeat(80)); // ~880 chars
+        let sanitized = sanitize_legifrance_query(&huge);
+        assert!(huge.chars().count() > LEGIFRANCE_QUERY_MAX_CHARS);
+        assert_eq!(sanitized.chars().count(), LEGIFRANCE_QUERY_MAX_CHARS);
+        // Truncation respects char boundaries (no panic on multi-byte input).
+        let accents = "é".repeat(LEGIFRANCE_QUERY_MAX_CHARS + 50);
+        assert_eq!(
+            sanitize_legifrance_query(&accents).chars().count(),
+            LEGIFRANCE_QUERY_MAX_CHARS
+        );
     }
 
     #[test]

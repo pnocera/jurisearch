@@ -3200,7 +3200,14 @@ fn cite_resolves_local_statutory_citations_and_strict_states() -> Result<(), Sto
         } else {
             assert!(request.starts_with("POST /dila/legifrance/lf-engine-app/search "));
             assert!(request.contains("\r\nAuthorization: Bearer token-123\r\n"));
-            assert!(request.contains(r#""query":"LEGIARTI999999999999""#));
+            // cite --online now shares the real-contract body builder: the query rides in the
+            // recherche champ `valeur` with `fond=CODE_DATE`, NOT the old HTTP-500 `{"query":…}` shape.
+            assert!(request.contains(r#""valeur":"LEGIARTI999999999999""#));
+            assert!(request.contains(r#""fond":"CODE_DATE""#));
+            assert!(
+                !request.contains(r#""query":"LEGIARTI999999999999""#),
+                "the old top-level {{query,pageSize}} body must not reappear"
+            );
             ok_json(r#"{"results":[]}"#)
         }
     });
