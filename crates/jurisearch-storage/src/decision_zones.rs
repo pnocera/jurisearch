@@ -75,6 +75,39 @@ SELECT coalesce((
     ))
 }
 
+/// Client-based variant of [`decision_resolution_metadata_json`] for worker threads that hold their own
+/// `postgres::Client` (the eager zone backfill), returning the same JSON shape. Parameterized on
+/// `document_id` (injection-safe).
+pub fn decision_resolution_metadata_with_client<C: GenericClient>(
+    client: &mut C,
+    document_id: &str,
+) -> Result<String, StorageError> {
+    let row = client
+        .query_one(
+            r#"
+SELECT coalesce((
+    SELECT jsonb_build_object(
+        'source_uid', source_uid,
+        'ecli', canonical_json->>'ecli',
+        'decision_date', valid_from::text,
+        'pourvoi', (
+            SELECT cn
+            FROM jsonb_array_elements_text(coalesce(canonical_json->'case_numbers', '[]'::jsonb)) AS cn
+            WHERE replace(replace(cn, '.', ''), ' ', '') ~ '^[0-9]{2}-[0-9]{4,6}$'
+            ORDER BY cn
+            LIMIT 1
+        )
+    )
+    FROM documents
+    WHERE document_id = $1 AND kind = 'decision'
+), 'null'::jsonb)::text;
+"#,
+            &[&document_id],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    Ok(row.get(0))
+}
+
 /// One row to upsert into `decision_zones`. `zones_json`/`raw_json` are stored as jsonb; `ttl_seconds`
 /// (when set) yields `expires_at = now() + ttl`.
 pub struct UpsertDecisionZones<'a> {

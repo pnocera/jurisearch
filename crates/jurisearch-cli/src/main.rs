@@ -46,8 +46,8 @@ use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
     citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
     decision_zones::{
-        UpsertDecisionZones, decision_resolution_metadata_json, decision_zones_json,
-        upsert_decision_zones,
+        UpsertDecisionZones, decision_resolution_metadata_with_client, decision_zones_json,
+        upsert_decision_zones_with_client,
     },
     dense::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
@@ -82,6 +82,7 @@ use jurisearch_storage::{
         inspect_document_json, related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
+    zone_units::{enrich_zone_candidates_json, zone_retrieval_coverage_json},
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -97,6 +98,12 @@ const LEGI_INGEST_TRANSACTION_BATCH_SIZE: usize = 128;
 const LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 const EMBED_CHUNKS_DEFAULT_BATCH_SIZE: usize = 32;
 const EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY: usize = 4;
+/// Conservative default for concurrent Judilibre requests during zone backfill (each decision is ~2
+/// calls; stay well under the live ~20 req/s burst limit). `--concurrency 1` is the deterministic
+/// sequential fallback.
+const ENRICH_ZONES_DEFAULT_CONCURRENCY: usize = 6;
+/// Candidate page size for the zone backfill keyset scan.
+const ENRICH_ZONES_PAGE_SIZE: u32 = 200;
 const PHASE1_EXTERNAL_BENCHMARK_ENV: &str = "JURISEARCH_PHASE1_EXTERNAL_BENCHMARK";
 const PHASE1_EXTERNAL_MIN_BSARD_DOCUMENTS: u64 = 22_000;
 const PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS: u64 = 200;
@@ -890,6 +897,23 @@ enum IngestSubcommand {
         /// Maximum concurrent embedding requests across the endpoint pool.
         #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY)]
         pool_concurrency: usize,
+    },
+    /// Eagerly backfill official Judilibre zones for Cour de cassation decisions into `decision_zones`
+    /// (the per-decision overlay that also powers `fetch --part --online`). Resumable; honors PISTE
+    /// rate limits via a conservative bounded concurrency. Source must be `cass` or `inca`.
+    EnrichZones {
+        /// Decision source family to enrich: `cass` (published) or `inca` (inédit).
+        #[arg(long)]
+        source: String,
+        /// Maximum decisions to attempt this run (omit to process the whole resolver-reachable set).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Refresh mode: also re-enrich decisions whose cache was fetched before this ISO timestamp.
+        #[arg(long)]
+        since: Option<String>,
+        /// Conservative bound on concurrent Judilibre requests (stay well under ~20 req/s).
+        #[arg(long, default_value_t = ENRICH_ZONES_DEFAULT_CONCURRENCY)]
+        concurrency: usize,
     },
     /// Rebuild LEGI article hierarchy from persisted metadata across the full index.
     BackfillLegiHierarchy,
@@ -3650,14 +3674,30 @@ fn part_block_from_cached_zones(cached: &Value, part: DecisionPart, zone_key: &s
 }
 
 /// Resolve a Cassation decision on Judilibre by pourvoi (+ date), fetch its zones, normalize and cache
-/// them, and return the cached row. Errors are cached and yield `Ok(None)` (never fail `fetch`).
+/// them, and return the cached row. Errors are cached and yield `Ok(None)` (never fail `fetch`). Thin
+/// wrapper that opens its own DB client + `PisteClient` and delegates to the thread-safe core, so the
+/// shipped `fetch --part --online` path is unchanged while the eager backfill can fan out workers.
 fn enrich_decision_from_judilibre(
     postgres: &ManagedPostgres,
     document_id: &str,
 ) -> Result<Option<Value>, ErrorObject> {
+    let mut db = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    let piste = PisteClient::new(OfficialApiConfig::from_env());
+    enrich_decision_from_judilibre_with_client(&mut db, &piste, document_id)
+}
+
+/// Thread-safe enrichment core: takes a caller-owned `postgres::Client` and `PisteClient` (no
+/// `&ManagedPostgres`), so eager-backfill workers can each hold their own connections. Identical
+/// behaviour to the wrapper above.
+fn enrich_decision_from_judilibre_with_client<C: postgres::GenericClient>(
+    db: &mut C,
+    piste: &PisteClient,
+    document_id: &str,
+) -> Result<Option<Value>, ErrorObject> {
     // Local resolution metadata: a parser-valid pourvoi, the decision date (= valid_from), source_uid.
     let meta: Value = serde_json::from_str(
-        &decision_resolution_metadata_json(postgres, document_id).map_err(storage_error_object)?,
+        &decision_resolution_metadata_with_client(db, document_id).map_err(storage_error_object)?,
     )
     .map_err(|error| dependency_unavailable(error.to_string()))?;
 
@@ -3666,41 +3706,44 @@ fn enrich_decision_from_judilibre(
     let decision_date = meta["decision_date"].as_str();
     let Some(pourvoi) = meta["pourvoi"].as_str() else {
         // No parser-valid pourvoi -> cannot resolve on Judilibre; cache as unsupported.
-        cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "unsupported", None)?;
+        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "unsupported", None)?;
         return Ok(None);
     };
 
-    let client = PisteClient::new(OfficialApiConfig::from_env());
     let normalized_pourvoi: String = pourvoi.chars().filter(|c| !matches!(c, '.' | ' ')).collect();
 
     // Resolve: search by pourvoi (free-text exact); accept the result whose normalized number matches
     // and whose date matches when we have one.
-    let provider_id = match client.judilibre_search_params(&[
+    let provider_id = match piste.judilibre_search_params(&[
         ("query", pourvoi),
         ("operator", "exact"),
         ("page_size", "10"),
     ]) {
         Ok(search) => find_matching_judilibre_id(&search, &normalized_pourvoi, decision_date),
         Err(error) => {
-            cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
+            cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
             return Ok(None);
         }
     };
     let Some(provider_id) = provider_id else {
-        cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "not_found", None)?;
+        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "not_found", None)?;
         return Ok(None);
     };
 
-    let decision = match client.judilibre_decision(&provider_id, None) {
+    let decision = match piste.judilibre_decision(&provider_id, None) {
         Ok(decision) => decision,
         Err(error) => {
-            cache_zone_status(postgres, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
+            cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
             return Ok(None);
         }
     };
 
     let (zones_json, valid_zones) = normalize_judilibre_zones(&decision);
     let status = if valid_zones { "ok" } else { "invalid_offsets" };
+    // Deterministic content hash over the resolved snapshot (Judilibre text + normalized zones +
+    // provider id + update date). Set for ok/invalid_offsets rows so eager backfill rows are derivable
+    // into zone_units and refreshes can detect change; negative rows (cache_zone_status) stay hashless.
+    let text_hash = zone_text_hash(&decision, &zones_json, provider_id.as_str());
     let ttl_days: i64 = env_i64("JURISEARCH_JUDILIBRE_ZONE_TTL_DAYS", 30);
     let row = UpsertDecisionZones {
         document_id,
@@ -3711,14 +3754,14 @@ fn enrich_decision_from_judilibre(
         status,
         upstream_update_date: decision["update_date"].as_str(),
         upstream_decision_date: decision["decision_date"].as_str(),
-        text_hash: None,
+        text_hash: Some(text_hash.as_str()),
         offset_unit: Some("char"),
         zones_json: &zones_json,
         raw_json: &decision,
         error: None,
         ttl_seconds: Some(ttl_days.max(0) * 86_400),
     };
-    upsert_decision_zones(postgres, &row).map_err(storage_error_object)?;
+    upsert_decision_zones_with_client(db, &row).map_err(storage_error_object)?;
     if status != "ok" {
         return Ok(None);
     }
@@ -3801,10 +3844,35 @@ fn normalize_judilibre_zones(decision: &Value) -> (Value, bool) {
     (Value::Object(zones), any_valid)
 }
 
+/// Deterministic content hash identifying a resolved zone snapshot, stored as `decision_zones.text_hash`
+/// so derivation (`zone_units`) and refresh can detect change. Stable over the Judilibre `text`, the
+/// normalized zones, the provider decision id, and the upstream `update_date` (NUL-separated so field
+/// boundaries can't collide). Same `sha256:<hex>` shape as the ingest `source_payload_hash`.
+fn zone_text_hash(decision: &Value, zones_json: &Value, provider_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(decision["text"].as_str().unwrap_or_default().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(zones_json.to_string().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(provider_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(
+        decision["update_date"]
+            .as_str()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("sha256:{hex}")
+}
+
 /// Cache a non-`ok` zone status (unsupported / not_found / upstream_error) so repeat fetches do not
 /// re-hit the API. Negative results get the negative TTL; upstream errors are not cached long.
-fn cache_zone_status(
-    postgres: &ManagedPostgres,
+/// Client-based core so backfill workers reuse their own connection.
+fn cache_zone_status_with_client<C: postgres::GenericClient>(
+    db: &mut C,
     document_id: &str,
     source_uid: &str,
     ecli: Option<&str>,
@@ -3835,7 +3903,7 @@ fn cache_zone_status(
         error,
         ttl_seconds,
     };
-    upsert_decision_zones(postgres, &row).map_err(storage_error_object)
+    upsert_decision_zones_with_client(db, &row).map_err(storage_error_object)
 }
 
 fn env_i64(name: &str, default: i64) -> i64 {
@@ -4319,6 +4387,27 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
             }
             match embed_chunks_payload(index_dir, limit, index_lists, batch_size, pool_concurrency)
             {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
+        Some(IngestSubcommand::EnrichZones {
+            source,
+            limit,
+            since,
+            concurrency,
+        }) => {
+            if limit == Some(0) {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest enrich-zones --limit must be at least 1 when provided",
+                ));
+            }
+            if concurrency == 0 {
+                return emit_error(ErrorObject::bad_input(
+                    "ingest enrich-zones --concurrency must be at least 1",
+                ));
+            }
+            match enrich_zones_payload(index_dir, &source, limit, since.as_deref(), concurrency) {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
             }
@@ -5935,6 +6024,164 @@ fn replay_snapshot_cache_json(source: &str, snapshot: &ReplaySnapshotReport) -> 
         "publisher_edges": snapshot.publisher_edges.count,
         "embeddings": snapshot.embeddings.count,
         "manifests": snapshot.manifests.count
+    })
+}
+
+/// Outcome of a single decision enrichment attempt, for backfill accounting.
+#[derive(Clone, Copy)]
+enum ZoneEnrichOutcome {
+    /// Resolved with official zones (a fresh `ok` `decision_zones` row).
+    Official,
+    /// No official zone (not_found / unsupported / invalid_offsets) — cached, not an error.
+    Fallback,
+    /// A storage/transport failure during enrichment (logged, never aborts the backfill).
+    Error,
+}
+
+/// Eagerly backfill official Judilibre zones for a Cassation source (`cass`/`inca`) into
+/// `decision_zones`, paging the resolver-reachable candidate set and resolving each decision via the
+/// shipped `enrich_decision_from_judilibre` (now `text_hash`-populating). Resumable: every attempt
+/// writes a `decision_zones` row, so a re-run skips fresh rows. Conservative bounded concurrency keeps
+/// the Judilibre request rate well under the live limit.
+fn enrich_zones_payload(
+    index_dir: Option<&Path>,
+    source: &str,
+    limit: Option<u32>,
+    since: Option<&str>,
+    concurrency: usize,
+) -> Result<Value, ErrorObject> {
+    if !matches!(source, "cass" | "inca") {
+        return Err(ErrorObject::bad_input(
+            "ingest enrich-zones --source must be 'cass' or 'inca' (Judilibre covers only Cour de cassation)",
+        ));
+    }
+    // Preflight: zone enrichment resolves decisions on Judilibre (KeyId auth), so a PISTE API key is
+    // required up front rather than failing every decision into an `upstream_error` cache row.
+    if std::env::var("PISTE_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        return Err(dependency_unavailable(
+            "PISTE_API_KEY is not set; zone enrichment requires Judilibre (PISTE) API access",
+        ));
+    }
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+
+    let mut considered: u64 = 0;
+    let mut official: u64 = 0;
+    let mut fallback: u64 = 0;
+    let mut errors: u64 = 0;
+    let mut cursor: Option<String> = None;
+    loop {
+        // Respect --limit across pages.
+        let page_limit = match limit {
+            Some(limit) => {
+                let done = u32::try_from(considered).unwrap_or(u32::MAX);
+                if done >= limit {
+                    break;
+                }
+                (limit - done).min(ENRICH_ZONES_PAGE_SIZE)
+            }
+            None => ENRICH_ZONES_PAGE_SIZE,
+        };
+        let page_json =
+            enrich_zone_candidates_json(&postgres, source, cursor.as_deref(), since, page_limit)
+                .map_err(storage_error_object)?;
+        let page: Value = serde_json::from_str(&page_json)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+        let doc_ids: Vec<String> = page["candidates"]
+            .as_array()
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|candidate| candidate["document_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if doc_ids.is_empty() {
+            break;
+        }
+        for outcome in enrich_zone_page_concurrently(&postgres, &doc_ids, concurrency) {
+            considered += 1;
+            match outcome {
+                ZoneEnrichOutcome::Official => official += 1,
+                ZoneEnrichOutcome::Fallback => fallback += 1,
+                ZoneEnrichOutcome::Error => errors += 1,
+            }
+        }
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let coverage: Value =
+        serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
+            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    Ok(json!({
+        "schema_version": SCHEMA_VERSION,
+        "command": "ingest enrich-zones",
+        "index_dir": index_dir.display().to_string(),
+        "source": source,
+        "since": since,
+        "concurrency": concurrency,
+        "considered": considered,
+        "official_ok": official,
+        "fallback": fallback,
+        "errors": errors,
+        "coverage": coverage,
+    }))
+}
+
+/// Enrich one page of decisions with bounded concurrency (codex-recommended model (b)): one owning
+/// `ManagedPostgres` stays on the main thread; each scoped worker opens its OWN `postgres::Client` +
+/// `PisteClient` from the `Send` connection string and resolves a contiguous slice via the thread-safe
+/// core. A worker that cannot even connect, or panics, drops only its slice from accounting (counted as
+/// errors) rather than aborting the whole backfill.
+fn enrich_zone_page_concurrently(
+    postgres: &ManagedPostgres,
+    doc_ids: &[String],
+    concurrency: usize,
+) -> Vec<ZoneEnrichOutcome> {
+    let workers = concurrency.max(1).min(doc_ids.len().max(1));
+    let connection_string = postgres.connection_string();
+    let mut groups: Vec<Vec<&str>> = (0..workers).map(|_| Vec::new()).collect();
+    for (index, doc_id) in doc_ids.iter().enumerate() {
+        groups[index % workers].push(doc_id.as_str());
+    }
+    std::thread::scope(|scope| {
+        let connection_string = &connection_string;
+        let handles: Vec<_> = groups
+            .into_iter()
+            .map(|group| {
+                scope.spawn(move || {
+                    let mut db =
+                        match postgres::Client::connect(connection_string, postgres::NoTls) {
+                            Ok(db) => db,
+                            // Whole slice fails to connect -> count as errors, don't abort the run.
+                            Err(_) => return vec![ZoneEnrichOutcome::Error; group.len()],
+                        };
+                    let piste = PisteClient::new(OfficialApiConfig::from_env());
+                    group
+                        .into_iter()
+                        .map(|doc_id| {
+                            match enrich_decision_from_judilibre_with_client(&mut db, &piste, doc_id)
+                            {
+                                Ok(Some(_)) => ZoneEnrichOutcome::Official,
+                                Ok(None) => ZoneEnrichOutcome::Fallback,
+                                Err(_) => ZoneEnrichOutcome::Error,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap_or_default())
+            .collect()
     })
 }
 
@@ -10366,6 +10613,24 @@ mod tests {
             "src",
         );
         assert!(!phase2_benchmark_artifact_errors(&few_citations).is_empty());
+    }
+
+    #[test]
+    fn zone_text_hash_is_deterministic_and_change_sensitive() {
+        // T2.1: the snapshot hash must be stable for identical inputs and change when the text or
+        // update_date changes (it keys derivation/refresh of zone_units).
+        let decision = json!({ "text": "MOTIVATIONS de la cour.", "update_date": "2024-01-01" });
+        let zones = json!({ "motivations": [{ "start": 0, "end": 11, "text": "MOTIVATIONS" }] });
+        let h1 = zone_text_hash(&decision, &zones, "jdl-1");
+        let h2 = zone_text_hash(&decision, &zones, "jdl-1");
+        assert_eq!(h1, h2, "same inputs -> same hash");
+        assert!(h1.starts_with("sha256:"));
+
+        let other_text = json!({ "text": "CHANGED.", "update_date": "2024-01-01" });
+        assert_ne!(h1, zone_text_hash(&other_text, &zones, "jdl-1"), "text change -> new hash");
+        let other_date = json!({ "text": "MOTIVATIONS de la cour.", "update_date": "2024-02-02" });
+        assert_ne!(h1, zone_text_hash(&other_date, &zones, "jdl-1"), "update_date change -> new hash");
+        assert_ne!(h1, zone_text_hash(&decision, &zones, "jdl-2"), "provider id change -> new hash");
     }
 
     #[test]
