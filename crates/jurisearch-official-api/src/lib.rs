@@ -5,7 +5,7 @@ use std::{
 
 use jurisearch_core::error::{ErrorCode, ErrorObject};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -262,6 +262,82 @@ impl PisteClient {
         self.judilibre_get_with_query("/cassation/judilibre/v1.0/decision", &params)
     }
 
+    /// `production` / `sandbox` — for the durable archive's `api_environment` column.
+    #[must_use]
+    pub fn api_environment(&self) -> &'static str {
+        match self.config.environment {
+            PisteEnvironment::Production => "production",
+            PisteEnvironment::Sandbox => "sandbox",
+        }
+    }
+
+    /// Judilibre `/search` as an archivable exchange — captures the raw response (success OR error) so
+    /// it can be persisted to `official_api_responses`. Never returns an `Err`: a missing credential or
+    /// transport failure becomes an `UpstreamError` exchange with the reason in `error`.
+    pub fn judilibre_search_params_exchange(&self, params: &[(&str, &str)]) -> OfficialApiExchange {
+        let endpoint = "/cassation/judilibre/v1.0/search".to_owned();
+        let url = join_url(&self.config.api_base_url, &endpoint);
+        let request_json = json!({ "params": query_params_json(params) });
+        let fingerprint = query_fingerprint(params);
+        let Some(key_id) = self
+            .config
+            .judilibre_key_id
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+        else {
+            return missing_credential_exchange("judilibre", endpoint, "GET", url, request_json, fingerprint);
+        };
+        let result = send_with_retry(self.retry, || {
+            let mut request = self
+                .agent
+                .get(&url)
+                .set("Accept", "application/json")
+                .set("KeyId", key_id);
+            for (key, value) in params {
+                request = request.query(key, value);
+            }
+            request.call()
+        });
+        build_exchange("judilibre", endpoint, "GET", url, request_json, None, fingerprint, result)
+    }
+
+    /// Judilibre `/decision?id=…` as an archivable exchange (see [`Self::judilibre_search_params_exchange`]).
+    pub fn judilibre_decision_exchange(
+        &self,
+        provider_id: &str,
+        query: Option<&str>,
+    ) -> OfficialApiExchange {
+        let endpoint = "/cassation/judilibre/v1.0/decision".to_owned();
+        let url = join_url(&self.config.api_base_url, &endpoint);
+        let mut params: Vec<(&str, &str)> =
+            vec![("id", provider_id), ("resolve_references", "false")];
+        if let Some(query) = query {
+            params.push(("query", query));
+        }
+        let request_json = json!({ "params": query_params_json(&params) });
+        let fingerprint = query_fingerprint(&params);
+        let Some(key_id) = self
+            .config
+            .judilibre_key_id
+            .as_deref()
+            .filter(|key| !key.trim().is_empty())
+        else {
+            return missing_credential_exchange("judilibre", endpoint, "GET", url, request_json, fingerprint);
+        };
+        let result = send_with_retry(self.retry, || {
+            let mut request = self
+                .agent
+                .get(&url)
+                .set("Accept", "application/json")
+                .set("KeyId", key_id);
+            for (key, value) in &params {
+                request = request.query(key, value);
+            }
+            request.call()
+        });
+        build_exchange("judilibre", endpoint, "GET", url, request_json, None, fingerprint, result)
+    }
+
     fn judilibre_get_with_query(
         &self,
         path: &str,
@@ -425,6 +501,149 @@ impl OfficialApiError {
                 }
             }
         }
+    }
+}
+
+/// Transport-level outcome of an archived official-API exchange. The DECISION-level status
+/// (not_found / invalid_offsets / unsupported) is determined by the caller after parsing and lives in
+/// `decision_zones`; this is purely "did we get a parseable HTTP response".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfficialApiOutcome {
+    /// HTTP success with a JSON-parseable body.
+    Ok,
+    /// HTTP error (4xx/5xx, incl. 429 after retries) or a transport failure.
+    UpstreamError,
+    /// HTTP success but the body did not parse as JSON.
+    ParseError,
+}
+
+impl OfficialApiOutcome {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::UpstreamError => "upstream_error",
+            Self::ParseError => "parse_error",
+        }
+    }
+}
+
+/// A captured official-API exchange, preserved on BOTH success and error so the durable archive
+/// (`official_api_responses`, migration v16) is complete — including raw error bodies the rich
+/// `OfficialApiError` summarization would otherwise truncate or drop.
+#[derive(Debug, Clone)]
+pub struct OfficialApiExchange {
+    pub provider: &'static str,
+    pub endpoint: String,
+    pub http_method: &'static str,
+    pub request_url: String,
+    pub request_json: Value,
+    pub request_body: Option<String>,
+    pub request_fingerprint: String,
+    pub http_status: Option<u16>,
+    pub response_body: String,
+    pub response_json: Option<Value>,
+    pub outcome: OfficialApiOutcome,
+    pub error: Option<String>,
+}
+
+/// Build an exchange envelope from the (post-retry) transport result, consuming the response to capture
+/// its raw body. Classifies into `Ok` (parseable JSON) / `ParseError` (success, non-JSON body) /
+/// `UpstreamError` (HTTP error or transport failure); a parsed `response_json` is kept whenever the body
+/// is valid JSON, even on error.
+#[allow(clippy::too_many_arguments)]
+fn build_exchange(
+    provider: &'static str,
+    endpoint: String,
+    http_method: &'static str,
+    request_url: String,
+    request_json: Value,
+    request_body: Option<String>,
+    request_fingerprint: String,
+    result: Result<ureq::Response, ureq::Error>,
+) -> OfficialApiExchange {
+    let (http_status, response_body, transport_error) = match result {
+        Ok(response) => {
+            let status = response.status();
+            (Some(status), response.into_string().unwrap_or_default(), None)
+        }
+        Err(ureq::Error::Status(status, response)) => (
+            Some(status),
+            response.into_string().unwrap_or_default(),
+            Some(format!("upstream returned HTTP {status}")),
+        ),
+        Err(other) => (None, String::new(), Some(other.to_string())),
+    };
+    let parsed = serde_json::from_str::<Value>(&response_body).ok();
+    let (outcome, error) = if let Some(error) = transport_error {
+        (OfficialApiOutcome::UpstreamError, Some(error))
+    } else if parsed.is_some() {
+        (OfficialApiOutcome::Ok, None)
+    } else {
+        (
+            OfficialApiOutcome::ParseError,
+            Some("upstream response body was not valid JSON".to_owned()),
+        )
+    };
+    OfficialApiExchange {
+        provider,
+        endpoint,
+        http_method,
+        request_url,
+        request_json,
+        request_body,
+        request_fingerprint,
+        http_status,
+        response_body,
+        response_json: parsed,
+        outcome,
+        error,
+    }
+}
+
+/// Readable, bounded fingerprint of a GET query (sorted) for grouping re-fetches in the archive.
+fn query_fingerprint(params: &[(&str, &str)]) -> String {
+    let mut parts: Vec<String> = params
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    parts.sort();
+    parts.join("&")
+}
+
+/// GET query params as a JSON object, for the archive's `request_json` column.
+fn query_params_json(params: &[(&str, &str)]) -> Value {
+    Value::Object(
+        params
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), Value::String((*value).to_owned())))
+            .collect(),
+    )
+}
+
+/// An exchange that never left the process because a required credential was missing — still archived
+/// as an `UpstreamError` so the attempt is durably accounted for.
+fn missing_credential_exchange(
+    provider: &'static str,
+    endpoint: String,
+    http_method: &'static str,
+    request_url: String,
+    request_json: Value,
+    request_fingerprint: String,
+) -> OfficialApiExchange {
+    OfficialApiExchange {
+        provider,
+        endpoint,
+        http_method,
+        request_url,
+        request_json,
+        request_body: None,
+        request_fingerprint,
+        http_status: None,
+        response_body: String::new(),
+        response_json: None,
+        outcome: OfficialApiOutcome::UpstreamError,
+        error: Some(format!("missing {provider} (PISTE) credential")),
     }
 }
 

@@ -41,7 +41,9 @@ use jurisearch_ingest::{
     juri::{JuriParseError, ParsedJuriXml, parse_juri_member},
     legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
 };
-use jurisearch_official_api::{OfficialApiConfig, PisteClient};
+use jurisearch_official_api::{
+    OfficialApiConfig, OfficialApiExchange, OfficialApiOutcome, PisteClient,
+};
 use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
     citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
@@ -69,6 +71,7 @@ use jurisearch_storage::{
     },
     france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     migrations::CURRENT_SCHEMA_VERSION,
+    official_api_archive::{InsertOfficialApiResponse, insert_official_api_response_with_client},
     projection::{
         ChunkEmbeddingInsert, DocumentProjectionStatements, LegiHierarchyBackfillScope,
         LegiMetadataRoot, LegiProjectionStatements, backfill_legi_article_hierarchy_from_metadata,
@@ -4287,6 +4290,94 @@ fn part_block_from_cached_zones(cached: &Value, part: DecisionPart, zone_key: &s
 /// them, and return the cached row. Errors are cached and yield `Ok(None)` (never fail `fetch`). Thin
 /// wrapper that opens its own DB client + `PisteClient` and delegates to the thread-safe core, so the
 /// shipped `fetch --part --online` path is unchanged while the eager backfill can fan out workers.
+/// `sha256:<hex>` of a UTF-8 body, for the archive's `response_body_sha256` integrity column.
+fn sha256_hex(data: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data.as_bytes());
+    let hex: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("sha256:{hex}")
+}
+
+/// Append one captured official-API exchange to the durable `official_api_responses` archive (v16).
+/// Archive writes are hard errors: a decision is not "touched successfully" unless its raw upstream
+/// evidence was persisted (the user requirement: keep ALL API call results).
+fn archive_exchange<C: postgres::GenericClient>(
+    db: &mut C,
+    exchange: &OfficialApiExchange,
+    api_environment: &str,
+    subject_document_id: Option<&str>,
+    subject_source_uid: Option<&str>,
+    provider_object_id: Option<&str>,
+    citation_key: Option<&str>,
+) -> Result<i64, ErrorObject> {
+    let response_body_sha256 = sha256_hex(&exchange.response_body);
+    insert_official_api_response_with_client(
+        db,
+        &InsertOfficialApiResponse {
+            provider: exchange.provider,
+            api_environment,
+            endpoint: &exchange.endpoint,
+            http_method: exchange.http_method,
+            subject_document_id,
+            subject_source_uid,
+            provider_object_id,
+            citation_key,
+            request_fingerprint: &exchange.request_fingerprint,
+            request_url: Some(&exchange.request_url),
+            request_json: &exchange.request_json,
+            request_body: exchange.request_body.as_deref(),
+            outcome: exchange.outcome.as_str(),
+            http_status: exchange.http_status.map(i32::from),
+            response_body: &exchange.response_body,
+            response_json: exchange.response_json.as_ref(),
+            response_body_sha256: &response_body_sha256,
+            error: exchange.error.as_deref(),
+            run_id: None,
+            code_version: Some(CLI_CODE_VERSION),
+        },
+    )
+    .map_err(storage_error_object)
+}
+
+/// Durable accounting for a decision we touched but could NOT request (no parser-valid pourvoi): a
+/// `provider='local'`, `http_method='LOCAL'` archive row, so every touched decision is recorded.
+fn archive_local_unsupported<C: postgres::GenericClient>(
+    db: &mut C,
+    document_id: &str,
+    source_uid: &str,
+    api_environment: &str,
+) -> Result<(), ErrorObject> {
+    let empty = json!({});
+    insert_official_api_response_with_client(
+        db,
+        &InsertOfficialApiResponse {
+            provider: "local",
+            api_environment,
+            endpoint: "judilibre:unsupported-no-pourvoi",
+            http_method: "LOCAL",
+            subject_document_id: Some(document_id),
+            subject_source_uid: Some(source_uid),
+            provider_object_id: None,
+            citation_key: None,
+            request_fingerprint: "local:unsupported-no-pourvoi",
+            request_url: None,
+            request_json: &empty,
+            request_body: None,
+            outcome: "unsupported",
+            http_status: None,
+            response_body: "",
+            response_json: None,
+            response_body_sha256: &sha256_hex(""),
+            error: Some("no parser-valid pourvoi; not resolvable on Judilibre"),
+            run_id: None,
+            code_version: Some(CLI_CODE_VERSION),
+        },
+    )
+    .map(|_| ())
+    .map_err(storage_error_object)
+}
+
 fn enrich_decision_from_judilibre(
     postgres: &ManagedPostgres,
     document_id: &str,
@@ -4314,8 +4405,11 @@ fn enrich_decision_from_judilibre_with_client<C: postgres::GenericClient>(
     let source_uid = meta["source_uid"].as_str().unwrap_or_default();
     let ecli = meta["ecli"].as_str();
     let decision_date = meta["decision_date"].as_str();
+    let api_environment = piste.api_environment();
     let Some(pourvoi) = meta["pourvoi"].as_str() else {
-        // No parser-valid pourvoi -> cannot resolve on Judilibre; cache as unsupported.
+        // No parser-valid pourvoi -> cannot even request Judilibre. Archive a durable 'local' accounting
+        // row (so every touched decision is recorded) and cache as unsupported.
+        archive_local_unsupported(db, document_id, source_uid, api_environment)?;
         cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "unsupported", None)?;
         return Ok(None);
     };
@@ -4323,37 +4417,44 @@ fn enrich_decision_from_judilibre_with_client<C: postgres::GenericClient>(
     let normalized_pourvoi: String = pourvoi.chars().filter(|c| !matches!(c, '.' | ' ')).collect();
 
     // Resolve: search by pourvoi (free-text exact); accept the result whose normalized number matches
-    // and whose date matches when we have one.
-    let provider_id = match piste.judilibre_search_params(&[
+    // and whose date matches when we have one. Archive the raw /search response either way.
+    let search_exchange = piste.judilibre_search_params_exchange(&[
         ("query", pourvoi),
         ("operator", "exact"),
         ("page_size", "10"),
-    ]) {
-        Ok(search) => find_matching_judilibre_id(&search, &normalized_pourvoi, decision_date),
-        Err(error) => {
-            cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
-            return Ok(None);
-        }
-    };
+    ]);
+    archive_exchange(db, &search_exchange, api_environment, Some(document_id), Some(source_uid), None, None)?;
+    if search_exchange.outcome != OfficialApiOutcome::Ok {
+        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", search_exchange.error.as_deref())?;
+        return Ok(None);
+    }
+    let provider_id = search_exchange
+        .response_json
+        .as_ref()
+        .and_then(|search| find_matching_judilibre_id(search, &normalized_pourvoi, decision_date));
     let Some(provider_id) = provider_id else {
         cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "not_found", None)?;
         return Ok(None);
     };
 
-    let decision = match piste.judilibre_decision(&provider_id, None) {
-        Ok(decision) => decision,
-        Err(error) => {
-            cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", Some(&error.to_string()))?;
-            return Ok(None);
-        }
+    // Fetch the full decision; archive the raw /decision response either way.
+    let decision_exchange = piste.judilibre_decision_exchange(&provider_id, None);
+    archive_exchange(db, &decision_exchange, api_environment, Some(document_id), Some(source_uid), Some(provider_id.as_str()), None)?;
+    if decision_exchange.outcome != OfficialApiOutcome::Ok {
+        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", decision_exchange.error.as_deref())?;
+        return Ok(None);
+    }
+    let Some(decision) = decision_exchange.response_json.as_ref() else {
+        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", Some("decision response missing JSON body"))?;
+        return Ok(None);
     };
 
-    let (zones_json, valid_zones) = normalize_judilibre_zones(&decision);
+    let (zones_json, valid_zones) = normalize_judilibre_zones(decision);
     let status = if valid_zones { "ok" } else { "invalid_offsets" };
     // Deterministic content hash over the resolved snapshot (Judilibre text + normalized zones +
     // provider id + update date). Set for ok/invalid_offsets rows so eager backfill rows are derivable
     // into zone_units and refreshes can detect change; negative rows (cache_zone_status) stay hashless.
-    let text_hash = zone_text_hash(&decision, &zones_json, provider_id.as_str());
+    let text_hash = zone_text_hash(decision, &zones_json, provider_id.as_str());
     let ttl_days: i64 = env_i64("JURISEARCH_JUDILIBRE_ZONE_TTL_DAYS", 30);
     let row = UpsertDecisionZones {
         document_id,
@@ -4367,7 +4468,7 @@ fn enrich_decision_from_judilibre_with_client<C: postgres::GenericClient>(
         text_hash: Some(text_hash.as_str()),
         offset_unit: Some("char"),
         zones_json: &zones_json,
-        raw_json: &decision,
+        raw_json: decision,
         error: None,
         ttl_seconds: Some(ttl_days.max(0) * 86_400),
     };

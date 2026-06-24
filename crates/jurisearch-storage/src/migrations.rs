@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 15;
+pub const CURRENT_SCHEMA_VERSION: i32 = 16;
 
 struct Migration {
     version: i32,
@@ -574,6 +574,63 @@ WITH (
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 15), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 16,
+        name: "official_api_responses_archive",
+        // Durable, append-only archive of EVERY official-API exchange (Judilibre /search + /decision,
+        // Legifrance search, and 'local' no-request accounting). SEPARATE from the TTL'd `decision_zones`
+        // cache: `decision_zones` is latest-cache state that can expire/refresh/be invalidated, whereas
+        // this table is permanent provenance/evidence — quota-limited PISTE responses we never want to
+        // re-fetch or lose. Deliberately NO FK to `documents` (durability over relational cleanliness:
+        // the archive must survive cache invalidation, index repair, or document churn). Stores the raw
+        // response body text (byte-faithful) AND the parsed jsonb (for querying) AND a sha256 of the body.
+        sql: r#"
+CREATE TABLE IF NOT EXISTS official_api_responses (
+    response_id bigserial PRIMARY KEY,
+    provider text NOT NULL CHECK (provider IN ('judilibre','legifrance','local')),
+    api_environment text NOT NULL DEFAULT 'production',
+    endpoint text NOT NULL,
+    http_method text NOT NULL CHECK (http_method IN ('GET','POST','LOCAL')),
+    subject_document_id text,
+    subject_source_uid text,
+    provider_object_id text,
+    citation_key text,
+    request_fingerprint text NOT NULL,
+    request_url text,
+    request_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    request_body text,
+    outcome text NOT NULL CHECK (outcome IN ('ok','not_found','unsupported','upstream_error','parse_error')),
+    http_status integer,
+    response_body text NOT NULL DEFAULT '',
+    response_json jsonb,
+    response_body_sha256 text NOT NULL,
+    error text,
+    run_id text,
+    code_version text,
+    fetched_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS official_api_responses_subject_idx
+ON official_api_responses (subject_document_id, fetched_at DESC);
+
+CREATE INDEX IF NOT EXISTS official_api_responses_provider_request_idx
+ON official_api_responses (provider, endpoint, request_fingerprint, fetched_at DESC);
+
+CREATE INDEX IF NOT EXISTS official_api_responses_provider_object_idx
+ON official_api_responses (provider, provider_object_id, fetched_at DESC)
+WHERE provider_object_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS official_api_responses_citation_key_idx
+ON official_api_responses (citation_key, fetched_at DESC)
+WHERE citation_key IS NOT NULL;
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 16), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

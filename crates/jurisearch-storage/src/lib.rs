@@ -5,6 +5,7 @@ pub mod france_juris;
 pub mod france_legi;
 pub mod ingest_accounting;
 pub mod migrations;
+pub mod official_api_archive;
 pub mod projection;
 pub mod retrieval;
 pub mod runtime;

@@ -99,7 +99,7 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
     let schema = postgres.execute_sql(
         "SELECT (value->>'schema_version') FROM index_manifest WHERE key = 'schema';",
     )?;
-    assert_eq!(schema.trim(), "15");
+    assert_eq!(schema.trim(), "16");
 
     let zones = r#"{"motivations":[{"start":0,"end":5,"text":"motif un"},{"start":6,"end":10,"text":"motif deux"}],"moyens":[{"start":0,"end":4,"text":"moyen"}],"dispositif":[]}"#;
     seed_decision(
