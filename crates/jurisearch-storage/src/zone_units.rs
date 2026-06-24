@@ -97,6 +97,17 @@ pub fn replace_zone_units_for_document(
     document_id: &str,
     rows: &[ZoneUnitRow<'_>],
 ) -> Result<(), StorageError> {
+    // Defensive: every row must belong to the document being replaced — otherwise a caller bug could
+    // clear document A's units and insert document B's in one transaction (the units' own UNIQUE is on
+    // (document_id, zone, fragment_index), which would not catch a foreign document_id).
+    if let Some(foreign) = rows.iter().find(|row| row.document_id != document_id) {
+        return Err(StorageError::Projection {
+            message: format!(
+                "replace_zone_units_for_document: row for `{}` does not match document `{document_id}`",
+                foreign.document_id
+            ),
+        });
+    }
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
@@ -146,11 +157,14 @@ pub fn replace_zone_units_for_document(
     Ok(())
 }
 
-/// Page the decisions whose `zone_units` need (re)deriving: a fresh `ok` `decision_zones` row with a
-/// non-null `text_hash` (the BLOCKER-1 invariant — NULL-hash rows are re-enriched first, never derived)
-/// that either has no units yet OR whose units' `text_hash`/`zone_unit_builder_version` are stale vs the
-/// row and the current `builder_version`. `rebuild=true` re-derives every `ok` row regardless of unit
-/// state. Keyset paging on `document_id`. Returns
+/// Page the decisions whose `zone_units` need (re)deriving: a NON-EXPIRED `ok` `decision_zones` row
+/// with a non-null `text_hash` (the BLOCKER-1 invariant — NULL-hash rows are re-enriched first, never
+/// derived) for a resolver-reachable Cour de cassation decision (kind=decision, source cass/inca,
+/// parser-valid pourvoi — the same scope as enrichment, so a stray/foreign `ok` row can never become
+/// units), that either has no units yet OR whose units' `text_hash`/`zone_unit_builder_version` are
+/// stale vs the row and the current `builder_version`. Expired rows are left to the refresh pass (never
+/// derived stale). `rebuild=true` re-derives every eligible `ok` row regardless of unit state. Keyset
+/// paging on `document_id`. Returns
 /// `{ "candidates": [{document_id, source, text_hash, zones}], "next_cursor": <last id|null> }` where
 /// `zones` is the `decision_zones.zones_json` object (the CLI parses fragments from it).
 pub fn load_derivable_decision_zones_json(
@@ -184,6 +198,10 @@ WITH page AS (
     JOIN documents d ON d.document_id = z.document_id
     WHERE z.status = 'ok'
       AND z.text_hash IS NOT NULL
+      AND (z.expires_at IS NULL OR z.expires_at > now())
+      AND d.kind = 'decision'
+      AND d.source IN ('cass','inca')
+      AND {PARSER_VALID_POURVOI_EXISTS}
       {staleness_predicate}
       {cursor_predicate}
     ORDER BY z.document_id

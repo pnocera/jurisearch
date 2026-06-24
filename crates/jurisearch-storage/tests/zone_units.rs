@@ -15,8 +15,8 @@ use jurisearch_storage::{
 const EMBEDDING_FINGERPRINT: &str = "bge-m3:1024:normalize:true";
 const BUILDER: &str = "zone-units:v1";
 
-/// Seed a Cassation decision plus its `decision_zones` overlay row. `text_hash` may be NULL to model
-/// the lazy / pre-hash-fix rows.
+/// Seed a Cassation decision plus its `decision_zones` overlay row (source `cass`). `text_hash` may be
+/// NULL to model the lazy / pre-hash-fix rows.
 fn seed_decision(
     postgres: &ManagedPostgres,
     document_id: &str,
@@ -25,16 +25,38 @@ fn seed_decision(
     text_hash: Option<&str>,
     zones_json: &str,
 ) -> Result<(), StorageError> {
+    seed_decision_full(postgres, document_id, "cass", "decision", pourvoi, status, text_hash, zones_json, false)
+}
+
+/// Full control over the seeded decision: source/kind, pourvoi, status, hash, and whether the
+/// `decision_zones` row is expired (for the freshness/scope tests).
+#[allow(clippy::too_many_arguments)]
+fn seed_decision_full(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+    source: &str,
+    kind: &str,
+    pourvoi: &str,
+    status: &str,
+    text_hash: Option<&str>,
+    zones_json: &str,
+    expired: bool,
+) -> Result<(), StorageError> {
     let hash_literal = match text_hash {
         Some(hash) => format!("'{hash}'"),
         None => "NULL".to_owned(),
+    };
+    let expires = if expired {
+        "now() - interval '1 day'"
+    } else {
+        "now() + interval '30 days'"
     };
     postgres.execute_sql(&format!(
         "INSERT INTO documents \
            (document_id, source, kind, source_uid, citation, title, body, \
             valid_from, source_payload_hash, canonical_json) \
          VALUES \
-           ('{document_id}', 'cass', 'decision', '{document_id}', 'Cass. civ. {pourvoi}', \
+           ('{document_id}', '{source}', '{kind}', '{document_id}', 'Cass. civ. {pourvoi}', \
             'Arret', 'corps de la decision', '2024-01-01', 'sha256:{document_id}', \
             '{{\"case_numbers\":[\"{pourvoi}\"]}}'); \
          INSERT INTO decision_zones \
@@ -42,7 +64,7 @@ fn seed_decision(
             fetched_at, expires_at, text_hash, offset_unit, zones_json, raw_json) \
          VALUES \
            ('{document_id}', 'judilibre', 'jdl:{document_id}', '{document_id}', '{status}', \
-            now(), now() + interval '30 days', {hash_literal}, 'char', \
+            now(), {expires}, {hash_literal}, 'char', \
             '{zones_json}'::jsonb, '{{}}'::jsonb);",
     ))?;
     Ok(())
@@ -221,5 +243,99 @@ fn enrich_candidates_reenrich_fresh_ok_rows_with_null_text_hash() -> Result<(), 
     assert!(ids.contains(&"cass:NULLHASH"), "null-hash ok row must be re-enriched: {ids:?}");
     assert!(!ids.contains(&"cass:WITHHASH"), "hashed fresh ok row must be skipped: {ids:?}");
 
+    Ok(())
+}
+
+#[test]
+fn expired_ok_rows_are_refresh_candidates_not_derivable() -> Result<(), StorageError> {
+    // Z1-fix 1: an EXPIRED ok row with a hash and no units must be a refresh candidate (enrich) but
+    // NOT derivable (never materialize a stale zone before refresh).
+    let Some(pg_config) = discover_pg_config("zone expired derive")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-expired.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision_full(
+        &postgres, "cass:EXPIRED", "cass", "decision", "33-33333", "ok", Some("h"), "{}", true,
+    )?;
+
+    let derivable: serde_json::Value =
+        serde_json::from_str(&load_derivable_decision_zones_json(&postgres, BUILDER, false, None, 100)?)
+            .expect("derivable JSON");
+    assert_eq!(
+        derivable["candidates"].as_array().expect("candidates").len(),
+        0,
+        "expired ok row must not be derivable"
+    );
+    let enrich: serde_json::Value =
+        serde_json::from_str(&enrich_zone_candidates_json(&postgres, "cass", None, None, 100)?)
+            .expect("candidates JSON");
+    let ids: Vec<&str> = enrich["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .map(|c| c["document_id"].as_str().expect("id"))
+        .collect();
+    assert!(ids.contains(&"cass:EXPIRED"), "expired ok row must be a refresh candidate: {ids:?}");
+    Ok(())
+}
+
+#[test]
+fn derivation_enforces_cassation_scope() -> Result<(), StorageError> {
+    // Z1-fix 3: a foreign-source (e.g. capp) ok row, even with a hash and valid-looking pourvoi, must
+    // not be derivable — derivation mirrors the Cassation-only enrichment reachability gate.
+    let Some(pg_config) = discover_pg_config("zone derive scope")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-scope.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision_full(
+        &postgres, "capp:FOREIGN", "capp", "decision", "44-44444", "ok", Some("h"), "{}", false,
+    )?;
+    let derivable: serde_json::Value =
+        serde_json::from_str(&load_derivable_decision_zones_json(&postgres, BUILDER, false, None, 100)?)
+            .expect("derivable JSON");
+    assert_eq!(
+        derivable["candidates"].as_array().expect("candidates").len(),
+        0,
+        "non-cass/inca ok row must not be derivable"
+    );
+    Ok(())
+}
+
+#[test]
+fn replace_zone_units_rejects_foreign_document_rows() -> Result<(), StorageError> {
+    // Z1-fix 2: replacing doc A must reject a row that belongs to doc B (no cross-document write).
+    let Some(pg_config) = discover_pg_config("zone replace guard")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-replace-guard.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision(&postgres, "cass:DOCA", "55-55555", "ok", Some("h"), "{}")?;
+    seed_decision(&postgres, "cass:DOCB", "66-66666", "ok", Some("h"), "{}")?;
+
+    let foreign = ZoneUnitRow {
+        document_id: "cass:DOCB",
+        zone: "motivations",
+        fragment_index: 0,
+        body: "x",
+        search_body: "x",
+        source: "cass",
+        text_hash: "h",
+        builder_version: BUILDER,
+    };
+    let err = replace_zone_units_for_document(&postgres, "cass:DOCA", &[foreign]).unwrap_err();
+    assert!(matches!(err, StorageError::Projection { .. }));
+    let count = postgres.execute_sql("SELECT count(*)::text FROM zone_units;")?;
+    assert_eq!(count.trim(), "0", "no units written on a rejected replace");
     Ok(())
 }
