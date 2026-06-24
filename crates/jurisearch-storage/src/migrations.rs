@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 12;
+pub const CURRENT_SCHEMA_VERSION: i32 = 15;
 
 struct Migration {
     version: i32,
@@ -475,6 +475,105 @@ WHERE ecli IS NOT NULL;
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 12), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 13,
+        name: "zone_units",
+        // Option B parallel zone-retrieval subsystem (work/03-implementation/04-zones). Official
+        // Judilibre zone fragments materialized as first-class retrieval units, SEPARATE from the
+        // bulk `chunks` corpus so the proven whole-decision retrieval path and the Phase 2
+        // `zone_accurate=false` honesty invariant are untouched. Derived from `decision_zones`
+        // (per-decision overlay); Cour de cassation only (cass + inca). `search_body` is the
+        // BM25-analyzed field (mirrors the v8/v9 `chunks.contextualized_body` contract); `text_hash`
+        // is the `decision_zones.text_hash` snapshot; `zone_unit_builder_version` forces a rebuild on
+        // a derivation-logic change.
+        sql: r#"
+CREATE TABLE IF NOT EXISTS zone_units (
+    zone_unit_id text PRIMARY KEY,
+    document_id text NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    zone text NOT NULL CHECK (zone IN
+        ('motivations','moyens','dispositif','expose','introduction','annexes')),
+    fragment_index integer NOT NULL CHECK (fragment_index >= 0),
+    body text NOT NULL,
+    search_body text NOT NULL CHECK (btrim(search_body) <> ''),
+    provider text NOT NULL DEFAULT 'judilibre',
+    zone_accurate boolean NOT NULL DEFAULT true,
+    source text NOT NULL,
+    text_hash text NOT NULL,
+    zone_unit_builder_version text NOT NULL,
+    zone_schema_version text NOT NULL DEFAULT 'judilibre:v1',
+    embedding_fingerprint text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (document_id, zone, fragment_index)
+);
+
+CREATE INDEX IF NOT EXISTS zone_units_document_idx ON zone_units(document_id);
+CREATE INDEX IF NOT EXISTS zone_units_zone_idx ON zone_units(zone);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 13), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 14,
+        name: "zone_unit_embeddings",
+        // Dense space for zone units — SEPARATE physical table/index from `chunk_embeddings` (Option B
+        // isolation). Same locked bge-m3:1024:normalize:true fingerprint. The ivfflat index is built
+        // at finalize time (after backfill, lists sized to corpus), not here, mirroring how the chunk
+        // ivfflat index is a finalize step rather than a base migration.
+        sql: r#"
+CREATE TABLE IF NOT EXISTS zone_unit_embeddings (
+    zone_unit_id text PRIMARY KEY REFERENCES zone_units(zone_unit_id) ON DELETE CASCADE,
+    embedding_fingerprint text NOT NULL,
+    embedding vector(1024) NOT NULL,
+    model text NOT NULL,
+    dimension integer NOT NULL CHECK (dimension = 1024),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS zone_unit_embeddings_fingerprint_idx
+ON zone_unit_embeddings(embedding_fingerprint);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 14), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 15,
+        name: "zone_units_bm25_index",
+        // Lexical space for zone units — SEPARATE pg_search BM25 index from `chunks_bm25_idx`, over
+        // `search_body`, using the SAME French legal analyzer as the current v9 chunk contract
+        // (ascii_folding + French stemmer + French stopwords). Mirrors migrations.rs v9 so zone search
+        // is analyzer-equivalent for accents/morphology/French legal terms.
+        sql: r#"
+CREATE INDEX IF NOT EXISTS zone_units_bm25_idx
+ON zone_units USING bm25 (zone_unit_id, search_body)
+WITH (
+    key_field = 'zone_unit_id',
+    text_fields = '{
+        "search_body": {
+            "tokenizer": {
+                "type": "default",
+                "ascii_folding": true,
+                "stemmer": "French",
+                "stopwords_language": "French"
+            }
+        }
+    }'
+);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 15), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

@@ -10,7 +10,7 @@ const DEFAULT_CONTEXT_SIBLING_LIMIT: u32 = 50;
 // identical, so an equal-weight dense arm dilutes the much sharper BM25 ranking on exact-citation
 // queries. The weights let the dense arm act as a recall-expander/tie-breaker rather than an equal
 // vote; tune via env without recompiling. The default down-weights dense to 0.3 (BM25-favored).
-const RRF_K: f64 = 60.0;
+pub(crate) const RRF_K: f64 = 60.0;
 const DEFAULT_RRF_LEXICAL_WEIGHT: f64 = 1.0;
 // Dense down-weighted to a recall-expander/tie-breaker. France-LEGI calibration over the production
 // index: equal weight (1.0) gave known-item recall@10 0.55; 0.3 lifts it to 0.60 with no temporal
@@ -36,7 +36,7 @@ pub fn rrf_weights() -> (f64, f64) {
 
 /// Format a finite, non-negative f64 as a plain SQL numeric literal (no locale/exponent surprises).
 /// `rrf_weights` already guarantees finiteness; clamp defensively.
-fn format_sql_f64(value: f64) -> String {
+pub(crate) fn format_sql_f64(value: f64) -> String {
     let value = if value.is_finite() { value.max(0.0) } else { 0.0 };
     format!("{value:.6}")
 }
@@ -117,7 +117,7 @@ impl DecisionFilters<'_> {
     /// they must never silently re-interpret a statute search (e.g. a decision-date bound must not
     /// filter LEGI articles by their version start). Court/formation/publication already self-scope
     /// via the JSON metadata only decisions carry; the kind guard makes the date bounds consistent.
-    fn predicate(&self) -> String {
+    pub(crate) fn predicate(&self) -> String {
         if self.is_empty() {
             return String::new();
         }
@@ -156,17 +156,29 @@ impl DecisionFilters<'_> {
     }
 }
 
+/// Effective `(lexical_weight, dense_weight)` for a request: per-request override else env/default.
+/// Shared by `hybrid_candidates_json` and the parallel zone retrieval path (`zone_retrieval.rs`).
+pub(crate) fn effective_rrf_weights(options: &RetrievalOptions) -> (f64, f64) {
+    let (lexical, dense) = rrf_weights();
+    (
+        options.rrf_lexical_weight.unwrap_or(lexical),
+        options.rrf_dense_weight.unwrap_or(dense),
+    )
+}
+
+/// Effective ivfflat probes for a request: per-request override else the default 4. Shared with the
+/// zone retrieval path.
+pub(crate) fn effective_probes(options: &RetrievalOptions) -> u32 {
+    options.ivfflat_probes.unwrap_or(4)
+}
+
 impl HybridCandidateQuery<'_> {
     fn effective_rrf_weights(&self) -> (f64, f64) {
-        let (lexical, dense) = rrf_weights();
-        (
-            self.options.rrf_lexical_weight.unwrap_or(lexical),
-            self.options.rrf_dense_weight.unwrap_or(dense),
-        )
+        effective_rrf_weights(&self.options)
     }
 
     fn effective_probes(&self) -> u32 {
-        self.options.ivfflat_probes.unwrap_or(4)
+        effective_probes(&self.options)
     }
 }
 
@@ -539,7 +551,8 @@ fn cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
 
 /// Keyset cursor predicate for document grouping (over `best_document_chunks`). Tie-break on
 /// `document_id`. Uses the same rounded `cursor_score` as the ordering so ties never duplicate/skip.
-fn document_cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
+/// Shared with the zone retrieval path, which groups by `document_id` over `cursor_score` too.
+pub(crate) fn document_cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
     match cursor {
         Some(RetrievalCursor::Document { score, document_id }) => {
             let score = sql_string_literal(score);
@@ -1327,4 +1340,53 @@ SELECT jsonb_build_object(
 )::text;
 "#
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // T1.3: the helpers extracted to pub(crate) for the zone retrieval path must behave identically to
+    // the prior inline logic (the isolation invariant — no change to default retrieval).
+    #[test]
+    fn effective_probes_defaults_to_four_else_override() {
+        assert_eq!(effective_probes(&RetrievalOptions::default()), 4);
+        assert_eq!(
+            effective_probes(&RetrievalOptions {
+                ivfflat_probes: Some(13),
+                ..RetrievalOptions::default()
+            }),
+            13
+        );
+    }
+
+    #[test]
+    fn effective_rrf_weights_uses_defaults_else_override() {
+        // SAFETY: tests in this module are the only readers of these env vars here; clear to read the
+        // compiled defaults deterministically.
+        unsafe {
+            std::env::remove_var("JURISEARCH_RRF_LEXICAL_WEIGHT");
+            std::env::remove_var("JURISEARCH_RRF_DENSE_WEIGHT");
+        }
+        assert_eq!(
+            effective_rrf_weights(&RetrievalOptions::default()),
+            (DEFAULT_RRF_LEXICAL_WEIGHT, DEFAULT_RRF_DENSE_WEIGHT)
+        );
+        assert_eq!(
+            effective_rrf_weights(&RetrievalOptions {
+                rrf_lexical_weight: Some(2.0),
+                rrf_dense_weight: Some(0.5),
+                ..RetrievalOptions::default()
+            }),
+            (2.0, 0.5)
+        );
+    }
+
+    #[test]
+    fn format_sql_f64_is_plain_and_clamped() {
+        assert_eq!(format_sql_f64(RRF_K), "60.000000");
+        assert_eq!(format_sql_f64(0.3), "0.300000");
+        assert_eq!(format_sql_f64(-1.0), "0.000000");
+        assert_eq!(format_sql_f64(f64::INFINITY), "0.000000");
+    }
 }
