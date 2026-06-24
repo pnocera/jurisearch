@@ -4,6 +4,7 @@ use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     decision_zones::{UpsertDecisionZones, upsert_decision_zones},
     dense::DenseRebuildSpec,
+    france_juris::{FranceJurisZoneGoldLimits, france_juris_zone_gold_json},
     retrieval::{DecisionFilters, RetrievalMode, RetrievalOptions},
     runtime::{ManagedPostgres, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
@@ -11,7 +12,7 @@ use jurisearch_storage::{
         ZONE_UNIT_VECTOR_INDEX_NAME, ZoneUnitEmbeddingInsert, ZoneUnitRow,
         enrich_zone_candidates_json, finalize_zone_dense_rebuild, insert_zone_unit_embeddings,
         load_derivable_decision_zones_json, load_zone_unit_embedding_inputs,
-        replace_zone_units_for_document, zone_retrieval_coverage_json,
+        replace_zone_units_for_document, zone_resolver_reachable_json, zone_retrieval_coverage_json,
     },
 };
 
@@ -229,6 +230,142 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
     assert_eq!(coverage["embeddings"]["total"], 3);
     assert_eq!(coverage["embeddings"]["units_pending"], 0);
 
+    // T5.1: the resolver-reachable denominator counts the seeded cass decision (parser-valid pourvoi).
+    let reach: serde_json::Value =
+        serde_json::from_str(&zone_resolver_reachable_json(&postgres)?).expect("reachable JSON");
+    assert_eq!(reach["resolver_reachable_total"], 1);
+
+    Ok(())
+}
+
+#[test]
+fn zone_gold_strips_identifiers_dedupes_and_honors_caps() -> Result<(), StorageError> {
+    // T5.2: zone gold = an identifier-stripped excerpt of the OFFICIAL zone text → the source decision,
+    // ONE qrel per decision (first fragment), with a 0 cap skipping a zone.
+    let Some(pg_config) = discover_pg_config("zone gold")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-gold.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision(&postgres, "cass:GOLD1", "12-34567", "ok", Some("h"), "{}")?;
+
+    // Fragment 0 (the one gold must pick) embeds a document identifier that must be stripped from the
+    // query; fragment 1 of the same decision must be deduped away. A short moyens fragment exists too.
+    let motif0 = "La responsabilite civile du gardien de la chose ECLI:FR:CCASS:2024:C100123 suppose la \
+                  garde et le fait de la chose ainsi que le lien de causalite entre eux et le dommage.";
+    let rows = vec![
+        ZoneUnitRow {
+            document_id: "cass:GOLD1",
+            zone: "motivations",
+            fragment_index: 0,
+            body: motif0,
+            search_body: motif0,
+            source: "cass",
+            text_hash: "h",
+            builder_version: BUILDER,
+        },
+        ZoneUnitRow {
+            document_id: "cass:GOLD1",
+            zone: "motivations",
+            fragment_index: 1,
+            body: "Un second fragment de motivations qui ne doit pas produire un second qrel pour la \
+                   meme decision puisque le gold est dedoublonne par document.",
+            search_body: "x",
+            source: "cass",
+            text_hash: "h",
+            builder_version: BUILDER,
+        },
+        ZoneUnitRow {
+            document_id: "cass:GOLD1",
+            zone: "moyens",
+            fragment_index: 0,
+            body: "Le moyen tire de la prescription quinquennale doit etre apprecie au regard de la \
+                   date de la connaissance des faits par le demandeur a l'action en responsabilite.",
+            search_body: "y",
+            source: "cass",
+            text_hash: "h",
+            builder_version: BUILDER,
+        },
+    ];
+    replace_zone_units_for_document(&postgres, "cass:GOLD1", &rows)?;
+
+    // moyens cap 0 -> the moyens zone is skipped even though a fragment exists.
+    let gold: serde_json::Value = serde_json::from_str(&france_juris_zone_gold_json(
+        &postgres,
+        FranceJurisZoneGoldLimits {
+            motivations: 60,
+            moyens: 0,
+            dispositif: 60,
+        },
+    )?)
+    .expect("zone gold JSON");
+
+    let motivations = gold["motivations"].as_array().expect("motivations");
+    assert_eq!(motivations.len(), 1, "one qrel per decision (deduped)");
+    assert_eq!(motivations[0]["gold_document_id"], "cass:GOLD1");
+    assert_eq!(motivations[0]["source"], "cass");
+    let query = motivations[0]["query"].as_str().expect("query");
+    assert!(
+        !query.contains("ECLI:FR:CCASS:2024:C100123"),
+        "the document identifier must be stripped from the gold query: {query:?}"
+    );
+    assert!(
+        query.contains("responsabilite civile du gardien"),
+        "the semantic zone text must survive stripping: {query:?}"
+    );
+    assert!(
+        gold["moyens"].as_array().expect("moyens").is_empty(),
+        "a 0 cap skips the zone"
+    );
+    Ok(())
+}
+
+#[test]
+fn zone_resolver_reachable_splits_pourvoi_from_skipped() -> Result<(), StorageError> {
+    // T5.1: the denominator counts, per cass/inca source, the resolver-reachable decisions (parser-valid
+    // pourvoi) vs. those skipped for lack of one — the honest base of the coverage fraction.
+    let Some(pg_config) = discover_pg_config("zone resolver reachable")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-reachable.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    // Two cass decisions: one with a parser-valid pourvoi (reachable), one whose case number cannot
+    // normalize to NN-NNNN (skipped). A capp decision is out of scope and must not be counted at all.
+    seed_decision(&postgres, "cass:REACH", "12-34567", "ok", Some("h"), "{}")?;
+    seed_decision(&postgres, "cass:SKIP", "FOOBAR", "not_found", None, "{}")?;
+    seed_decision_full(
+        &postgres,
+        "capp:OUT",
+        "capp",
+        "decision",
+        "44-44444",
+        "ok",
+        Some("h"),
+        "{}",
+        false,
+    )?;
+
+    let reach: serde_json::Value =
+        serde_json::from_str(&zone_resolver_reachable_json(&postgres)?).expect("reachable JSON");
+    assert_eq!(reach["resolver_reachable_total"], 1);
+    let by_source = reach["by_source"].as_array().expect("by_source");
+    let cass = by_source
+        .iter()
+        .find(|entry| entry["source"] == "cass")
+        .expect("cass entry");
+    assert_eq!(cass["total"], 2, "both cass decisions counted in the base");
+    assert_eq!(cass["resolver_reachable"], 1);
+    assert_eq!(cass["skipped_no_pourvoi"], 1);
+    assert!(
+        by_source.iter().all(|entry| entry["source"] != "capp"),
+        "capp is out of the zone-enrichable scope: {by_source:?}"
+    );
     Ok(())
 }
 

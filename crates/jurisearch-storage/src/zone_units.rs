@@ -586,3 +586,49 @@ SELECT jsonb_build_object(
 "#,
     )
 }
+
+/// Comma-separated SQL string-literal IN-list of the [`ZONE_ENRICHABLE_SOURCES`] (e.g. `'cass','inca'`).
+fn zone_enrichable_sources_in_list() -> String {
+    ZONE_ENRICHABLE_SOURCES
+        .iter()
+        .map(|source| sql_string_literal(source))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Resolver-reachable DENOMINATOR for the zone overlay (the honest base of "how many Cassation
+/// decisions COULD ever carry official zones"). SEPARATE from [`zone_retrieval_coverage_json`] because
+/// it is a full scan of the cass/inca decisions (`PARSER_VALID_POURVOI_EXISTS` over ~1.1M rows) — too
+/// expensive for the zone-search hot path, acceptable for the operator `status` command. Counts, per
+/// source, the decisions that the Judilibre resolver can reach (parser-valid pourvoi) vs. those skipped
+/// for lack of one — using the EXACT predicate `enrich_zone_candidates_json` gates on, so the
+/// denominator matches what the backfill actually attempts. Returns
+/// `{ "by_source": [{source, total, resolver_reachable, skipped_no_pourvoi}], "resolver_reachable_total" }`.
+pub fn zone_resolver_reachable_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
+    let source_list = zone_enrichable_sources_in_list();
+    postgres.execute_sql(&format!(
+        r#"
+WITH reach AS (
+    SELECT d.source AS source,
+           count(*) AS total,
+           count(*) FILTER (WHERE {PARSER_VALID_POURVOI_EXISTS}) AS reachable
+    FROM documents d
+    WHERE d.kind = 'decision'
+      AND d.source IN ({source_list})
+    GROUP BY d.source
+)
+SELECT jsonb_build_object(
+    'by_source', COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'source', source,
+            'total', total,
+            'resolver_reachable', reachable,
+            'skipped_no_pourvoi', total - reachable
+        ) ORDER BY source)
+        FROM reach
+    ), '[]'::jsonb),
+    'resolver_reachable_total', COALESCE((SELECT sum(reachable) FROM reach), 0)
+)::text;
+"#
+    ))
+}

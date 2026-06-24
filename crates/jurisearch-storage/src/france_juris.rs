@@ -14,7 +14,7 @@
 //! Extraction is deterministic (ordered by `document_id`, bounded by per-category caps), so the
 //! benchmark provenance can honestly record `sampled=false, human_in_gold=false, llm_in_gold=false`.
 
-use crate::runtime::{ManagedPostgres, StorageError};
+use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
 /// Per-category caps on how many qrels to extract from the index.
 #[derive(Debug, Clone, Copy)]
@@ -167,6 +167,88 @@ FROM (
     ORDER BY document_id
     LIMIT {limit}
 ) c
+"#
+    )
+}
+
+/// Per-zone caps for the SEPARATE official-zone retrieval benchmark (`phase2_zone_benchmark`, Z5/T5.2).
+/// Distinct from [`FranceJurisGoldLimits`]: this drives the parallel zone subsystem (`zone_units`), never
+/// the Phase 2 corpus gate. A cap of 0 skips that zone.
+#[derive(Debug, Clone, Copy)]
+pub struct FranceJurisZoneGoldLimits {
+    pub motivations: u32,
+    pub moyens: u32,
+    pub dispositif: u32,
+}
+
+impl Default for FranceJurisZoneGoldLimits {
+    fn default() -> Self {
+        Self {
+            motivations: 60,
+            moyens: 60,
+            dispositif: 60,
+        }
+    }
+}
+
+/// Extract official-zone known-item gold from `zone_units` as a JSON object:
+/// `{"motivations":[...],"moyens":[...],"dispositif":[...]}`. Each entry is
+/// `{query, gold_document_id, source}`: the query is an identifier-stripped excerpt of the decision's
+/// OFFICIAL zone text (`zone_units.body`, the Judilibre fragment), gold = the decision document it
+/// belongs to. Same official-fields-only, NO archive re-parse, NO human/LLM construction as
+/// [`france_juris_gold_json`]. A zone with a 0 cap yields an empty array (skipped).
+pub fn france_juris_zone_gold_json(
+    postgres: &ManagedPostgres,
+    limits: FranceJurisZoneGoldLimits,
+) -> Result<String, StorageError> {
+    let motivations = postgres.execute_sql(&zone_retrieval_sql("motivations", limits.motivations))?;
+    let moyens = postgres.execute_sql(&zone_retrieval_sql("moyens", limits.moyens))?;
+    let dispositif = postgres.execute_sql(&zone_retrieval_sql("dispositif", limits.dispositif))?;
+    Ok(format!(
+        "{{\"motivations\":{},\"moyens\":{},\"dispositif\":{}}}",
+        motivations.trim(),
+        moyens.trim(),
+        dispositif.trim()
+    ))
+}
+
+/// One zone's known-item gold: query = the official zone fragment text (`zone_units.body`) with obvious
+/// document identifiers stripped so it stays a semantic-retrieval task, gold = the decision document.
+/// One qrel per decision (the first fragment of the zone), ordered by `document_id` and bounded by the
+/// cap — so the selection is deterministic (`sampled=false`). No upper length bound (zone reasoning is
+/// legitimately long and the query is already truncated to [`RETRIEVAL_QUERY_CHARS`]).
+fn zone_retrieval_sql(zone: &str, limit: u32) -> String {
+    let zone_literal = sql_string_literal(zone);
+    format!(
+        r#"
+SELECT coalesce(jsonb_agg(jsonb_build_object(
+    'query', query,
+    'gold_document_id', document_id,
+    'source', source
+) ORDER BY document_id), '[]'::jsonb)
+FROM (
+    -- Filter on the CLEANED query length BEFORE the cap, so identifier-stripping a few early
+    -- fragments to below the floor does not underfill the requested qrel count.
+    SELECT document_id, source, query
+    FROM (
+        SELECT DISTINCT ON (u.document_id) u.document_id, u.source,
+               left(
+                 btrim(regexp_replace(
+                   -- strip unambiguous document identifiers so the query stays semantic, not a lookup
+                   regexp_replace(u.body, '(ECLI:[A-Z]{{2}}:[A-Za-z0-9.:_-]+|JURITEXT[0-9]+|CETATEXT[0-9]+)', ' ', 'g'),
+                   '\s+', ' ', 'g'
+                 )),
+                 {RETRIEVAL_QUERY_CHARS}
+               ) AS query
+        FROM zone_units u
+        WHERE u.zone = {zone_literal}
+          AND length(u.body) >= 120
+        ORDER BY u.document_id, u.fragment_index
+    ) cleaned
+    WHERE length(btrim(query)) >= 60
+    ORDER BY document_id
+    LIMIT {limit}
+) q
 "#
     )
 }
