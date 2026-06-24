@@ -252,10 +252,12 @@ fn zone_gold_strips_identifiers_dedupes_and_honors_caps() -> Result<(), StorageE
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
     seed_decision(&postgres, "cass:GOLD1", "12-34567", "ok", Some("h"), "{}")?;
 
-    // Fragment 0 (the one gold must pick) embeds a document identifier that must be stripped from the
-    // query; fragment 1 of the same decision must be deduped away. A short moyens fragment exists too.
-    let motif0 = "La responsabilite civile du gardien de la chose ECLI:FR:CCASS:2024:C100123 suppose la \
-                  garde et le fait de la chose ainsi que le lien de causalite entre eux et le dommage.";
+    // Fragment 0 (the one gold must pick) embeds document identifiers — an ECLI plus the decision's own
+    // pourvoi in both plain and dotted form — that must all be stripped from the query; fragment 1 of
+    // the same decision must be deduped away. A short moyens fragment exists too.
+    let motif0 = "Sur le pourvoi n 12-34567 ECLI:FR:CCASS:2024:C100123 et le pourvoi connexe 98-76.543, \
+                  la responsabilite civile du gardien de la chose suppose la garde et le fait de la chose \
+                  ainsi que le lien de causalite entre eux et le dommage subi par la victime.";
     let rows = vec![
         ZoneUnitRow {
             document_id: "cass:GOLD1",
@@ -311,6 +313,10 @@ fn zone_gold_strips_identifiers_dedupes_and_honors_caps() -> Result<(), StorageE
     assert!(
         !query.contains("ECLI:FR:CCASS:2024:C100123"),
         "the document identifier must be stripped from the gold query: {query:?}"
+    );
+    assert!(
+        !query.contains("12-34567") && !query.contains("98-76.543"),
+        "Cassation pourvoi identifiers (plain and dotted) must be stripped: {query:?}"
     );
     assert!(
         query.contains("responsabilite civile du gardien"),

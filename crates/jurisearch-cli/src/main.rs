@@ -2825,6 +2825,8 @@ fn eval_france_juris_zones_payload(
     Ok(zone_benchmark_artifact(
         Value::Object(categories),
         retrieval_mode,
+        needs_dense,
+        expected_fingerprint.as_deref(),
         args.floor,
         limits,
         &index_revision,
@@ -2949,10 +2951,15 @@ fn zone_benchmark_category(result: &FranceJurisCategoryResult, floor: f64) -> Va
 
 /// Assemble the `phase2_zone_benchmark` artifact. MEASURED-ONLY: `state:"measured"` (never a
 /// pass/fail gate), records each zone's measured recall@10 against the PROPOSED floor, and is scoped to
-/// the Cassation-only zone overlay so it can never inflate the full-juridic corpus claim.
+/// the Cassation-only zone overlay so it can never inflate the full-juridic corpus claim. The recorded
+/// `fingerprint` is the ACTUAL dense fingerprint used (`None` → `null` for a lexical-only BM25 run), so
+/// the artifact's provenance never claims an embedder it did not use.
+#[allow(clippy::too_many_arguments)]
 fn zone_benchmark_artifact(
     categories: Value,
     retrieval_mode: RetrievalMode,
+    uses_dense: bool,
+    fingerprint: Option<&str>,
     proposed_floor: f64,
     limits: FranceJurisZoneGoldLimits,
     index_revision: &str,
@@ -2976,7 +2983,8 @@ fn zone_benchmark_artifact(
         "state": "measured",
         "gate_input": false,
         "jurisdiction": "france",
-        "fingerprint": "bge-m3:1024:normalize:true",
+        "uses_dense": uses_dense,
+        "fingerprint": fingerprint,
         "claim_scope": "official Cour de cassation zone retrieval (cass+inca) ONLY — a coverage-bounded overlay, NOT corpus-wide French juridic search; this benchmark is measured-only and is NOT an input to the Phase 2 full-juridic gate",
         "source": "official Judilibre decision zones (motivations/moyens/dispositif) materialized as zone_units, extracted from the built index",
         "retriever": format!("jurisearch search --zone (zone_units {} retrieval)", retrieval_mode.as_str()),
@@ -11440,6 +11448,48 @@ mod tests {
             .find(|c| c["name"] == "honest_zone_provenance")
             .unwrap();
         assert_eq!(honest["status"], "pending");
+    }
+
+    #[test]
+    fn zone_benchmark_artifact_records_actual_fingerprint_and_never_gates() {
+        // Z5/T5.2: the measured-only zone benchmark records the ACTUAL dense fingerprint (null for a
+        // lexical-only BM25 run), is flagged as a non-gate input, and reports an empty zone as null.
+        let categories = json!({
+            "motivations": { "metric": "recall_at_10", "value": 0.9, "queries": 50, "meets_proposed_floor": true },
+            "moyens": { "metric": "recall_at_10", "value": null, "queries": 0, "meets_proposed_floor": null }
+        });
+
+        // BM25 run: no embedder was used, so the artifact must NOT claim a dense fingerprint.
+        let bm25 = zone_benchmark_artifact(
+            categories.clone(),
+            RetrievalMode::Bm25,
+            false,
+            None,
+            0.8,
+            FranceJurisZoneGoldLimits::default(),
+            "rev",
+            "src",
+        );
+        assert_eq!(bm25["kind"], "phase2_zone_benchmark");
+        assert_eq!(bm25["gate_input"], false);
+        assert_eq!(bm25["uses_dense"], false);
+        assert!(bm25["fingerprint"].is_null(), "BM25 run must not claim a dense fingerprint");
+        // Only the zone with qrels counts toward the advisory floor verdict (empty zone excluded).
+        assert_eq!(bm25["all_meet_proposed_floor"], true);
+
+        // Hybrid run: the artifact records the exact fingerprint readiness verified.
+        let hybrid = zone_benchmark_artifact(
+            categories,
+            RetrievalMode::Hybrid,
+            true,
+            Some("bge-m3:1024:normalize:true"),
+            0.8,
+            FranceJurisZoneGoldLimits::default(),
+            "rev",
+            "src",
+        );
+        assert_eq!(hybrid["uses_dense"], true);
+        assert_eq!(hybrid["fingerprint"], "bge-m3:1024:normalize:true");
     }
 
     #[test]

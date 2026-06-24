@@ -217,6 +217,11 @@ pub fn france_juris_zone_gold_json(
 /// One qrel per decision (the first fragment of the zone), ordered by `document_id` and bounded by the
 /// cap — so the selection is deterministic (`sampled=false`). No upper length bound (zone reasoning is
 /// legitimately long and the query is already truncated to [`RETRIEVAL_QUERY_CHARS`]).
+///
+/// Stripping removes ECLI/JURITEXT/CETATEXT AND Cassation pourvoi-shaped numbers (`NN-NNNN..`, dotted or
+/// plain) — a pourvoi printed in an official zone (`pourvoi n° 12-34.567`) is a production-resolvable
+/// decision identifier, so leaving it would turn the qrel into a lookup, not a semantic excerpt (Z5
+/// leak-free-gold constraint). The dotted form is listed before the plain form so it matches whole.
 fn zone_retrieval_sql(zone: &str, limit: u32) -> String {
     let zone_literal = sql_string_literal(zone);
     format!(
@@ -235,7 +240,7 @@ FROM (
                left(
                  btrim(regexp_replace(
                    -- strip unambiguous document identifiers so the query stays semantic, not a lookup
-                   regexp_replace(u.body, '(ECLI:[A-Z]{{2}}:[A-Za-z0-9.:_-]+|JURITEXT[0-9]+|CETATEXT[0-9]+)', ' ', 'g'),
+                   regexp_replace(u.body, '(ECLI:[A-Z]{{2}}:[A-Za-z0-9.:_-]+|JURITEXT[0-9]+|CETATEXT[0-9]+|[0-9]{{2}}-[0-9]{{1,3}}\.[0-9]{{3}}|[0-9]{{2}}-[0-9]{{4,6}})', ' ', 'g'),
                    '\s+', ' ', 'g'
                  )),
                  {RETRIEVAL_QUERY_CHARS}
