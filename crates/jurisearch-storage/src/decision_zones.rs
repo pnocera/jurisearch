@@ -158,5 +158,19 @@ ON CONFLICT (document_id) DO UPDATE SET
             ],
         )
         .map_err(StorageError::PostgresClient)?;
+
+    // Refresh invalidation: if the (possibly just-updated) row is NOT derivable into zone units — any
+    // non-`ok` status, or an `ok` row with no content hash — drop any already-materialized `zone_units`
+    // for this decision so retrieval never serves official zones the cache has just invalidated
+    // (zone_unit_embeddings cascade from zone_units). A fresh `ok`+hash row keeps its units; an `ok`
+    // content change is handled by re-derivation via the text_hash/builder-version staleness check.
+    if row.status != "ok" || row.text_hash.is_none() {
+        client
+            .execute(
+                "DELETE FROM zone_units WHERE document_id = $1;",
+                &[&row.document_id],
+            )
+            .map_err(StorageError::PostgresClient)?;
+    }
     Ok(())
 }

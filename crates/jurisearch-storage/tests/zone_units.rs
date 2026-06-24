@@ -2,6 +2,7 @@ mod common;
 
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
+    decision_zones::{UpsertDecisionZones, upsert_decision_zones},
     dense::DenseRebuildSpec,
     runtime::{ManagedPostgres, StorageError},
     zone_units::{
@@ -395,5 +396,93 @@ fn replace_zone_units_rejects_foreign_document_rows() -> Result<(), StorageError
     assert!(matches!(err, StorageError::Projection { .. }));
     let count = postgres.execute_sql("SELECT count(*)::text FROM zone_units;")?;
     assert_eq!(count.trim(), "0", "no units written on a rejected replace");
+    Ok(())
+}
+
+#[test]
+fn non_derivable_refresh_invalidates_materialized_units() -> Result<(), StorageError> {
+    // Z1 r3-fix: refreshing a derived decision_zones row to a non-derivable status (e.g. not_found)
+    // must drop its already-materialized zone_units (and cascade zone_unit_embeddings), so retrieval
+    // never serves official zones the cache just invalidated.
+    let Some(pg_config) = discover_pg_config("zone refresh invalidate")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-invalidate.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision(&postgres, "cass:INVAL", "77-77777", "ok", Some("h"), "{}")?;
+
+    let row = ZoneUnitRow {
+        document_id: "cass:INVAL",
+        zone: "motivations",
+        fragment_index: 0,
+        body: "motif",
+        search_body: "motif",
+        source: "cass",
+        text_hash: "h",
+        builder_version: BUILDER,
+    };
+    replace_zone_units_for_document(&postgres, "cass:INVAL", &[row])?;
+    let vector = vector_literal(0);
+    insert_zone_unit_embeddings(
+        &postgres,
+        &[ZoneUnitEmbeddingInsert {
+            zone_unit_id: "cass:INVAL#motivations#0",
+            embedding_fingerprint: EMBEDDING_FINGERPRINT,
+            embedding_literal: &vector,
+            model: "bge-m3",
+            dimension: 1024,
+        }],
+    )?;
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT count(*)::text FROM zone_units;")?
+            .trim(),
+        "1"
+    );
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT count(*)::text FROM zone_unit_embeddings;")?
+            .trim(),
+        "1"
+    );
+
+    // Refresh the same decision to not_found (hashless, non-derivable) -> units + embeddings cleared.
+    let empty = serde_json::json!({});
+    upsert_decision_zones(
+        &postgres,
+        &UpsertDecisionZones {
+            document_id: "cass:INVAL",
+            provider: "judilibre",
+            provider_decision_id: None,
+            source_uid: "cass:INVAL",
+            ecli: None,
+            status: "not_found",
+            upstream_update_date: None,
+            upstream_decision_date: None,
+            text_hash: None,
+            offset_unit: None,
+            zones_json: &empty,
+            raw_json: &empty,
+            error: None,
+            ttl_seconds: Some(86_400),
+        },
+    )?;
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT count(*)::text FROM zone_units;")?
+            .trim(),
+        "0",
+        "non-derivable refresh must drop zone_units"
+    );
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT count(*)::text FROM zone_unit_embeddings;")?
+            .trim(),
+        "0",
+        "embeddings cascade from zone_units"
+    );
     Ok(())
 }
