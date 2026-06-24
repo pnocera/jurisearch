@@ -2947,10 +2947,13 @@ fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, E
 
 /// Dedicated zone readiness gate (NOT the chunk-corpus `ensure_query_readiness`): the zone subsystem
 /// has its own coverage. Requires materialized `zone_units`; for dense/hybrid also requires the
-/// zone-unit embeddings to be complete (no pending units).
+/// zone-unit embeddings to be complete (no pending units) AND finalized under the SAME fingerprint the
+/// query embedder uses — otherwise the dense arm (which filters by fingerprint) would silently match
+/// nothing and report a false `no_results` instead of an actionable readiness error.
 fn ensure_zone_retrieval_readiness(
     postgres: &ManagedPostgres,
     needs_dense: bool,
+    expected_fingerprint: Option<&str>,
 ) -> Result<(), ErrorObject> {
     let coverage: Value =
         serde_json::from_str(&zone_retrieval_coverage_json(postgres).map_err(storage_error_object)?)
@@ -2962,13 +2965,26 @@ fn ensure_zone_retrieval_readiness(
         ));
     }
     if needs_dense {
-        let pending = coverage["embeddings"]["units_pending"].as_u64().unwrap_or(u64::MAX);
+        let pending = coverage["embeddings"]["units_pending"]
+            .as_u64()
+            .unwrap_or(u64::MAX);
         let embedded = coverage["embeddings"]["total"].as_u64().unwrap_or(0);
         if embedded == 0 || pending != 0 {
             return Err(index_unavailable(format!(
                 "the zone-unit dense index is incomplete ({pending} units pending); run \
                  `ingest embed-zone-units`, or use `--mode bm25` for lexical zone search"
             )));
+        }
+        if let Some(expected) = expected_fingerprint {
+            let indexed = coverage["embedding_manifest"]["embedding_fingerprint"].as_str();
+            if indexed != Some(expected) {
+                return Err(index_unavailable(format!(
+                    "the zone-unit dense index was finalized under fingerprint `{}` but the query \
+                     embedder uses `{expected}`; re-run `ingest embed-zone-units` with the matching \
+                     embedding config, or use `--mode bm25` for lexical zone search",
+                    indexed.unwrap_or("<none>")
+                )));
+            }
         }
     }
     Ok(())
@@ -3009,9 +3025,16 @@ fn zone_search_payload(
     };
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
-    ensure_zone_retrieval_readiness(&postgres, retrieval_mode.uses_dense())?;
 
-    let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
+    let needs_dense = retrieval_mode.uses_dense();
+    // Compute the expected storage fingerprint (cheap, no network) so readiness can reject a zone dense
+    // index finalized under a different embedder before we run a query that would match nothing.
+    let expected_fingerprint =
+        needs_dense.then(|| embedding_config_from_env().storage_embedding_fingerprint());
+    ensure_zone_retrieval_readiness(&postgres, needs_dense, expected_fingerprint.as_deref())?;
+
+    let as_of = args.as_of.clone().unwrap_or_else(today_utc);
+    let (query_embedding, embedding_fingerprint) = if needs_dense {
         let (literal, fingerprint) = PreparedQueryEmbedder::from_env()?.embed(args.query.as_str())?;
         (Some(literal), Some(fingerprint))
     } else {
@@ -3033,6 +3056,7 @@ fn zone_search_payload(
             options: args.retrieval_options(),
             after_cursor: after_cursor.as_ref().map(ParsedSearchCursor::as_retrieval_cursor),
             zone: zone.as_str(),
+            as_of: as_of.as_str(),
             decision_filters: args.decision_filters(),
             lexical_limit,
             dense_limit,

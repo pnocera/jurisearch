@@ -277,6 +277,7 @@ fn zone_candidates_json_scopes_to_zone_with_official_provenance() -> Result<(), 
         options: RetrievalOptions::default(),
         after_cursor: None,
         zone: "motivations",
+        as_of: "2025-12-31",
         decision_filters: DecisionFilters::default(),
         lexical_limit: 50,
         dense_limit: 50,
@@ -291,6 +292,35 @@ fn zone_candidates_json_scopes_to_zone_with_official_provenance() -> Result<(), 
     assert_eq!(candidates[0]["zone_accurate"], true);
     assert_eq!(candidates[0]["provider"], "judilibre");
     assert_eq!(hit["zone"], "motivations");
+
+    // Z4-fix (as-of): the decision is dated 2024-01-01; an as_of BEFORE it excludes it.
+    let historical = ZoneCandidateQuery {
+        as_of: "2020-01-01",
+        ..base
+    };
+    let before: serde_json::Value =
+        serde_json::from_str(&zone_candidates_json(&postgres, &historical)?).expect("json");
+    assert_eq!(
+        before["candidates"].as_array().expect("c").len(),
+        0,
+        "as_of before the decision date must exclude it"
+    );
+
+    // Z4-fix (decision filters applied in-arm): a non-matching court filter excludes the hit.
+    let wrong_court = ZoneCandidateQuery {
+        decision_filters: DecisionFilters {
+            jurisdiction: Some("Conseil d'Etat"),
+            ..DecisionFilters::default()
+        },
+        ..base
+    };
+    let filtered: serde_json::Value =
+        serde_json::from_str(&zone_candidates_json(&postgres, &wrong_court)?).expect("json");
+    assert_eq!(
+        filtered["candidates"].as_array().expect("c").len(),
+        0,
+        "a non-matching decision filter must exclude the hit"
+    );
 
     // "responsabilite" lives in motivations, not moyens -> empty under the moyens scope.
     let moyens = ZoneCandidateQuery {
