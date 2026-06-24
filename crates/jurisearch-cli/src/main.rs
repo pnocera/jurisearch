@@ -4553,6 +4553,34 @@ fn parse_visa_citation(title: &str) -> Option<ParsedVisaCitation> {
     None
 }
 
+/// Build the Legifrance `/search` request body for a code-article citation query. Uses the REAL
+/// Legifrance contract (`fond=CODE_DATE` + `recherche.champs` with `TOUS_LES_MOTS_DANS_UN_CHAMP` over
+/// all fields). The previous `{query, pageSize}` shape was rejected by the Legifrance engine with HTTP
+/// 500 ("Une exception non gérée"); `TOUS_LES_MOTS_DANS_UN_CHAMP` is also far more precise and ~1s vs
+/// ~10s for `UN_DES_MOTS` (validated against the live API). Our citations are all "code …" (collect
+/// skips non-code legislation), so `CODE_DATE` is the right fond; no date filter ⇒ current version.
+fn legifrance_code_search_body(query: &str) -> Value {
+    json!({
+        "fond": "CODE_DATE",
+        "recherche": {
+            "operateur": "ET",
+            "sort": "PERTINENCE",
+            "typePagination": "DEFAUT",
+            "pageNumber": 1,
+            "pageSize": 5,
+            "champs": [{
+                "typeChamp": "ALL",
+                "operateur": "ET",
+                "criteres": [{
+                    "typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP",
+                    "valeur": query,
+                    "operateur": "ET"
+                }]
+            }]
+        }
+    })
+}
+
 /// Whether a Legifrance search response reports at least one hit.
 fn legifrance_response_has_results(response: &Value) -> bool {
     if let Some(total) = response["totalResultNumber"].as_i64() {
@@ -4716,7 +4744,7 @@ fn enrich_legislation_citations_payload(
                 continue;
             };
             considered += 1;
-            let body = json!({ "query": canonical_query, "pageSize": 5 });
+            let body = legifrance_code_search_body(canonical_query);
             let exchange = piste.legifrance_search_exchange(&body);
             let response_id = archive_exchange(
                 &mut client,
@@ -12027,6 +12055,19 @@ mod tests {
             .find(|c| c["name"] == "honest_zone_provenance")
             .unwrap();
         assert_eq!(honest["status"], "pending");
+    }
+
+    #[test]
+    fn legifrance_code_search_body_uses_real_contract() {
+        // Regression: the Legifrance /search engine rejects {query,pageSize} with HTTP 500; the body
+        // must use fond=CODE_DATE + recherche.champs with TOUS_LES_MOTS_DANS_UN_CHAMP (validated live).
+        let body = legifrance_code_search_body("609 code de procédure civile");
+        assert_eq!(body["fond"], "CODE_DATE");
+        assert!(body.get("query").is_none(), "the bogus top-level query field must be gone");
+        let critere = &body["recherche"]["champs"][0]["criteres"][0];
+        assert_eq!(critere["typeRecherche"], "TOUS_LES_MOTS_DANS_UN_CHAMP");
+        assert_eq!(critere["valeur"], "609 code de procédure civile");
+        assert_eq!(body["recherche"]["champs"][0]["typeChamp"], "ALL");
     }
 
     #[test]
