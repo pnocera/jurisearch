@@ -377,9 +377,10 @@ struct FetchArgs {
     /// `heuristic` (or `unavailable`); each part reports its `zone_provenance`.
     #[arg(long)]
     part: Option<String>,
-    /// Consult Judilibre for OFFICIAL Cassation decision zones (lazy, cached). Network is used only
-    /// with this flag and only for judicial (cass) decisions resolvable by pourvoi; otherwise the
-    /// heuristic/unavailable fallback is returned. JADE (administrative) is not covered by Judilibre.
+    /// Consult Judilibre for OFFICIAL Cour de cassation decision zones (lazy, cached). Network is used
+    /// only with this flag and only for `cass`/`inca` decisions resolvable by pourvoi; otherwise the
+    /// heuristic/unavailable fallback is returned. `capp` (Cour d'appel) and `jade` (administrative)
+    /// are not resolvable on Judilibre here.
     #[arg(long)]
     online: bool,
 }
@@ -3513,8 +3514,8 @@ fn annotate_fetched_parts(
         let summary = collect_decision_summary(document);
         let extracted = extract_decision_part(part, body, summary.as_deref());
         // Whether an official zone COULD be obtained for this part with --online (judicial zone parts).
-        let online_available =
-            judilibre_zone_key(part).is_some() && document["source"].as_str() == Some("cass");
+        let online_available = judilibre_zone_key(part).is_some()
+            && is_judilibre_cassation_source(document["source"].as_str());
         document["part"] = json!({
             "requested": part.name(),
             "applicable": true,
@@ -3525,13 +3526,21 @@ fn annotate_fetched_parts(
             "note": extracted.note,
             "official_zones_available": online_available && !online,
             "official_zones_hint": if online_available && !online {
-                json!("re-run with --online to fetch the official Judilibre zone for this Cassation decision")
+                json!("re-run with --online to fetch the official Judilibre zone for this Cour de cassation decision")
             } else {
                 Value::Null
             }
         });
     }
     Ok(())
+}
+
+/// Sources Judilibre can resolve by pourvoi+date: both PUBLISHED (`cass`) and INÉDIT (`inca`) Cour de
+/// cassation decisions (verified live — inédit decisions resolve with `publication=[]` and return
+/// official zones). NOT `capp` (Cour d'appel uses RG numbers, not resolvable on Judilibre here) and
+/// NOT `jade` (administrative; Judilibre does not cover it).
+fn is_judilibre_cassation_source(source: Option<&str>) -> bool {
+    matches!(source, Some("cass" | "inca"))
 }
 
 /// The Judilibre `zones` key that backs a requested part, or `None` for parts not served by an
@@ -3603,7 +3612,7 @@ fn zone_cache_action(
         },
         Some(_) if !expired => ZoneCacheAction::Fallback,
         // status is null (no row) or the row is expired -> enrich when we can, else fall back.
-        _ if online && source == "cass" => ZoneCacheAction::Enrich,
+        _ if online && is_judilibre_cassation_source(Some(source)) => ZoneCacheAction::Enrich,
         _ => ZoneCacheAction::Fallback,
     }
 }
@@ -3636,7 +3645,7 @@ fn part_block_from_cached_zones(cached: &Value, part: DecisionPart, zone_key: &s
         "upstream_update_date": cached["upstream_update_date"].clone(),
         "fragments": Value::Array(fragments.clone()),
         "text": text,
-        "note": "Official Judilibre zone offsets (character indices) for this Cassation decision."
+        "note": "Official Judilibre zone offsets (character indices) for this Cour de cassation decision."
     }))
 }
 
@@ -10466,10 +10475,19 @@ mod tests {
         // Fresh upstream error -> suppress (short TTL); expired upstream error -> retry.
         assert!(is(zone_cache_action(&err_fresh, part, key, true, "cass"), "fallback"));
         assert!(is(zone_cache_action(&err_expired, part, key, true, "cass"), "enrich"));
-        // No cache row -> enrich only when online+cass; offline or non-cass -> fallback.
+        // No cache row -> enrich only when online + a Judilibre-resolvable Cour de cassation source.
         assert!(is(zone_cache_action(&no_row, part, key, true, "cass"), "enrich"));
         assert!(is(zone_cache_action(&no_row, part, key, false, "cass"), "fallback"));
+        // INCA (inédit Cassation) enriches like cass; CAPP (Cour d'appel) and JADE fall back.
+        assert!(is(zone_cache_action(&no_row, part, key, true, "inca"), "enrich"));
+        assert!(is(zone_cache_action(&no_row, part, key, true, "capp"), "fallback"));
         assert!(is(zone_cache_action(&no_row, part, key, true, "jade"), "fallback"));
+
+        assert!(is_judilibre_cassation_source(Some("cass")));
+        assert!(is_judilibre_cassation_source(Some("inca")));
+        assert!(!is_judilibre_cassation_source(Some("capp")));
+        assert!(!is_judilibre_cassation_source(Some("jade")));
+        assert!(!is_judilibre_cassation_source(None));
     }
 
     #[test]

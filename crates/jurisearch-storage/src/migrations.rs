@@ -444,7 +444,8 @@ SET value = excluded.value,
         // canonical_json) keeps the immutable bulk ingest/projection and the corpus-level
         // `zone_accurate=false` honesty intact: enrichment is a per-decision overlay that can refresh,
         // cache misses/errors, and be re-fetched without contaminating canonical records. Judicial
-        // (Cassation) only for now — Judilibre does not cover administrative (JADE/Conseil d'Etat).
+        // (Cour de cassation: cass + inca) only for now — Judilibre does not cover Cour d'appel (capp,
+        // RG numbers) or administrative (jade/Conseil d'Etat).
         sql: r#"
 CREATE TABLE IF NOT EXISTS decision_zones (
     document_id text PRIMARY KEY REFERENCES documents(document_id) ON DELETE CASCADE,
