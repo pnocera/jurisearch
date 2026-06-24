@@ -25,22 +25,40 @@ const PARSER_VALID_POURVOI_EXISTS: &str = "EXISTS (SELECT 1 FROM \
      unnest(jurisearch_normalized_case_numbers(d.canonical_json)) AS cn \
      WHERE cn ~ '^[0-9]{2}-[0-9]{4,6}$')";
 
+/// Direction the enrichment backfill walks the resolver-reachable candidate set. `document_id` order is
+/// chronological (JURITEXT ids are issued over time), and official Judilibre zones exist only for recent
+/// decisions — so `Recent` (newest first) reaches the zoned decisions immediately, while the default
+/// `Oldest` preserves the original keyset for compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrichZoneOrder {
+    Oldest,
+    Recent,
+}
+
 /// Page the decisions that need enrichment for `source` (one of [`ZONE_ENRICHABLE_SOURCES`]): Cassation
 /// decisions with a parser-valid pourvoi whose `decision_zones` row is missing, expired, OR a fresh
 /// `ok`/`invalid_offsets` row whose `text_hash IS NULL` (the lazy/pre-hash-fix rows — re-enriched
 /// regardless of TTL so they become derivable). When `since` is set, also re-enrich anything cached
-/// before that instant (refresh). Keyset paging on `document_id` via `after_cursor` (exclusive).
-/// Returns `{ "candidates": [{document_id, source}], "next_cursor": <last id|null> }`.
+/// before that instant (refresh). Keyset paging on `document_id` via `after_cursor` (exclusive), walked
+/// in `order` direction — `Recent` pages newest→oldest (`document_id < cursor`), `Oldest` the reverse.
+/// Returns `{ "candidates": [{document_id, source}], "next_cursor": <boundary id|null> }` where the
+/// boundary is the min (Recent) or max (Oldest) `document_id` of the page, to feed the next page.
 pub fn enrich_zone_candidates_json(
     postgres: &ManagedPostgres,
     source: &str,
     after_cursor: Option<&str>,
     since: Option<&str>,
     limit: u32,
+    order: EnrichZoneOrder,
 ) -> Result<String, StorageError> {
+    // Keyset comparison / sort / boundary aggregate per walk direction.
+    let (cursor_cmp, sort_dir, boundary_agg) = match order {
+        EnrichZoneOrder::Oldest => (">", "ASC", "max"),
+        EnrichZoneOrder::Recent => ("<", "DESC", "min"),
+    };
     let source_literal = sql_string_literal(source);
     let cursor_predicate = after_cursor
-        .map(|cursor| format!("AND d.document_id > {}", sql_string_literal(cursor)))
+        .map(|cursor| format!("AND d.document_id {cursor_cmp} {}", sql_string_literal(cursor)))
         .unwrap_or_default();
     let since_predicate = since
         .map(|since| {
@@ -67,16 +85,16 @@ WITH page AS (
           {since_predicate}
       )
       {cursor_predicate}
-    ORDER BY d.document_id
+    ORDER BY d.document_id {sort_dir}
     LIMIT {limit}
 )
 SELECT jsonb_build_object(
     'candidates', COALESCE((
         SELECT jsonb_agg(jsonb_build_object('document_id', document_id, 'source', source)
-                         ORDER BY document_id)
+                         ORDER BY document_id {sort_dir})
         FROM page
     ), '[]'::jsonb),
-    'next_cursor', (SELECT max(document_id) FROM page)
+    'next_cursor', (SELECT {boundary_agg}(document_id) FROM page)
 )::text;
 "#
     ))

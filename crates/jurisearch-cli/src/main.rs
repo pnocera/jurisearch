@@ -87,7 +87,7 @@ use jurisearch_storage::{
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
     zone_units::{
-        ZoneUnitEmbeddingInsert, ZoneUnitRow, enrich_zone_candidates_json,
+        EnrichZoneOrder, ZoneUnitEmbeddingInsert, ZoneUnitRow, enrich_zone_candidates_json,
         finalize_zone_dense_rebuild, insert_zone_unit_embeddings, load_derivable_decision_zones_json,
         load_zone_unit_embedding_inputs, replace_zone_units_for_document,
         zone_resolver_reachable_json, zone_retrieval_coverage_json,
@@ -351,6 +351,33 @@ impl CliZone {
             Self::Motivations => "motivations",
             Self::Moyens => "moyens",
             Self::Dispositif => "dispositif",
+        }
+    }
+}
+
+/// Direction `ingest enrich-zones` walks the candidate set. Official Judilibre zones exist only for
+/// recent decisions, so `recent` reaches them first; `oldest` keeps the original keyset order.
+#[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+enum CliEnrichZoneOrder {
+    Oldest,
+    Recent,
+}
+
+impl CliEnrichZoneOrder {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Oldest => "oldest",
+            Self::Recent => "recent",
+        }
+    }
+}
+
+impl From<CliEnrichZoneOrder> for EnrichZoneOrder {
+    fn from(order: CliEnrichZoneOrder) -> Self {
+        match order {
+            CliEnrichZoneOrder::Oldest => EnrichZoneOrder::Oldest,
+            CliEnrichZoneOrder::Recent => EnrichZoneOrder::Recent,
         }
     }
 }
@@ -986,6 +1013,10 @@ enum IngestSubcommand {
         /// Conservative bound on concurrent Judilibre requests (stay well under ~20 req/s).
         #[arg(long, default_value_t = ENRICH_ZONES_DEFAULT_CONCURRENCY)]
         concurrency: usize,
+        /// Walk order over the candidate set. `recent` reaches zoned (newer) decisions first; the
+        /// default `oldest` preserves the original keyset order.
+        #[arg(long, default_value = "oldest")]
+        order: CliEnrichZoneOrder,
     },
     /// Derive `zone_units` retrieval units from the cached official Judilibre zones in `decision_zones`
     /// (after `enrich-zones`). Idempotent; re-derives only stale decisions unless `--rebuild`.
@@ -4976,6 +5007,7 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
             limit,
             since,
             concurrency,
+            order,
         }) => {
             if limit == Some(0) {
                 return emit_error(ErrorObject::bad_input(
@@ -4987,7 +5019,14 @@ fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Resul
                     "ingest enrich-zones --concurrency must be at least 1",
                 ));
             }
-            match enrich_zones_payload(index_dir, &source, limit, since.as_deref(), concurrency) {
+            match enrich_zones_payload(
+                index_dir,
+                &source,
+                limit,
+                since.as_deref(),
+                concurrency,
+                order,
+            ) {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
             }
@@ -6672,6 +6711,7 @@ fn enrich_zones_payload(
     limit: Option<u32>,
     since: Option<&str>,
     concurrency: usize,
+    order: CliEnrichZoneOrder,
 ) -> Result<Value, ErrorObject> {
     if !matches!(source, "cass" | "inca") {
         return Err(ErrorObject::bad_input(
@@ -6708,9 +6748,15 @@ fn enrich_zones_payload(
             }
             None => ENRICH_ZONES_PAGE_SIZE,
         };
-        let page_json =
-            enrich_zone_candidates_json(&postgres, source, cursor.as_deref(), since, page_limit)
-                .map_err(storage_error_object)?;
+        let page_json = enrich_zone_candidates_json(
+            &postgres,
+            source,
+            cursor.as_deref(),
+            since,
+            page_limit,
+            order.into(),
+        )
+        .map_err(storage_error_object)?;
         let page: Value = serde_json::from_str(&page_json)
             .map_err(|error| dependency_unavailable(error.to_string()))?;
         let doc_ids: Vec<String> = page["candidates"]
@@ -6749,6 +6795,7 @@ fn enrich_zones_payload(
         "source": source,
         "since": since,
         "concurrency": concurrency,
+        "order": order.as_str(),
         "considered": considered,
         "official_ok": official,
         "fallback": fallback,

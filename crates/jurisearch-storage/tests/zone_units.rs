@@ -9,7 +9,7 @@ use jurisearch_storage::{
     runtime::{ManagedPostgres, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
     zone_units::{
-        ZONE_UNIT_VECTOR_INDEX_NAME, ZoneUnitEmbeddingInsert, ZoneUnitRow,
+        EnrichZoneOrder, ZONE_UNIT_VECTOR_INDEX_NAME, ZoneUnitEmbeddingInsert, ZoneUnitRow,
         enrich_zone_candidates_json, finalize_zone_dense_rebuild, insert_zone_unit_embeddings,
         load_derivable_decision_zones_json, load_zone_unit_embedding_inputs,
         replace_zone_units_for_document, zone_resolver_reachable_json, zone_retrieval_coverage_json,
@@ -511,7 +511,12 @@ fn enrich_candidates_reenrich_fresh_ok_rows_with_null_text_hash() -> Result<(), 
     seed_decision(&postgres, "cass:NULLHASH", "22-22222", "ok", None, "{}")?;
 
     let page: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
-        &postgres, "cass", None, None, 100,
+        &postgres,
+        "cass",
+        None,
+        None,
+        100,
+        EnrichZoneOrder::Oldest,
     )?)
     .expect("candidates JSON");
     let ids: Vec<&str> = page["candidates"]
@@ -569,7 +574,12 @@ fn expired_ok_rows_are_refresh_candidates_not_derivable() -> Result<(), StorageE
         "expired ok row must not be derivable"
     );
     let enrich: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
-        &postgres, "cass", None, None, 100,
+        &postgres,
+        "cass",
+        None,
+        None,
+        100,
+        EnrichZoneOrder::Oldest,
     )?)
     .expect("candidates JSON");
     let ids: Vec<&str> = enrich["candidates"]
@@ -582,6 +592,65 @@ fn expired_ok_rows_are_refresh_candidates_not_derivable() -> Result<(), StorageE
         ids.contains(&"cass:EXPIRED"),
         "expired ok row must be a refresh candidate: {ids:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn enrich_candidate_order_recent_walks_newest_first() -> Result<(), StorageError> {
+    // Rollout fix: `--order recent` keysets newest->oldest so zoned (recent) decisions are reached
+    // first; `oldest` is the reverse. Both must page deterministically via next_cursor.
+    let Some(pg_config) = discover_pg_config("zone enrich order")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-order.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    // Three never-enriched cass decisions (no decision_zones row -> all candidates).
+    seed_decision(&postgres, "cass:AAA", "11-11111", "ok", Some("h"), "{}")?;
+    seed_decision(&postgres, "cass:BBB", "22-22222", "ok", Some("h"), "{}")?;
+    seed_decision(&postgres, "cass:CCC", "33-33333", "ok", Some("h"), "{}")?;
+    // Clear the decision_zones rows the seed inserted so all three are fresh candidates.
+    postgres.execute_sql("DELETE FROM decision_zones;")?;
+
+    // Recent order, page size 1 -> the newest id first, and next_cursor is that id (so the next page
+    // is strictly older).
+    let recent: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
+        &postgres,
+        "cass",
+        None,
+        None,
+        1,
+        EnrichZoneOrder::Recent,
+    )?)
+    .expect("candidates JSON");
+    assert_eq!(recent["candidates"][0]["document_id"], "cass:CCC");
+    assert_eq!(recent["next_cursor"], "cass:CCC");
+    // Next recent page after cass:CCC -> cass:BBB.
+    let recent2: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
+        &postgres,
+        "cass",
+        Some("cass:CCC"),
+        None,
+        1,
+        EnrichZoneOrder::Recent,
+    )?)
+    .expect("candidates JSON");
+    assert_eq!(recent2["candidates"][0]["document_id"], "cass:BBB");
+
+    // Oldest order, page size 1 -> the oldest id first (the original behavior).
+    let oldest: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
+        &postgres,
+        "cass",
+        None,
+        None,
+        1,
+        EnrichZoneOrder::Oldest,
+    )?)
+    .expect("candidates JSON");
+    assert_eq!(oldest["candidates"][0]["document_id"], "cass:AAA");
+    assert_eq!(oldest["next_cursor"], "cass:AAA");
     Ok(())
 }
 
