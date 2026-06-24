@@ -387,6 +387,56 @@ impl PisteClient {
         response_json(response)
     }
 
+    /// Legifrance search as an archivable exchange (see [`Self::judilibre_search_params_exchange`]).
+    /// POSTs the body with the OAuth bearer token; captures the raw response on success OR error. A
+    /// missing OAuth credential / token failure becomes an `UpstreamError` exchange (never an `Err`).
+    pub fn legifrance_search_exchange(&mut self, body: &Value) -> OfficialApiExchange {
+        let endpoint = "/dila/legifrance/lf-engine-app/search".to_owned();
+        let url = join_url(&self.config.api_base_url, &endpoint);
+        let request_body = body.to_string();
+        let fingerprint = format!(
+            "legifrance-search:{}",
+            body.get("query").and_then(Value::as_str).unwrap_or_default()
+        );
+        let token = match self.legifrance_bearer_token() {
+            Ok(token) => token,
+            Err(error) => {
+                return OfficialApiExchange {
+                    provider: "legifrance",
+                    endpoint,
+                    http_method: "POST",
+                    request_url: url,
+                    request_json: body.clone(),
+                    request_body: Some(request_body),
+                    request_fingerprint: fingerprint,
+                    http_status: None,
+                    response_body: String::new(),
+                    response_json: None,
+                    outcome: OfficialApiOutcome::UpstreamError,
+                    error: Some(error.to_string()),
+                };
+            }
+        };
+        let result = send_with_retry(self.retry, || {
+            self.agent
+                .post(&url)
+                .set("Accept", "application/json")
+                .set("Content-Type", "application/json")
+                .set("Authorization", &format!("Bearer {token}"))
+                .send_json(body)
+        });
+        build_exchange(
+            "legifrance",
+            endpoint,
+            "POST",
+            url,
+            body.clone(),
+            Some(request_body),
+            fingerprint,
+            result,
+        )
+    }
+
     pub fn legifrance_bearer_token(&mut self) -> Result<String, OfficialApiError> {
         if let Some(token) = self
             .legifrance_token

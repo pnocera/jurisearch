@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 16;
+pub const CURRENT_SCHEMA_VERSION: i32 = 17;
 
 struct Migration {
     version: i32,
@@ -631,6 +631,69 @@ WHERE citation_key IS NOT NULL;
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 16), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 17,
+        name: "decision_legislation_citations",
+        // Legislation enrichment (slice 2): decisions cite legislation in their Judilibre `visa`
+        // (article + code, e.g. "Article 609 du code de procédure civile"), and MANY decisions cite the
+        // SAME article — so citations are extracted from the archived /decision responses
+        // (official_api_responses) into per-decision OCCURRENCES, then DEDUPED by a normalized
+        // `citation_key` into unique RESOLUTIONS that are resolved against the Legifrance API exactly
+        // ONCE each (the Legifrance response itself lands in official_api_responses, provider='legifrance').
+        // This keeps the quota-limited upstream evidence durable without re-calling per occurrence.
+        sql: r#"
+CREATE TABLE IF NOT EXISTS decision_legislation_citations (
+    citation_occurrence_id text PRIMARY KEY,
+    decision_document_id text NOT NULL REFERENCES documents(document_id) ON DELETE CASCADE,
+    decision_source_uid text NOT NULL,
+    source_response_id bigint NOT NULL REFERENCES official_api_responses(response_id) ON DELETE CASCADE,
+    visa_index integer NOT NULL CHECK (visa_index >= 0),
+    citation_key text NOT NULL,
+    article_number_raw text,
+    article_number_norm text NOT NULL,
+    code_name_raw text,
+    code_name_norm text NOT NULL,
+    canonical_query text NOT NULL,
+    legifrance_url text,
+    raw_title text NOT NULL,
+    extraction_method text NOT NULL CHECK (extraction_method IN
+        ('legifrance_url_query','visa_title_regex')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (decision_document_id, visa_index, citation_key)
+);
+
+CREATE INDEX IF NOT EXISTS decision_legislation_citations_decision_idx
+ON decision_legislation_citations (decision_document_id);
+
+CREATE INDEX IF NOT EXISTS decision_legislation_citations_citation_key_idx
+ON decision_legislation_citations (citation_key);
+
+CREATE TABLE IF NOT EXISTS legislation_citation_resolutions (
+    citation_key text PRIMARY KEY,
+    article_number_norm text NOT NULL,
+    code_name_norm text NOT NULL,
+    canonical_query text NOT NULL,
+    occurrence_count integer NOT NULL DEFAULT 0,
+    legifrance_status text NOT NULL DEFAULT 'pending' CHECK (legifrance_status IN
+        ('pending','ok','not_found','upstream_error','parse_error')),
+    legifrance_response_id bigint REFERENCES official_api_responses(response_id) ON DELETE SET NULL,
+    legifrance_request_fingerprint text,
+    fetched_at timestamptz,
+    error text,
+    resolution_schema_version text NOT NULL DEFAULT 'legislation-citation:v1',
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS legislation_citation_resolutions_status_idx
+ON legislation_citation_resolutions (legifrance_status);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 17), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;
