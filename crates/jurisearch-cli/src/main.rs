@@ -16,7 +16,6 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::Parser;
 use jurisearch_core::{
     SCHEMA_VERSION,
     contract::{CitationState, LegalKind, OutputFormat, SESSION_EXCLUDED_COMMANDS, agent_help},
@@ -107,6 +106,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 mod args;
+mod dispatch;
 mod output;
 
 use crate::args::*;
@@ -300,7 +300,7 @@ struct SessionEvalPhase1Args {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    match dispatch::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let object = ErrorObject {
@@ -314,124 +314,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let index_dir = cli.index_dir;
-    let command = cli.command.unwrap_or(Command::Help(HelpCommand {
-        command: Some(HelpSubcommand::Agent),
-    }));
-
-    match command {
-        Command::Help(help) => emit_help(help),
-        Command::Status(args) => write_json(&status_payload(
-            index_dir.as_deref(),
-            replay_snapshot_mode(args.deep),
-        )),
-        Command::Session(args) | Command::Batch(args) => run_jsonl(args),
-        Command::Serve(args) => run_serve(args, index_dir.as_deref()),
-        Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
-        Command::Eval(eval) => emit_eval(eval, index_dir.as_deref()),
-        Command::Search(args) => {
-            if args.query.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("search query must not be empty"))
-            } else if args.top_k == 0 {
-                emit_error(ErrorObject::bad_input("search --top-k must be at least 1"))
-            } else {
-                emit_search(args, index_dir.as_deref())
-            }
-        }
-        Command::Fetch(args) => {
-            if args.ids.is_empty() {
-                emit_error(ErrorObject::bad_input(
-                    "fetch requires at least one stable ID",
-                ))
-            } else {
-                emit_fetch(args, index_dir.as_deref())
-            }
-        }
-        Command::Cite(args) => {
-            if args.cite.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("cite requires a non-empty citation"))
-            } else {
-                emit_cite(args, index_dir.as_deref())
-            }
-        }
-        Command::Related(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("related requires a document id"))
-            } else {
-                emit_related(args, index_dir.as_deref())
-            }
-        }
-        Command::Compare(args) => {
-            if args.query.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("compare query must not be empty"))
-            } else if args.top_k == 0 {
-                emit_error(ErrorObject::bad_input("compare --top-k must be at least 1"))
-            } else {
-                emit_compare(args, index_dir.as_deref())
-            }
-        }
-        Command::Context(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input(
-                    "context requires a non-empty stable ID",
-                ))
-            } else {
-                emit_context(args, index_dir.as_deref())
-            }
-        }
-        Command::Expand(args) => {
-            if args.query.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("expand query must not be empty"))
-            } else {
-                emit_expand(args)
-            }
-        }
-        Command::Model(args) => emit_model(args),
-        Command::Setup => write_json(&setup_payload()),
-        Command::Doctor => write_json(&doctor_payload(index_dir.as_deref())),
-        Command::Stats => match stats_payload(index_dir.as_deref()) {
-            Ok(response) => write_json(&response),
-            Err(error) => emit_error(error),
-        },
-        Command::Inspect(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("inspect requires a document id"))
-            } else {
-                match inspect_payload(args, index_dir.as_deref()) {
-                    Ok(response) => write_json(&response),
-                    Err(error) => emit_error(error),
-                }
-            }
-        }
-        Command::Versions(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("versions requires a document id"))
-            } else {
-                match versions_payload(args, index_dir.as_deref()) {
-                    Ok(response) => write_json(&response),
-                    Err(error) => emit_error(error),
-                }
-            }
-        }
-        Command::Diff(args) => match diff_payload(args, index_dir.as_deref()) {
-            Ok(response) => write_json(&response),
-            Err(error) => emit_error(error),
-        },
-        Command::Sync(args) => match sync_payload(args, index_dir.as_deref()) {
-            Ok(response) => write_json(&response),
-            Err(error) => emit_error(error),
-        },
-    }
-}
-
 /// Incremental sync: pull a source's new delta archives into the existing index. Reuses the proven
 /// per-source ingest path (and its compatibility-based resume, which skips already-ingested members
 /// and blocks parser/schema/code/source-payload mismatches — so sync can never silently mix
 /// incompatible versions). `--since` bounds which delta archives are scanned so a sync never
 /// re-reads the full baseline corpus; `status.corpus_sources` then reports the new freshness.
-fn sync_payload(args: SyncArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn sync_payload(args: SyncArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let source_token = args.source.as_deref().ok_or_else(|| {
         ErrorObject::bad_input("sync requires --source (legi|cass|capp|inca|jade)")
     })?;
@@ -493,14 +381,14 @@ fn sync_payload(args: SyncArgs, index_dir: Option<&Path>) -> Result<Value, Error
     Ok(response)
 }
 
-fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_search(args: SearchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match search_payload(args, index_dir) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match eval.command {
         Some(EvalSubcommand::Phase1(args)) => match eval_phase1_payload(args, index_dir) {
             Ok(response) => write_json(&response),
@@ -2871,21 +2759,21 @@ fn search_with_postgres(
     }
 }
 
-fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match fetch_payload(args, index_dir) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-fn emit_cite(args: CiteArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_cite(args: CiteArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match cite_payload(args, index_dir) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match context_payload(args, index_dir) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
@@ -2924,7 +2812,7 @@ fn related_payload(args: RelatedArgs, index_dir: Option<&Path>) -> Result<Value,
     serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
 }
 
-fn emit_related(args: RelatedArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_related(args: RelatedArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match related_payload(args, index_dir) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
@@ -3062,21 +2950,21 @@ fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value,
     }))
 }
 
-fn emit_compare(args: CompareArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_compare(args: CompareArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match compare_payload(args, index_dir) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-fn emit_expand(args: QueryArgs) -> anyhow::Result<()> {
+pub(crate) fn emit_expand(args: QueryArgs) -> anyhow::Result<()> {
     match expand_payload(args) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
+pub(crate) fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
     match args.command {
         Some(ModelSubcommand::Fetch {
             model,
@@ -4476,7 +4364,7 @@ fn session_status_payload(args: Value) -> Result<Value, ErrorObject> {
     ))
 }
 
-fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
+pub(crate) fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
     match help.command.unwrap_or(HelpSubcommand::Agent) {
         HelpSubcommand::Agent => {
             println!("{}", agent_help());
@@ -4490,7 +4378,7 @@ fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
     }
 }
 
-fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match ingest.command {
         Some(IngestSubcommand::PlanArchives {
             source,
@@ -8316,7 +8204,7 @@ fn serve_jsonl<R: BufRead, W: Write>(
     Ok(())
 }
 
-fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     let default_index_dir = index_dir.map(|path| path.display().to_string());
     match (args.tcp.as_deref(), args.socket.as_deref()) {
         (Some(_), Some(_)) | (None, None) => emit_error(ErrorObject::bad_input(
@@ -8394,7 +8282,7 @@ fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
-fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
+pub(crate) fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
     if !args.jsonl {
         return emit_error(ErrorObject::bad_input(
             "session and batch require the explicit `--jsonl` flag",
@@ -8552,7 +8440,7 @@ fn model_fetch_payload(model: Option<String>, allow_download: bool) -> Result<Va
     )))
 }
 
-fn setup_payload() -> Value {
+pub(crate) fn setup_payload() -> Value {
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
     let model_cache = model_cache_status(&embedding_config);
@@ -8591,7 +8479,7 @@ fn ensure_embedding_runtime_ready(
         .map_err(embedding_error_object)
 }
 
-fn replay_snapshot_mode(deep: bool) -> ReplaySnapshotMode {
+pub(crate) fn replay_snapshot_mode(deep: bool) -> ReplaySnapshotMode {
     if deep {
         ReplaySnapshotMode::Refresh
     } else {
@@ -8599,7 +8487,7 @@ fn replay_snapshot_mode(deep: bool) -> ReplaySnapshotMode {
     }
 }
 
-fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshotMode) -> Value {
+pub(crate) fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshotMode) -> Value {
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
     let model_cache = model_cache_status(&embedding_config);
@@ -8656,7 +8544,7 @@ fn doctor_check(name: &str, status: &str, detail: Value) -> Value {
 /// runtime + required extension assets (pg_search, vector), and index-dir presence — WITHOUT
 /// starting or owning the index Postgres (so it never fights a running instance). For deep
 /// index/ingest readiness (migrations, query-readiness) run `status`.
-fn doctor_payload(index_dir: Option<&Path>) -> Value {
+pub(crate) fn doctor_payload(index_dir: Option<&Path>) -> Value {
     let mut checks: Vec<Value> = Vec::new();
     let mut ready = true;
 
@@ -8791,7 +8679,7 @@ fn session_doctor_payload(args: Value) -> Result<Value, ErrorObject> {
     Ok(doctor_payload(args.index_dir.as_deref()))
 }
 
-fn stats_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn stats_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     let response = corpus_stats_json(&postgres).map_err(storage_error_object)?;
@@ -8800,7 +8688,7 @@ fn stats_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     Ok(json!({ "schema_version": SCHEMA_VERSION, "stats": stats }))
 }
 
-fn inspect_payload(args: InspectArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn inspect_payload(args: InspectArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
@@ -8842,7 +8730,7 @@ fn session_inspect_payload(args: Value) -> Result<Value, ErrorObject> {
     inspect_payload(InspectArgs { id: args.id }, index_dir.as_deref())
 }
 
-fn versions_payload(args: VersionsArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn versions_payload(args: VersionsArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
@@ -8859,7 +8747,7 @@ fn versions_payload(args: VersionsArgs, index_dir: Option<&Path>) -> Result<Valu
     Ok(value)
 }
 
-fn diff_payload(args: DiffArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn diff_payload(args: DiffArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     if args.id.trim().is_empty() {
         return Err(ErrorObject::bad_input("diff requires a document id"));
     }
