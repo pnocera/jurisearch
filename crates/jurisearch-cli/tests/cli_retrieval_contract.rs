@@ -1270,6 +1270,125 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
     Ok(())
 }
 
+/// Insert a `cass` decision + one matching chunk (bm25-searchable, no embeddings needed) with the
+/// given `publication` marker, so an authority re-rank has real judicial candidates to project/order.
+fn insert_cass_decision(postgres: &ManagedPostgres, id: &str, publication: &str, terms: &str) {
+    let chunk = format!("{id}:0");
+    postgres
+        .execute_sql(&format!(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('{id}', 'cass', 'decision', '{id}', 'Cass. {id}', 'Arret {id}', '{terms}', \
+                 '2024-01-01', 'sha256:{id}', '{{\"publication\":\"{publication}\"}}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('{chunk}', '{id}', 0, '{terms}', '{terms}', 'sha256:{id}', 'chunker:v0', 'fp:test');"
+        ))
+        .expect("insert cass decision");
+}
+
+#[test]
+fn search_authority_rerank_wires_projection_pagination_and_metadata() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("CLI authority rerank wiring")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-authority.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let terms = "prescription quinquennale responsabilite delictuelle";
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        insert_cass_decision(&postgres, "cass:DECPUB", "oui", terms);
+        insert_cass_decision(&postgres, "cass:DECUNP", "non", terms);
+    }
+
+    // OFF (no --authority-weight): byte-identical legacy behaviour — no authority/publication, paging on.
+    let off: Value = serde_json::from_slice(
+        &Command::cargo_bin("jurisearch")
+            .unwrap()
+            .env("JURISEARCH_INDEX_DIR", root.path())
+            .args([
+                "search", terms, "--kind", "decision", "--mode", "bm25", "--top-k", "5",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    )
+    .unwrap();
+    assert!(
+        off.get("authority").is_none(),
+        "OFF must emit no authority block"
+    );
+    assert!(
+        off["candidates"][0].get("publication").is_none(),
+        "OFF must not project publication"
+    );
+    assert!(off["candidates"][0].get("authority").is_none());
+    assert_eq!(off["pagination"]["cursor_supported"], true);
+
+    // ON (--authority-weight 0.5): decision-only re-rank wired end to end.
+    let on: Value = serde_json::from_slice(
+        &Command::cargo_bin("jurisearch")
+            .unwrap()
+            .env("JURISEARCH_INDEX_DIR", root.path())
+            .args([
+                "search",
+                terms,
+                "--kind",
+                "decision",
+                "--mode",
+                "bm25",
+                "--top-k",
+                "5",
+                "--authority-weight",
+                "0.5",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    )
+    .unwrap();
+    // Response-level authority metadata.
+    assert_eq!(on["authority"]["enabled"], true);
+    assert_eq!(on["authority"]["weight"], 0.5);
+    assert_eq!(on["authority"]["paging"], "first_page_only");
+    assert!(on["authority"]["window_factor"].as_u64().unwrap() >= 1);
+    // First-page-only pagination: no legacy cursor is ever emitted on an authority response.
+    assert_eq!(on["pagination"]["cursor_supported"], false);
+    assert!(on["pagination"]["next_cursor"].is_null());
+    // Per-candidate projection + authority block (judicial order, tier_max 3).
+    let candidates = on["candidates"].as_array().unwrap();
+    assert!(!candidates.is_empty());
+    for candidate in candidates {
+        assert!(
+            candidate.get("publication").is_some(),
+            "ON must project publication"
+        );
+        assert_eq!(candidate["authority"]["order"], "judicial");
+        assert_eq!(candidate["authority"]["tier_max"], 3);
+    }
+    // The published Cassation decision (tier 3) is ranked at or above the unpublished one (tier 2) —
+    // bm25 scores them near-identically, so authority is the deciding signal within the band.
+    let ranked: Vec<&str> = candidates
+        .iter()
+        .map(|c| c["document_id"].as_str().unwrap())
+        .collect();
+    let pub_pos = ranked.iter().position(|id| *id == "cass:DECPUB").unwrap();
+    let unp_pos = ranked.iter().position(|id| *id == "cass:DECUNP").unwrap();
+    assert!(
+        pub_pos < unp_pos,
+        "published cass (tier 3) should outrank unpublished (tier 2): {ranked:?}"
+    );
+    Ok(())
+}
+
 // ---- A3: --authority-weight config + validation (no index needed; rejections fire pre-index) ----
 
 /// Run `search` with the given trailing args and no index configured, returning parsed JSON stdout.

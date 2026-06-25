@@ -43,7 +43,10 @@ use jurisearch_official_api::{
 };
 use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
-    authority::effective_authority_weight,
+    authority::{
+        AUTHORITY_DEFAULT_BAND, AUTHORITY_RERANK_WINDOW, authority_rerank,
+        effective_authority_weight,
+    },
     citation::{CitationLookupQuery, citation_lookup_json},
     decision_zones::{
         UpsertDecisionZones, decision_resolution_metadata_with_client, decision_zones_json,

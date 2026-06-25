@@ -107,7 +107,19 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
     // Group by decision -> overfetch a deeper pool to still yield up to top_k UNIQUE decisions.
     let lexical_limit = req.top_k.saturating_mul(20);
     let dense_limit = req.top_k.saturating_mul(20);
-    let query_limit = req.top_k.saturating_add(1);
+    // Authority (A4): mirror the main path. ON widens the window to `top_k * W_eff` (W_eff clamped to
+    // the zone pool multiplier 20) and projects `publication`; OFF keeps today's exact `top_k + 1`.
+    let authority_weight = effective_authority_weight(&req.retrieval_options());
+    let window_factor = if authority_weight.is_some() {
+        AUTHORITY_RERANK_WINDOW.min(20)
+    } else {
+        1
+    };
+    let query_limit = if authority_weight.is_some() {
+        req.top_k.saturating_mul(window_factor).saturating_add(1)
+    } else {
+        req.top_k.saturating_add(1)
+    };
 
     let response = zone_candidates_json(
         &postgres,
@@ -122,7 +134,7 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
                 .map(ParsedSearchCursor::as_retrieval_cursor),
             zone: zone.as_str(),
             as_of: as_of.as_str(),
-            project_authority: false,
+            project_authority: authority_weight.is_some(),
             decision_filters: req.decision_filters(),
             lexical_limit,
             dense_limit,
@@ -152,6 +164,15 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
         "note": "Coverage-bounded: searches ONLY resolver-reachable Cour de cassation decisions that have official Judilibre zones — not a corpus-wide search. Other courts/administrative decisions are not covered."
     });
 
+    // Authority re-rank (A4): reorder the widened window by within-order publication authority BEFORE
+    // truncation, same helper as the main path (zone results are all decisions, so no kind gate).
+    let mut authority_applied = false;
+    if let Some(weight) = authority_weight
+        && let Some(candidates) = response["candidates"].as_array_mut()
+    {
+        authority_rerank(candidates, weight, AUTHORITY_DEFAULT_BAND);
+        authority_applied = true;
+    }
     let mut next_cursor = None;
     let top_k = req.top_k as usize;
     if let Some(candidates) = response["candidates"].as_array_mut()
@@ -163,14 +184,31 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
             .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
     }
     let returned = response["candidates"].as_array().map_or(0, Vec::len);
-    // Zone candidates always carry a ranking cursor, so paging is always supported.
+    // Zone candidates normally carry a ranking cursor (paging supported). Authority re-rank is
+    // first-page-only in v1: it reorders rows away from SQL keyset order, so disable paging for it.
+    if authority_applied {
+        next_cursor = None;
+    }
     response["pagination"] = search_pagination_value(
         req.top_k,
         req.cursor.as_deref(),
         returned,
-        true,
+        !authority_applied,
         next_cursor.as_deref(),
     );
+    if authority_applied {
+        response["pagination"]["cursor_note"] = json!(
+            "Authority re-rank is first-page-only in v1: cursor paging is disabled for this \
+             response. Increase --top-k (or top_k in session JSON) to inspect a wider \
+             authority-ranked window."
+        );
+        response["authority"] = json!({
+            "enabled": true,
+            "weight": authority_weight,
+            "window_factor": window_factor,
+            "paging": "first_page_only",
+        });
+    }
     response["routing"] = json!({
         "query_type": "zone",
         "chosen_backend": "official_zone_retrieval",

@@ -225,6 +225,12 @@ struct SearchExecution<'a> {
     lexical_limit: u32,
     dense_limit: u32,
     query_limit: u32,
+    /// Effective authority re-rank weight (A4): `Some(w>0.0)` enables the decision-only re-rank, widens
+    /// `query_limit`, projects `publication`, and forces first-page-only paging. `None` is the OFF path.
+    authority_weight: Option<f64>,
+    /// The per-grouping clamped window factor `W_eff = min(AUTHORITY_RERANK_WINDOW, pool_multiplier)`
+    /// used when authority is ON (`1` when OFF). Reported in the response's `authority` block.
+    window_factor: u32,
 }
 
 /// The routed candidate set plus its intent-routing audit labels, before response-envelope shaping.
@@ -260,7 +266,20 @@ impl<'a> SearchExecution<'a> {
         };
         let lexical_limit = req.top_k.saturating_mul(pool_multiplier);
         let dense_limit = req.top_k.saturating_mul(pool_multiplier);
-        let query_limit = req.top_k.saturating_add(1);
+        // Authority (A4): when ON, widen the fetched window to `top_k * W_eff` so the re-rank has a
+        // deeper same-relevance pool. `W_eff` is clamped to the arm pool multiplier so the window can
+        // never outrun the candidate set feeding RRF. OFF keeps today's exact `top_k + 1`.
+        let authority_weight = effective_authority_weight(&req.retrieval_options());
+        let window_factor = if authority_weight.is_some() {
+            AUTHORITY_RERANK_WINDOW.min(pool_multiplier)
+        } else {
+            1
+        };
+        let query_limit = if authority_weight.is_some() {
+            req.top_k.saturating_mul(window_factor).saturating_add(1)
+        } else {
+            req.top_k.saturating_add(1)
+        };
         Self {
             postgres,
             req,
@@ -274,6 +293,8 @@ impl<'a> SearchExecution<'a> {
             lexical_limit,
             dense_limit,
             query_limit,
+            authority_weight,
+            window_factor,
         }
     }
 
@@ -303,7 +324,7 @@ impl<'a> SearchExecution<'a> {
                     .map(ParsedSearchCursor::as_retrieval_cursor),
                 as_of: self.as_of.as_str(),
                 kind_filter: self.kind_filter,
-                project_authority: false,
+                project_authority: self.authority_weight.is_some(),
                 decision_filters: self.req.decision_filters(),
                 lexical_limit: self.lexical_limit,
                 dense_limit: self.dense_limit,
@@ -388,6 +409,17 @@ impl<'a> SearchExecution<'a> {
         response["limit"] = json!(self.req.top_k);
         response["expansion_seed_version"] = json!(expansion.seed_version);
         response["expanded_terms"] = json!(expansion.expanded_terms);
+        // Authority re-rank (A4): reorder the widened window by within-order publication authority
+        // BEFORE truncation, so the most authoritative of the near-tied top results surfaces. Only on
+        // the hybrid candidate path — structured citation results are an exact set with no ranking band.
+        let mut authority_applied = false;
+        if chosen_backend != "structured_citation"
+            && let Some(weight) = self.authority_weight
+            && let Some(candidates) = response["candidates"].as_array_mut()
+        {
+            authority_rerank(candidates, weight, AUTHORITY_DEFAULT_BAND);
+            authority_applied = true;
+        }
         let mut next_cursor = None;
         let top_k = self.req.top_k as usize;
         if let Some(candidates) = response["candidates"].as_array_mut()
@@ -401,8 +433,12 @@ impl<'a> SearchExecution<'a> {
         }
         let returned = response["candidates"].as_array().map_or(0, Vec::len);
         // Structured citation results are an exact, fully-returned resolution set with no ranking
-        // cursor, so cursor paging does not apply to them.
-        let cursor_supported = chosen_backend != "structured_citation";
+        // cursor. Authority re-rank is first-page-only in v1: it reorders rows away from SQL keyset
+        // order, so no single (score,id) cursor can represent the page — disable paging for it too.
+        let cursor_supported = chosen_backend != "structured_citation" && !authority_applied;
+        if authority_applied {
+            next_cursor = None;
+        }
         response["pagination"] = search_pagination_value(
             self.req.top_k,
             self.req.cursor.as_deref(),
@@ -410,6 +446,19 @@ impl<'a> SearchExecution<'a> {
             cursor_supported,
             next_cursor.as_deref(),
         );
+        if authority_applied {
+            response["pagination"]["cursor_note"] = json!(
+                "Authority re-rank is first-page-only in v1: cursor paging is disabled for this \
+                 response. Increase --top-k (or top_k in session JSON) to inspect a wider \
+                 authority-ranked window."
+            );
+            response["authority"] = json!({
+                "enabled": true,
+                "weight": self.authority_weight,
+                "window_factor": self.window_factor,
+                "paging": "first_page_only",
+            });
+        }
         // Intent-routing audit: prove the resolver was used because the input is structurally
         // resolvable (query_type=citation, backend=structured_citation), not because the evaluator
         // knew the answer. Recorded on every search, structured and hybrid alike.
