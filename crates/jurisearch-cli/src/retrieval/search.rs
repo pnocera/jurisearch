@@ -178,157 +178,255 @@ pub(crate) fn search_with_postgres(
         };
         ensure_query_readiness(postgres, readiness_gate)?;
     }
-    let as_of = req.as_of.clone().unwrap_or_else(today_utc);
-    let kind_filter = match kind {
-        LegalKind::Code => Some("article"),
-        LegalKind::Decision => Some("decision"),
-        LegalKind::All => None,
-    };
-    // Document grouping collapses many chunks per article, so overfetch a deeper pool to still
-    // yield up to top_k UNIQUE documents (reported smaller only when the pool is exhausted).
-    let group_by: GroupBy = req.group_by.into();
-    let pool_multiplier = match group_by {
-        GroupBy::Document => 20,
-        GroupBy::Chunk => 4,
-    };
-    let lexical_limit = req.top_k.saturating_mul(pool_multiplier);
-    let dense_limit = req.top_k.saturating_mul(pool_multiplier);
-    let query_limit = req.top_k.saturating_add(1);
+    let execution = SearchExecution::new(
+        postgres,
+        req,
+        retrieval_mode,
+        query_text,
+        after_cursor,
+        kind,
+        embedder,
+    );
+    let routed = execution.run_structured_citation_or_fallback()?;
+    execution.apply_search_response_envelope(routed, output_format)
+}
 
-    // Hybrid retrieval (embedding + BM25/dense/RRF). Run only for conceptual queries, explicit
-    // bm25/dense modes, or as a fallback when structured citation resolution finds nothing.
-    let run_hybrid = || -> Result<Value, ErrorObject> {
-        let (query_embedding, embedding_fingerprint) = if retrieval_mode.uses_dense() {
-            let (literal, fingerprint) = match embedder {
-                Some(prepared) => prepared.embed(req.query.as_str())?,
-                None => PreparedQueryEmbedder::from_env()?.embed(req.query.as_str())?,
+/// The candidate-execution context for one search against an already-open index: the borrowed
+/// inputs plus the request-derived limits/filters. Bundling them lets the routing, candidate
+/// execution, and response-shaping steps be small `&self` methods instead of one long function,
+/// without threading a dozen locals through each. Postgres stays concrete (no retriever trait).
+struct SearchExecution<'a> {
+    postgres: &'a ManagedPostgres,
+    req: &'a SearchRequest,
+    retrieval_mode: RetrievalMode,
+    query_text: &'a str,
+    after_cursor: Option<&'a ParsedSearchCursor>,
+    embedder: Option<&'a PreparedQueryEmbedder>,
+    as_of: String,
+    kind_filter: Option<&'static str>,
+    group_by: GroupBy,
+    lexical_limit: u32,
+    dense_limit: u32,
+    query_limit: u32,
+}
+
+/// The routed candidate set plus its intent-routing audit labels, before response-envelope shaping.
+struct RoutedSearch {
+    response: Value,
+    query_type: &'static str,
+    chosen_backend: &'static str,
+    fallback_path: &'static str,
+}
+
+impl<'a> SearchExecution<'a> {
+    fn new(
+        postgres: &'a ManagedPostgres,
+        req: &'a SearchRequest,
+        retrieval_mode: RetrievalMode,
+        query_text: &'a str,
+        after_cursor: Option<&'a ParsedSearchCursor>,
+        kind: LegalKind,
+        embedder: Option<&'a PreparedQueryEmbedder>,
+    ) -> Self {
+        let as_of = req.as_of.clone().unwrap_or_else(today_utc);
+        let kind_filter = match kind {
+            LegalKind::Code => Some("article"),
+            LegalKind::Decision => Some("decision"),
+            LegalKind::All => None,
+        };
+        // Document grouping collapses many chunks per article, so overfetch a deeper pool to still
+        // yield up to top_k UNIQUE documents (reported smaller only when the pool is exhausted).
+        let group_by: GroupBy = req.group_by.into();
+        let pool_multiplier = match group_by {
+            GroupBy::Document => 20,
+            GroupBy::Chunk => 4,
+        };
+        let lexical_limit = req.top_k.saturating_mul(pool_multiplier);
+        let dense_limit = req.top_k.saturating_mul(pool_multiplier);
+        let query_limit = req.top_k.saturating_add(1);
+        Self {
+            postgres,
+            req,
+            retrieval_mode,
+            query_text,
+            after_cursor,
+            embedder,
+            as_of,
+            kind_filter,
+            group_by,
+            lexical_limit,
+            dense_limit,
+            query_limit,
+        }
+    }
+
+    /// Hybrid retrieval (embedding + BM25/dense/RRF). Run for conceptual queries, explicit bm25/dense
+    /// modes, or as the fallback when structured citation resolution finds nothing.
+    fn run_hybrid_candidates(&self) -> Result<Value, ErrorObject> {
+        let (query_embedding, embedding_fingerprint) = if self.retrieval_mode.uses_dense() {
+            let (literal, fingerprint) = match self.embedder {
+                Some(prepared) => prepared.embed(self.req.query.as_str())?,
+                None => PreparedQueryEmbedder::from_env()?.embed(self.req.query.as_str())?,
             };
             (Some(literal), Some(fingerprint))
         } else {
             (None, None)
         };
         let response = hybrid_candidates_json(
-            postgres,
+            self.postgres,
             &HybridCandidateQuery {
-                query_text,
+                query_text: self.query_text,
                 query_embedding: query_embedding.as_deref(),
                 embedding_fingerprint: embedding_fingerprint.as_deref(),
-                retrieval_mode,
-                group_by,
-                options: req.retrieval_options(),
-                after_cursor: after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
-                as_of: as_of.as_str(),
-                kind_filter,
-                decision_filters: req.decision_filters(),
-                lexical_limit,
-                dense_limit,
-                limit: query_limit,
+                retrieval_mode: self.retrieval_mode,
+                group_by: self.group_by,
+                options: self.req.retrieval_options(),
+                after_cursor: self.after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
+                as_of: self.as_of.as_str(),
+                kind_filter: self.kind_filter,
+                decision_filters: self.req.decision_filters(),
+                lexical_limit: self.lexical_limit,
+                dense_limit: self.dense_limit,
+                limit: self.query_limit,
             },
         )
         .map_err(storage_error_object)?;
         serde_json::from_str::<Value>(&response)
             .map_err(|error| dependency_unavailable(error.to_string()))
-    };
+    }
 
-    // Intent routing. A citation-shaped query in Hybrid mode resolves structurally; a structured
-    // miss falls back to hybrid so a malformed citation still returns results.
-    let citation_intent = legi_citation_routing(&req.query, as_of.as_str());
-    let query_type = if citation_intent.is_some() {
-        "citation"
-    } else {
-        "semantic"
-    };
-    let (mut response, chosen_backend, fallback_path) = match citation_intent {
-        Some(parsed) if matches!(retrieval_mode, RetrievalMode::Hybrid) => {
-            let structured = resolve_legi_citation_json(
-                postgres,
-                &CitationResolutionQuery {
-                    query: parsed.citation_query.as_str(),
-                    article_number: parsed.article_number.as_str(),
-                    code_hint: parsed.code_hint.as_deref(),
-                    as_of: parsed.as_of.as_str(),
-                    kind_filter,
-                    // Structured results have no pagination cursor; request exactly top_k so the
-                    // response never reports a phantom truncation it cannot page past.
-                    limit: req.top_k,
-                },
-            )
-            .map_err(storage_error_object)?;
-            let structured: Value = serde_json::from_str(&structured)
-                .map_err(|error| dependency_unavailable(error.to_string()))?;
-            let count = structured["candidates"].as_array().map_or(0, Vec::len);
-            if count > 0 {
-                (structured, "structured_citation", "none")
-            } else {
-                (run_hybrid()?, retrieval_mode.as_str(), "hybrid_fallback")
+    /// Intent routing. A citation-shaped query (`Article <n>`) in Hybrid mode resolves structurally;
+    /// a structured miss falls back to hybrid so a malformed citation still returns results. Conceptual
+    /// queries and explicit bm25/dense modes go straight to hybrid.
+    fn run_structured_citation_or_fallback(&self) -> Result<RoutedSearch, ErrorObject> {
+        let citation_intent = legi_citation_routing(&self.req.query, self.as_of.as_str());
+        let query_type = if citation_intent.is_some() {
+            "citation"
+        } else {
+            "semantic"
+        };
+        let (response, chosen_backend, fallback_path) = match citation_intent {
+            Some(parsed) if matches!(self.retrieval_mode, RetrievalMode::Hybrid) => {
+                let structured = resolve_legi_citation_json(
+                    self.postgres,
+                    &CitationResolutionQuery {
+                        query: parsed.citation_query.as_str(),
+                        article_number: parsed.article_number.as_str(),
+                        code_hint: parsed.code_hint.as_deref(),
+                        as_of: parsed.as_of.as_str(),
+                        kind_filter: self.kind_filter,
+                        // Structured results have no pagination cursor; request exactly top_k so the
+                        // response never reports a phantom truncation it cannot page past.
+                        limit: self.req.top_k,
+                    },
+                )
+                .map_err(storage_error_object)?;
+                let structured: Value = serde_json::from_str(&structured)
+                    .map_err(|error| dependency_unavailable(error.to_string()))?;
+                let count = structured["candidates"].as_array().map_or(0, Vec::len);
+                if count > 0 {
+                    (structured, "structured_citation", "none")
+                } else {
+                    (
+                        self.run_hybrid_candidates()?,
+                        self.retrieval_mode.as_str(),
+                        "hybrid_fallback",
+                    )
+                }
             }
+            _ => (
+                self.run_hybrid_candidates()?,
+                self.retrieval_mode.as_str(),
+                "none",
+            ),
+        };
+        Ok(RoutedSearch {
+            response,
+            query_type,
+            chosen_backend,
+            fallback_path,
+        })
+    }
+
+    /// Shape the routed candidate set into the final `SearchResponse`: expansion/format/limit
+    /// decoration, top_k truncation + next-cursor, pagination block, the intent-routing audit, and
+    /// (detailed only) diagnostics. Maps an empty candidate set to `no_results`.
+    fn apply_search_response_envelope(
+        &self,
+        routed: RoutedSearch,
+        output_format: OutputFormat,
+    ) -> Result<Value, ErrorObject> {
+        let RoutedSearch {
+            mut response,
+            query_type,
+            chosen_backend,
+            fallback_path,
+        } = routed;
+        let routed_candidate_count = response["candidates"].as_array().map_or(0, Vec::len);
+        let expansion = expand_query(&self.req.query);
+        response["format"] = json!(output_format.as_str());
+        response["limit"] = json!(self.req.top_k);
+        response["expansion_seed_version"] = json!(expansion.seed_version);
+        response["expanded_terms"] = json!(expansion.expanded_terms);
+        let mut next_cursor = None;
+        let top_k = self.req.top_k as usize;
+        if let Some(candidates) = response["candidates"].as_array_mut()
+            && candidates.len() > top_k
+        {
+            candidates.truncate(top_k);
+            // Storage always projects a cursor; keep next_cursor tied to the last displayed row.
+            next_cursor = candidates
+                .last()
+                .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
         }
-        _ => (run_hybrid()?, retrieval_mode.as_str(), "none"),
-    };
-    let routed_candidate_count = response["candidates"].as_array().map_or(0, Vec::len);
-    let expansion = expand_query(&req.query);
-    response["format"] = json!(output_format.as_str());
-    response["limit"] = json!(req.top_k);
-    response["expansion_seed_version"] = json!(expansion.seed_version);
-    response["expanded_terms"] = json!(expansion.expanded_terms);
-    let mut next_cursor = None;
-    let top_k = req.top_k as usize;
-    if let Some(candidates) = response["candidates"].as_array_mut()
-        && candidates.len() > top_k
-    {
-        candidates.truncate(top_k);
-        // Storage always projects a cursor; keep next_cursor tied to the last displayed row.
-        next_cursor = candidates
-            .last()
-            .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
-    }
-    let returned = response["candidates"].as_array().map_or(0, Vec::len);
-    // Structured citation results are an exact, fully-returned resolution set with no ranking
-    // cursor, so cursor paging does not apply to them.
-    let cursor_supported = chosen_backend != "structured_citation";
-    response["pagination"] = search_pagination_value(
-        req.top_k,
-        req.cursor.as_deref(),
-        returned,
-        cursor_supported,
-        next_cursor.as_deref(),
-    );
-    // Intent-routing audit: prove the resolver was used because the input is structurally
-    // resolvable (query_type=citation, backend=structured_citation), not because the evaluator
-    // knew the answer. Recorded on every search, structured and hybrid alike.
-    response["routing"] = json!({
-        "query_type": query_type,
-        "chosen_backend": chosen_backend,
-        "candidate_count": routed_candidate_count,
-        "fallback_path": fallback_path,
-    });
-    if matches!(output_format, OutputFormat::Detailed) {
-        response["diagnostics"] = json!({
-            "query_input": req.query.clone(),
-            "lexical_query_text": if retrieval_mode.uses_lexical() {
-                Some(query_text)
-            } else {
-                None
-            },
-            "retrieval": {
-                "mode": retrieval_mode.as_str(),
-                "uses_lexical": retrieval_mode.uses_lexical(),
-                "uses_dense": retrieval_mode.uses_dense(),
-                "lexical_limit": lexical_limit,
-                "dense_limit": dense_limit,
-                "query_limit": query_limit,
-                "kind_filter": kind_filter,
-                "after_cursor": req.cursor.as_deref(),
-            }
+        let returned = response["candidates"].as_array().map_or(0, Vec::len);
+        // Structured citation results are an exact, fully-returned resolution set with no ranking
+        // cursor, so cursor paging does not apply to them.
+        let cursor_supported = chosen_backend != "structured_citation";
+        response["pagination"] = search_pagination_value(
+            self.req.top_k,
+            self.req.cursor.as_deref(),
+            returned,
+            cursor_supported,
+            next_cursor.as_deref(),
+        );
+        // Intent-routing audit: prove the resolver was used because the input is structurally
+        // resolvable (query_type=citation, backend=structured_citation), not because the evaluator
+        // knew the answer. Recorded on every search, structured and hybrid alike.
+        response["routing"] = json!({
+            "query_type": query_type,
+            "chosen_backend": chosen_backend,
+            "candidate_count": routed_candidate_count,
+            "fallback_path": fallback_path,
         });
-    }
-    if response["candidates"]
-        .as_array()
-        .is_some_and(|candidates| candidates.is_empty())
-    {
-        Err(no_results("search returned no candidates"))
-    } else {
-        Ok(response)
+        if matches!(output_format, OutputFormat::Detailed) {
+            response["diagnostics"] = json!({
+                "query_input": self.req.query.clone(),
+                "lexical_query_text": if self.retrieval_mode.uses_lexical() {
+                    Some(self.query_text)
+                } else {
+                    None
+                },
+                "retrieval": {
+                    "mode": self.retrieval_mode.as_str(),
+                    "uses_lexical": self.retrieval_mode.uses_lexical(),
+                    "uses_dense": self.retrieval_mode.uses_dense(),
+                    "lexical_limit": self.lexical_limit,
+                    "dense_limit": self.dense_limit,
+                    "query_limit": self.query_limit,
+                    "kind_filter": self.kind_filter,
+                    "after_cursor": self.req.cursor.as_deref(),
+                }
+            });
+        }
+        if response["candidates"]
+            .as_array()
+            .is_some_and(|candidates| candidates.is_empty())
+        {
+            Err(no_results("search returned no candidates"))
+        } else {
+            Ok(response)
+        }
     }
 }
 
