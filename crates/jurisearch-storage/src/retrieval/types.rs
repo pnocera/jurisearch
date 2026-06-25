@@ -63,6 +63,10 @@ pub struct RetrievalOptions {
     pub rrf_lexical_weight: Option<f64>,
     pub rrf_dense_weight: Option<f64>,
     pub ivfflat_probes: Option<u32>,
+    /// Decision-only authority rerank weight (`crate::authority`). `None`/unset and `<= 0.0` are inert
+    /// (the OFF path is byte-identical), so existing callers and `RetrievalOptions::default()` never
+    /// trigger authority reranking. Only finite `> 0.0` enables it. No environment fallback in v1.
+    pub authority_weight: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]

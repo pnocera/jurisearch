@@ -1,3 +1,4 @@
+pub mod authority;
 pub mod citation;
 pub mod decision_zones;
 pub mod dense;

@@ -59,6 +59,9 @@ impl SearchRequest {
             rrf_lexical_weight: self.rrf_lexical_weight,
             rrf_dense_weight: self.rrf_dense_weight,
             ivfflat_probes: self.probes,
+            // A3 surfaces `--authority-weight` here; until then the field stays unset so every request
+            // is on the inert OFF path (effective_authority_weight == None).
+            authority_weight: None,
         }
     }
 
