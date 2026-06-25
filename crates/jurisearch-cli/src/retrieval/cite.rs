@@ -19,9 +19,7 @@ pub(crate) fn cite_payload(req: CiteRequest) -> Result<Value, ErrorObject> {
     let effective_as_of = req.as_of.clone().unwrap_or_else(today_utc);
     let mut lookup = json!({ "matches": [] });
     if let Some(lookup_target) = parsed.lookup() {
-        let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-        let postgres = open_index(index_dir.as_path())?;
-        ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+        let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
         let response = citation_lookup_json(
             &postgres,
             &CitationLookupQuery {
@@ -30,8 +28,7 @@ pub(crate) fn cite_payload(req: CiteRequest) -> Result<Value, ErrorObject> {
             },
         )
         .map_err(storage_error_object)?;
-        lookup = serde_json::from_str(&response)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+        lookup = parse_storage_json(&response)?;
     }
 
     let local_state = classify_citation_state(

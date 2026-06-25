@@ -39,6 +39,28 @@ pub(crate) fn open_index(index_dir: &Path) -> Result<ManagedPostgres, ErrorObjec
     ManagedPostgres::start_durable(pg_config, index_dir).map_err(storage_error_object)
 }
 
+/// The shared query-command preamble: resolve+validate the index dir, start the managed Postgres,
+/// and enforce the query-readiness `gate` — for the read payloads (fetch/cite/context/related/
+/// compare/inspect/versions/diff). Command-specific argument validation and no-results handling
+/// stay in each payload (this only owns the open+readiness sequence, not the command's semantics).
+pub(crate) fn open_query_index(
+    index_dir: Option<&Path>,
+    gate: QueryReadinessGate,
+) -> Result<ManagedPostgres, ErrorObject> {
+    let index_dir = require_existing_index_dir(index_dir)?;
+    let postgres = open_index(index_dir.as_path())?;
+    ensure_query_readiness(&postgres, gate)?;
+    Ok(postgres)
+}
+
+/// Parse a storage-layer JSON string into a `serde_json::Value`, mapping a malformed payload to the
+/// standard `dependency_unavailable` error. The storage helpers return serialized JSON strings; this
+/// is the shared bridge into the CLI's `Value` world (replaces the repeated
+/// `serde_json::from_str(...).map_err(|e| dependency_unavailable(e.to_string()))`).
+pub(crate) fn parse_storage_json(response: &str) -> Result<Value, ErrorObject> {
+    serde_json::from_str(response).map_err(|error| dependency_unavailable(error.to_string()))
+}
+
 pub(crate) fn open_index_for_bulk_ingest(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
     let pg_config = PgConfig::discover().map_err(storage_error_object)?;
     ManagedPostgres::start_durable_with_profile(

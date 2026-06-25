@@ -17,9 +17,7 @@ pub(crate) fn context_payload(req: ContextRequest) -> Result<Value, ErrorObject>
         ));
     }
     validate_as_of(req.as_of.as_deref())?;
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
     let response = context_documents_json(
         &postgres,
         &ContextDocumentsQuery {
@@ -29,8 +27,7 @@ pub(crate) fn context_payload(req: ContextRequest) -> Result<Value, ErrorObject>
         },
     )
     .map_err(storage_error_object)?;
-    let response: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let response: Value = parse_storage_json(&response)?;
     if response["target"].is_null() {
         Err(no_results(
             "context returned no valid document for the requested ID and --as-of date",

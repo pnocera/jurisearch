@@ -27,14 +27,11 @@ pub(crate) fn fetch_payload(req: FetchRequest) -> Result<Value, ErrorObject> {
             ))
         })?),
     };
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
     let ids = req.ids.iter().map(String::as_str).collect::<Vec<_>>();
     let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
         .map_err(storage_error_object)?;
-    let mut response: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let mut response: Value = parse_storage_json(&response)?;
     if response["documents"]
         .as_array()
         .is_some_and(|documents| documents.is_empty())

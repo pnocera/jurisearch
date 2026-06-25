@@ -23,9 +23,7 @@ pub(crate) fn related_payload(req: RelatedRequest) -> Result<Value, ErrorObject>
             req.rel
         ))
     })?;
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
     let response = related_neighbours_json(
         &postgres,
         &RelatedQuery {
@@ -35,7 +33,7 @@ pub(crate) fn related_payload(req: RelatedRequest) -> Result<Value, ErrorObject>
         },
     )
     .map_err(storage_error_object)?;
-    serde_json::from_str(&response).map_err(|error| dependency_unavailable(error.to_string()))
+    parse_storage_json(&response)
 }
 
 pub(crate) fn emit_related(req: RelatedRequest) -> anyhow::Result<()> {

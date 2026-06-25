@@ -291,12 +291,9 @@ pub(crate) fn inspect_payload(req: InspectRequest) -> Result<Value, ErrorObject>
     if req.id.trim().is_empty() {
         return Err(ErrorObject::bad_input("inspect requires a document id"));
     }
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
     let response = inspect_document_json(&postgres, &req.id).map_err(storage_error_object)?;
-    let value: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let value: Value = parse_storage_json(&response)?;
     if value["document"].is_null() {
         return Err(no_results(format!("no document with id `{}`", req.id)));
     }
@@ -308,12 +305,9 @@ pub(crate) fn versions_payload(req: VersionsRequest) -> Result<Value, ErrorObjec
     if req.id.trim().is_empty() {
         return Err(ErrorObject::bad_input("versions requires a document id"));
     }
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
     let response = document_versions_json(&postgres, &req.id).map_err(storage_error_object)?;
-    let value: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let value: Value = parse_storage_json(&response)?;
     // An empty family means the id is unknown (the target is always its own family member).
     if value["count"].as_u64() == Some(0) {
         return Err(no_results(format!(
@@ -333,13 +327,10 @@ pub(crate) fn diff_payload(req: DiffRequest) -> Result<Value, ErrorObject> {
             "diff --from and --to must be YYYY-MM-DD dates",
         ));
     }
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
     let response = document_diff_json(&postgres, &req.id, &req.from, &req.to)
         .map_err(storage_error_object)?;
-    let mut value: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let mut value: Value = parse_storage_json(&response)?;
     if value["family_count"].as_u64() == Some(0) {
         return Err(no_results(format!(
             "no document/version family for id `{}`",

@@ -736,6 +736,50 @@ fn session_dispatch_matches_one_shot_only_set() {
     }
 }
 
+/// The complement of `session_dispatch_matches_one_shot_only_set`: EVERY session-available command
+/// (every `CommandSpec` not marked `session_excluded`, minus the `session`/`batch` JSONL transport,
+/// which is the protocol itself and never dispatched) must reach a real session handler — never the
+/// dispatcher's `unknown session command` fallthrough. Together the two tests pin the `COMMANDS`
+/// inventory and the session dispatcher against drift in either direction: a newly session-available
+/// command added without a dispatch arm, or a one-shot-only command left un-excluded, both surface
+/// here as an `unknown session command` failure (the un-excluded one falls through because it has no
+/// arm and `command_session_excluded` returns false).
+#[test]
+fn every_session_available_command_reaches_a_handler() {
+    // The JSONL transport commands carry `session_excluded = false` but are the transport, not
+    // dispatchable session payloads (see `CommandSpec`'s doc comment) — never routed as commands.
+    const TRANSPORT: &[&str] = &["session --jsonl", "batch --jsonl"];
+    for spec in COMMANDS.iter().filter(|spec| !spec.session_excluded) {
+        if TRANSPORT.contains(&spec.name) {
+            continue;
+        }
+        // The advertised name can carry CLI flags (e.g. `help schema --json`); the session command
+        // string is the name with any `--flag` tokens stripped.
+        let command = spec
+            .name
+            .split_whitespace()
+            .filter(|token| !token.starts_with("--"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (response, _exit) = dispatch_session_request(SessionRequest {
+            id: None,
+            command: command.clone(),
+            args: serde_json::json!({}),
+        });
+        if let SessionResponse::Err { error, .. } = response {
+            assert!(
+                !matches!(error.code, ErrorCode::NotImplemented),
+                "session-available command `{command}` dispatched not_implemented"
+            );
+            assert!(
+                !error.message.contains("unknown session command"),
+                "session-available command `{command}` has no session dispatch arm \
+                 (fell through to the unknown-command branch)"
+            );
+        }
+    }
+}
+
 /// The `eval france-legi` artifact must be fully described by its registered schema (no
 /// emitted-but-unschema'd top-level key). Guards the contract's truthfulness for that command.
 #[test]

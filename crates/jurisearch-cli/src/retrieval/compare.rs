@@ -25,9 +25,7 @@ pub(crate) fn compare_payload(req: CompareRequest) -> Result<Value, ErrorObject>
     };
     let pool_limit = req.top_k.saturating_mul(20);
 
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Search)?;
     let embedder = PreparedQueryEmbedder::from_env()?;
     let (embedding_literal, embedding_fingerprint) = embedder.embed(req.query.as_str())?;
 
@@ -64,8 +62,7 @@ pub(crate) fn compare_payload(req: CompareRequest) -> Result<Value, ErrorObject>
             },
         )
         .map_err(storage_error_object)?;
-        let response: Value = serde_json::from_str(&response)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+        let response: Value = parse_storage_json(&response)?;
         let candidates = response["candidates"].as_array().cloned().unwrap_or_default();
         let mode_name = mode.as_str();
         let mut mode_docs = HashSet::new();
