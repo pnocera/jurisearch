@@ -1,28 +1,4 @@
 //! JSONL session/batch protocol contract tests.
-#![allow(unused_imports)]
-
-use std::{
-    fs::{self, File},
-    io::{Cursor, Read, Write},
-    net::TcpListener,
-    path::Path,
-    thread,
-    time::Duration,
-};
-
-use assert_cmd::Command;
-use flate2::{Compression, write::GzEncoder};
-use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
-use jurisearch_storage::{
-    ingest_accounting::{
-        IngestCompatibility, IngestMemberInput, IngestMemberStatus, IngestRunInput,
-        finish_ingest_run, record_ingest_member, start_ingest_run,
-    },
-    runtime::{ManagedPostgres, PgConfig, StorageError},
-};
-use predicates::prelude::*;
-use serde_json::Value;
-use tar::{Builder, Header};
 
 mod support;
 use support::*;

@@ -1,9 +1,11 @@
 //! Shared fixtures and helpers for the CLI contract test suites. Each domain test binary
-//! pulls these in via `mod support; use support::*;`. `allow(dead_code)` because any single
-//! binary uses only a subset.
-#![allow(dead_code)]
+//! pulls these in via `mod support; use support::*;` — which also re-exports the common
+//! test-facing imports (Command, Value, fs, predicate, …) so the suites need no import block
+//! of their own. The allows cover the per-binary subset: each suite uses only some of the
+//! re-exported imports and helpers.
+#![allow(dead_code, unused_imports)]
 
-use std::{
+pub use std::{
     fs::{self, File},
     io::{Cursor, Read, Write},
     net::TcpListener,
@@ -12,19 +14,19 @@ use std::{
     time::Duration,
 };
 
-use assert_cmd::Command;
-use flate2::{Compression, write::GzEncoder};
-use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
-use jurisearch_storage::{
+pub use assert_cmd::Command;
+pub use flate2::{Compression, write::GzEncoder};
+pub use jurisearch_embed::{EmbeddingConfig, OpenAiCompatibleClient};
+pub use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestMemberInput, IngestMemberStatus, IngestRunInput,
         finish_ingest_run, record_ingest_member, start_ingest_run,
     },
     runtime::{ManagedPostgres, PgConfig, StorageError},
 };
-use predicates::prelude::*;
-use serde_json::Value;
-use tar::{Builder, Header};
+pub use predicates::prelude::*;
+pub use serde_json::Value;
+pub use tar::{Builder, Header};
 
 pub(crate) fn jurisearch_command_without_embedding_env() -> Command {
     let mut command = Command::cargo_bin("jurisearch").unwrap();
