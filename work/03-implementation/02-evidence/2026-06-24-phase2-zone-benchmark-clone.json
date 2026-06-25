@@ -1,0 +1,53 @@
+{
+  "all_meet_proposed_floor": true,
+  "categories": {
+    "dispositif": {
+      "meets_proposed_floor": true,
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 1.0
+    },
+    "motivations": {
+      "meets_proposed_floor": true,
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 0.983
+    },
+    "moyens": {
+      "meets_proposed_floor": true,
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 1.0
+    }
+  },
+  "claim_scope": "official Cour de cassation zone retrieval (cass+inca) ONLY — a coverage-bounded overlay, NOT corpus-wide French juridic search; this benchmark is measured-only and is NOT an input to the Phase 2 full-juridic gate",
+  "fingerprint": "bge-m3:1024:normalize:true",
+  "gate_input": false,
+  "jurisdiction": "france",
+  "kind": "phase2_zone_benchmark",
+  "proposed_floor": 0.8,
+  "provenance": {
+    "code_version": "jurisearch-cli:0.1.0",
+    "human_in_gold": false,
+    "index_revision": "phase2-juris:md5:500464ad5d4c3b11cfa3d913ab506f1b",
+    "llm_in_gold": false,
+    "official_source": "Judilibre official decision zones (Cour de cassation), materialized as zone_units from the built index",
+    "pipeline": "jurisearch search --zone (official_zone_retrieval) over zone_units / zone_unit_embeddings / zone_units_bm25_idx",
+    "pseudonymisation": "preserved: gold comes from the pseudonymised official Judilibre zone fields; no re-identification, no cross-source linking",
+    "qrel_limits": {
+      "dispositif": 60,
+      "motivations": 60,
+      "moyens": 60
+    },
+    "qrel_selection": "deterministic_first_fragment_per_decision_by_document_id_from_official_zone_units",
+    "sampled": false,
+    "source_revision": "index:phase2-juris:md5:500464ad5d4c3b11cfa3d913ab506f1b"
+  },
+  "reason": "measured-only official-zone retrieval recall@10; the proposed floor is advisory (calibrate on the first clone run), never asserted as a gate",
+  "retrieval_mode": "hybrid",
+  "retriever": "jurisearch search --zone (zone_units hybrid retrieval)",
+  "schema_version": 1,
+  "source": "official Judilibre decision zones (motivations/moyens/dispositif) materialized as zone_units, extracted from the built index",
+  "state": "measured",
+  "uses_dense": true
+}

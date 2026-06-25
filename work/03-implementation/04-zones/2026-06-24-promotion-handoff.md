@@ -1,5 +1,24 @@
 # HANDOFF — zone-precise retrieval promotion + Legifrance recall tuning (2026-06-24)
 
+> **STATUS: COMPLETED 2026-06-25.** All steps below were executed. Summary:
+> - **Step 1 (Legifrance fix + recall):** a live 120-citation experiment showed the current `ALL` query
+>   is already optimal (separate champs are worse); the real recall ceiling is parse quality, not the
+>   query — so the query was left unchanged. Fixed the 2 WARNs (fingerprint = sha256 over body; `cite
+>   --online` shares the real-contract body) + added a 200-char query-length cap (the live HTTP-500
+>   trigger). Codex GO r2 (`260b034`). Findings: `2026-06-24-legifrance-recall-experiment-findings.md`.
+> - **Step 2 (Legifrance pass):** ops loop hardened to gated pending-then-retry passes (codex r1→r3 GO,
+>   caught a real strand-pending bug). Result: 17,220 unique → **4,804 ok / 12,415 not_found / 1
+>   upstream_error / 0 pending** (27.9% unique, **56.7% occurrence-weighted**).
+> - **Step 3 (build/embed/eval):** 283,333 zone_units embedded 100% (OpenRouter), IVFFlat built,
+>   `units_pending=0`; eval `france-juris-zones` `all_meet_proposed_floor=true` (dispositif 1.0 /
+>   motivations 0.983 / moyens 1.0).
+> - **Step 4 (promote):** directory swap (codex GO) → prod is the former clone (schema v17). Old prod
+>   kept as `phase2-full-juridic.pre-zone-20260625-025746` (rollback); backup kept. Verified live: status
+>   + ordinary search + `search --zone motivations` → `official_zone_retrieval` backend. Memory
+>   `phase2-jurisprudence-progress` updated.
+> - **DEFERRED:** parser-quality follow-up (the real legislation-recall lever) and authority-aware ranking
+>   (design-only) — both out of this promotion's scope.
+
 Read this top-to-bottom to resume. Context was cleared after writing it; nothing below is in working
 memory anymore.
 
