@@ -9,10 +9,8 @@ use std::{
 
 use serde_json::json;
 
-use super::{
-    OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment, RetryPolicy,
-    legifrance_search_fingerprint,
-};
+use super::{OfficialApiConfig, OfficialApiError, PisteClient, PisteEnvironment, RetryPolicy};
+use crate::client::legifrance_search_fingerprint;
 use jurisearch_core::error::ErrorCode;
 use std::time::Duration;
 
