@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::session::dispatch_session_request;
-use jurisearch_core::contract::SESSION_EXCLUDED_COMMANDS;
+use jurisearch_core::contract::COMMANDS;
 use jurisearch_core::eval::{FixtureTier, ReviewStatus};
 use jurisearch_core::session::{SessionRequest, SessionResponse};
 
@@ -699,9 +699,10 @@ fn every_command_and_arg_has_help() {
 /// arm against drift relative to `SESSION_EXCLUDED_COMMANDS`.
 #[test]
 fn session_dispatch_matches_one_shot_only_set() {
-    // Iterate the contract's source of truth so the dispatcher and the constant cannot drift
-    // (this is exactly the `eval france-legi` gap a hard-coded list missed).
-    for cmd in SESSION_EXCLUDED_COMMANDS {
+    // Iterate the contract's source of truth (CommandSpec::session_excluded) so the dispatcher
+    // and the inventory cannot drift (this is exactly the `eval france-legi` gap a hard-coded
+    // list missed).
+    for cmd in COMMANDS.iter().filter(|c| c.session_excluded).map(|c| c.name) {
         let request = SessionRequest {
             id: None,
             command: cmd.to_string(),

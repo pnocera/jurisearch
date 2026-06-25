@@ -10,7 +10,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use jurisearch_core::contract::{SESSION_EXCLUDED_COMMANDS, agent_help};
+use jurisearch_core::contract::{agent_help, command_session_excluded};
 use jurisearch_core::error::ErrorObject;
 use jurisearch_core::schema::compiled_schema;
 use jurisearch_core::session::{SessionRequest, SessionResponse};
@@ -341,12 +341,10 @@ pub(crate) fn dispatch_session_request(request: SessionRequest) -> (SessionRespo
         "inspect" => session_inspect_payload(args),
         "versions" => session_versions_payload(args),
         "diff" => session_diff_payload(args),
-        // One-shot-only commands (the contract's SESSION_EXCLUDED_COMMANDS, e.g. `related`, `ingest`,
-        // `eval france-legi`, `sync`) are advertised but not session-callable: reject with
-        // not_implemented so the dispatcher matches the agent contract exactly.
-        other if SESSION_EXCLUDED_COMMANDS.contains(&other) => {
-            Err(ErrorObject::not_implemented(other))
-        }
+        // One-shot-only commands (CommandSpec::session_excluded, e.g. `ingest`, `eval france-legi`,
+        // `sync`) are advertised but not session-callable: reject with not_implemented so the
+        // dispatcher matches the agent contract exactly.
+        other if command_session_excluded(other) => Err(ErrorObject::not_implemented(other)),
         _ => Err(ErrorObject::bad_input(format!(
             "unknown session command `{command}`"
         ))),

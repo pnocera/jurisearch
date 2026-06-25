@@ -61,6 +61,12 @@ pub struct CommandSpec {
     pub status: CommandStatus,
     pub request_schema: &'static str,
     pub response_schema: &'static str,
+    /// Advertised, but rejected with `not_implemented` over the warm session protocol
+    /// (one-shot CLI only, or a not-yet-implemented stub). The `session`/`batch` protocol
+    /// commands are NOT marked here — they are the transport itself and never dispatched.
+    /// Internal routing metadata: not part of the serialized agent schema.
+    #[serde(skip)]
+    pub session_excluded: bool,
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
@@ -70,6 +76,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "SearchRequest",
         response_schema: "SearchResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "compare",
@@ -77,6 +84,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "CompareRequest",
         response_schema: "CompareResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "fetch",
@@ -84,6 +92,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "FetchRequest",
         response_schema: "FetchResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "cite",
@@ -91,6 +100,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "CiteRequest",
         response_schema: "CiteResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "related",
@@ -98,6 +108,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "RelatedRequest",
         response_schema: "RelatedResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "context",
@@ -105,6 +116,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "ContextRequest",
         response_schema: "ContextResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "expand",
@@ -112,6 +124,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "ExpandRequest",
         response_schema: "ExpandResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "status",
@@ -119,6 +132,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "StatusRequest",
         response_schema: "StatusResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "model fetch",
@@ -126,6 +140,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "ModelFetchRequest",
         response_schema: "ModelFetchResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "setup",
@@ -133,6 +148,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "SetupRequest",
         response_schema: "SetupResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "doctor",
@@ -140,6 +156,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "DoctorRequest",
         response_schema: "DoctorResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "stats",
@@ -147,6 +164,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "StatsRequest",
         response_schema: "StatsResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "inspect",
@@ -154,6 +172,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "InspectRequest",
         response_schema: "InspectResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "versions",
@@ -161,6 +180,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "VersionsRequest",
         response_schema: "VersionsResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "diff",
@@ -168,6 +188,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "DiffRequest",
         response_schema: "DiffResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "session --jsonl",
@@ -175,6 +196,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "SessionRequest",
         response_schema: "SessionResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "batch --jsonl",
@@ -182,6 +204,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "SessionRequest",
         response_schema: "SessionResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "serve",
@@ -189,6 +212,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "ServeRequest",
         response_schema: "ServeResponse",
+        session_excluded: true,
     },
     CommandSpec {
         name: "ingest",
@@ -196,6 +220,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "IngestRequest",
         response_schema: "IngestResponse",
+        session_excluded: true,
     },
     CommandSpec {
         name: "eval phase1",
@@ -203,6 +228,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "EvalPhase1Request",
         response_schema: "EvalPhase1Response",
+        session_excluded: false,
     },
     CommandSpec {
         name: "eval france-legi",
@@ -210,6 +236,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "EvalFranceLegiRequest",
         response_schema: "EvalFranceLegiResponse",
+        session_excluded: true,
     },
     CommandSpec {
         name: "eval run",
@@ -217,6 +244,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "EvalRunRequest",
         response_schema: "EvalRunResponse",
+        session_excluded: true,
     },
     CommandSpec {
         name: "eval tune",
@@ -224,6 +252,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "EvalTuneRequest",
         response_schema: "EvalTuneResponse",
+        session_excluded: true,
     },
     CommandSpec {
         name: "sync",
@@ -231,6 +260,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Stub,
         request_schema: "SyncRequest",
         response_schema: "SyncResponse",
+        session_excluded: true,
     },
     CommandSpec {
         name: "help agent",
@@ -238,6 +268,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "HelpAgentRequest",
         response_schema: "HelpAgentResponse",
+        session_excluded: false,
     },
     CommandSpec {
         name: "help schema --json",
@@ -245,21 +276,25 @@ pub const COMMANDS: &[CommandSpec] = &[
         status: CommandStatus::Implemented,
         request_schema: "HelpSchemaRequest",
         response_schema: "HelpSchemaResponse",
+        session_excluded: false,
     },
 ];
 
-/// `COMMANDS` names that are NOT callable over the warm session protocol — one-shot CLI only,
-/// or stubs not yet implemented anywhere. Kept in sync with the CLI's `dispatch_session_request`
-/// (the `not_implemented` arm) and enforced by tests. The `session --jsonl` / `batch --jsonl`
-/// entries are the protocol itself and are intentionally not listed here.
-pub const SESSION_EXCLUDED_COMMANDS: &[&str] =
-    &["ingest", "eval france-legi", "eval run", "eval tune", "serve", "sync"];
+/// Whether `name` is an advertised command that the warm session protocol rejects with
+/// `not_implemented` (the single source of truth is `CommandSpec::session_excluded`). Unknown
+/// names — including the `session`/`batch` protocol commands, which are never dispatched — are
+/// not excluded, so they fall through to the dispatcher's `bad_input` arm.
+pub fn command_session_excluded(name: &str) -> bool {
+    COMMANDS
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| spec.session_excluded)
+        .unwrap_or(false)
+}
 
 /// True when `name` is callable over the warm session protocol.
 pub fn command_session_available(name: &str) -> bool {
-    !SESSION_EXCLUDED_COMMANDS.contains(&name)
-        && name != "session --jsonl"
-        && name != "batch --jsonl"
+    !command_session_excluded(name) && name != "session --jsonl" && name != "batch --jsonl"
 }
 
 pub fn agent_help() -> String {
@@ -278,7 +313,7 @@ pub fn agent_help() -> String {
         out.push_str(command.name);
         out.push_str("` — ");
         out.push_str(command.summary);
-        if SESSION_EXCLUDED_COMMANDS.contains(&command.name) {
+        if command.session_excluded {
             out.push_str(" (one-shot CLI only — not available over the session protocol)");
         }
         out.push('\n');

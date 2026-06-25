@@ -141,16 +141,19 @@ mod tests {
         .unwrap();
     }
 
-    /// The one-shot-only set must reference real command names (guards against typos/drift).
+    /// Pin the one-shot-only set (CommandSpec::session_excluded) so it cannot silently drift —
+    /// this is the `eval france-legi` gap a hard-coded parallel list previously missed.
     #[test]
-    fn session_excluded_commands_are_valid() {
-        use crate::contract::SESSION_EXCLUDED_COMMANDS;
-        let names: std::collections::HashSet<&str> = COMMANDS.iter().map(|c| c.name).collect();
-        for name in SESSION_EXCLUDED_COMMANDS {
-            assert!(
-                names.contains(name),
-                "SESSION_EXCLUDED_COMMANDS references unknown command: {name}"
-            );
-        }
+    fn session_excluded_set_is_exactly_the_one_shot_only_commands() {
+        let excluded: std::collections::BTreeSet<&str> = COMMANDS
+            .iter()
+            .filter(|c| c.session_excluded)
+            .map(|c| c.name)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> =
+            ["eval france-legi", "eval run", "eval tune", "ingest", "serve", "sync"]
+                .into_iter()
+                .collect();
+        assert_eq!(excluded, expected);
     }
 }
