@@ -109,11 +109,13 @@ def item_end(lines, a):
 
 
 def name_of(line):
+    # Check impl first: `impl From<&'static str> for X` must not match NAME_RE's
+    # `static\s+(\w+)` on the `'static str` lifetime.
+    if line.lstrip().startswith('impl'):
+        return line.strip().rstrip('{').strip()
     m = NAME_RE.search(line)
     if m:
         return m.group(1)
-    if line.lstrip().startswith('impl'):
-        return line.strip().rstrip('{').strip()
     if 'macro_rules!' in line:
         return line.split('macro_rules!')[1].strip().rstrip('{').strip()
     return '?'
