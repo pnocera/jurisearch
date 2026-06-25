@@ -1,8 +1,7 @@
 //! Output serialization/emission: write JSON responses and artifacts to stdout/files
 //! and terminate with the correct process exit code on error.
 //!
-//! This module owns only *emission*; `ErrorObject` construction lives with the error
-//! helpers (currently in `main.rs`, moving to `errors.rs` in a later phase).
+//! This module owns only *emission*; `ErrorObject` construction lives in `errors.rs`.
 
 use std::fs;
 use std::io::{self, Write};

@@ -1,7 +1,7 @@
 //! Retrieval command payloads, one submodule per command (search/zone/cite/context/
 //! related/compare/expand; fetch lands in Phase 3c). Submodules are re-exported so the
 //! dispatcher and session wrappers call `crate::<fn>` unchanged. `validate_as_of` lives
-//! here (shared by cite/context and, in status, diff) and validates against the calendar
+//! here (shared by the cite and context commands) and validates against the calendar
 //! helpers in `crate::date`.
 
 use crate::*;
