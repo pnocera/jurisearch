@@ -1,0 +1,29 @@
+{
+  "command": "ingest enrich-legislation-citations",
+  "considered": 1,
+  "coverage": {
+    "by_legifrance_status": [
+      {
+        "count": 12415,
+        "status": "not_found"
+      },
+      {
+        "count": 4804,
+        "status": "ok"
+      },
+      {
+        "count": 1,
+        "status": "upstream_error"
+      }
+    ],
+    "decisions_with_citations": 48715,
+    "occurrences": 63738,
+    "unique_citations": 17220
+  },
+  "errors": 1,
+  "index_dir": "/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624",
+  "not_found": 0,
+  "note": "all Legifrance calls failed (archived as upstream_error); check PISTE_OAUTH_CLIENT_ID / PISTE_OAUTH_CLIENT_SECRET and the Legifrance subscription",
+  "resolved_ok": 0,
+  "schema_version": "1"
+}

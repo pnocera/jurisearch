@@ -1,0 +1,71 @@
+{
+  "command": "ingest enrich-zones",
+  "concurrency": 6,
+  "considered": 5000,
+  "coverage": {
+    "decision_zones": {
+      "by_source_status": [
+        {
+          "count": 12027,
+          "source": "cass",
+          "status": "invalid_offsets"
+        },
+        {
+          "count": 289,
+          "source": "cass",
+          "status": "not_found"
+        },
+        {
+          "count": 11606,
+          "source": "cass",
+          "status": "ok"
+        },
+        {
+          "count": 1078,
+          "source": "cass",
+          "status": "upstream_error"
+        },
+        {
+          "count": 1418,
+          "source": "inca",
+          "status": "invalid_offsets"
+        },
+        {
+          "count": 46,
+          "source": "inca",
+          "status": "not_found"
+        },
+        {
+          "count": 57940,
+          "source": "inca",
+          "status": "ok"
+        },
+        {
+          "count": 556,
+          "source": "inca",
+          "status": "upstream_error"
+        }
+      ],
+      "total": 84960
+    },
+    "embedding_manifest": null,
+    "embeddings": {
+      "total": 0,
+      "units_pending": 0
+    },
+    "scope": "official_cour_de_cassation_zones (cass+inca)",
+    "zone_units": {
+      "by_zone": [],
+      "decisions": 0,
+      "total": 0
+    }
+  },
+  "errors": 0,
+  "fallback": 205,
+  "index_dir": "/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624",
+  "official_ok": 4795,
+  "order": "recent",
+  "schema_version": "1",
+  "since": null,
+  "source": "inca"
+}

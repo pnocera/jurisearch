@@ -1,0 +1,75 @@
+=== 1. build-zone-units 02:10:58 ===
+{"builder_version":"zone-units:v1","command":"ingest build-zone-units","decisions_derived":72911,"index_dir":"/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624","rebuild":false,"schema_version":"1","zone_units_written":283333}
+zone_units.total=283333
+=== 2. embed-zone-units via OpenRouter (lists=532) 02:27:00 ===
+{"command":"ingest embed-zone-units","embedding_fingerprint":"bge-m3:1024:normalize:true","embedding_inputs_truncated":502,"embeddings":283333,"embeddings_inserted":283333,"endpoint_stats":[{"base_url":"https://openrouter.ai/api/v1","chunks":283333,"failures":0,"request_model":"baai/bge-m3","requests":8855,"truncated_inputs":502}],"index_dir":"/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624","schema_version":"1","vector_index":{"index_lists":532,"name":"zone_unit_embeddings_ivfflat_idx"},"zone_units":283333,"zone_units_considered":283333}
+=== 3. verify dense index 02:48:04 ===
+{
+  "zone_units": {
+    "by_zone": [
+      {
+        "count": 42251,
+        "zone": "dispositif"
+      },
+      {
+        "count": 129887,
+        "zone": "motivations"
+      },
+      {
+        "count": 111195,
+        "zone": "moyens"
+      }
+    ],
+    "decisions": 72911,
+    "total": 283333
+  },
+  "embeddings": {
+    "total": 283333,
+    "units_pending": 0
+  },
+  "embedding_manifest": {
+    "coverage": {
+      "embeddings": 283333,
+      "zone_units": 283333
+    },
+    "dimension": 1024,
+    "embedding_fingerprint": "bge-m3:1024:normalize:true",
+    "model": "bge-m3",
+    "normalize": true,
+    "vector_index": {
+      "lists": 532,
+      "method": "ivfflat",
+      "name": "zone_unit_embeddings_ivfflat_idx",
+      "operator_class": "vector_l2_ops"
+    }
+  }
+}
+=== 4. eval france-juris-zones (measured, floor 0.8, OpenRouter query) 02:49:10 ===
+{
+  "state": "measured",
+  "all_meet_proposed_floor": true,
+  "proposed_floor": 0.8,
+  "uses_dense": true,
+  "fingerprint": "bge-m3:1024:normalize:true",
+  "categories": {
+    "dispositif": {
+      "meets_proposed_floor": true,
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 1.0
+    },
+    "motivations": {
+      "meets_proposed_floor": true,
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 0.983
+    },
+    "moyens": {
+      "meets_proposed_floor": true,
+      "metric": "recall_at_10",
+      "queries": 60,
+      "value": 1.0
+    }
+  }
+}
+=== DONE 02:52:46 ===

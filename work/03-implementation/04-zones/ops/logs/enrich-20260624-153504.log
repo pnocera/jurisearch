@@ -1,0 +1,102 @@
+=== [cass] recent-first enrichment starting 15:35:04 ===
+[cass] batch 1: considered=5000 official_ok=4904 errors=0 yield=0.9808 (cum ok=4904) 15:44:29
+[cass] batch 2: considered=5000 official_ok=4770 errors=0 yield=0.9540 (cum ok=9674) 15:53:34
+[cass] batch 3: considered=5000 official_ok=1863 errors=0 yield=0.3726 (cum ok=11537) 16:02:19
+[cass] batch 4: considered=5000 official_ok=42 errors=0 yield=0.0084 (cum ok=11579) 16:10:52
+[cass] batch 5: considered=5000 official_ok=27 errors=0 yield=0.0054 (cum ok=11606) 16:19:35
+[cass] yield collapsed (<0.01 x2) -> stop; cum considered=25000 ok=11606
+=== [cass] done: cum considered=25000 ok=11606 batches=5 16:19:35 ===
+=== [inca] recent-first enrichment starting 16:19:35 ===
+[inca] batch 1: considered=5000 official_ok=4436 errors=0 yield=0.8872 (cum ok=4436) 16:24:50
+[inca] batch 2: considered=5000 official_ok=4826 errors=0 yield=0.9652 (cum ok=9262) 16:29:32
+[inca] batch 3: considered=5000 official_ok=4890 errors=0 yield=0.9780 (cum ok=14152) 16:33:59
+[inca] batch 4: considered=5000 official_ok=4908 errors=0 yield=0.9816 (cum ok=19060) 16:38:12
+[inca] batch 5: considered=5000 official_ok=4878 errors=0 yield=0.9756 (cum ok=23938) 16:42:25
+[inca] batch 6: considered=5000 official_ok=4910 errors=0 yield=0.9820 (cum ok=28848) 16:46:40
+[inca] batch 7: considered=5000 official_ok=4761 errors=0 yield=0.9522 (cum ok=33609) 16:55:51
+[inca] batch 8: considered=5000 official_ok=4639 errors=0 yield=0.9278 (cum ok=38248) 17:05:24
+[inca] batch 9: considered=5000 official_ok=4944 errors=0 yield=0.9888 (cum ok=43192) 17:09:49
+[inca] batch 10: considered=5000 official_ok=4975 errors=0 yield=0.9950 (cum ok=48167) 17:17:26
+[inca] batch 11: considered=5000 official_ok=4978 errors=0 yield=0.9956 (cum ok=53145) 17:21:50
+[inca] batch 12: considered=5000 official_ok=4795 errors=0 yield=0.9590 (cum ok=57940) 17:26:13
+[inca] batch 13: considered=5000 official_ok=3287 errors=0 yield=0.6574 (cum ok=61227) 17:38:36
+[inca] batch 14: considered=5000 official_ok=73 errors=0 yield=0.0146 (cum ok=61300) 17:54:44
+[inca] batch 15: considered=5000 official_ok=4 errors=0 yield=0.0008 (cum ok=61304) 17:59:24
+[inca] batch 16: considered=5000 official_ok=1 errors=0 yield=0.0002 (cum ok=61305) 18:03:35
+[inca] yield collapsed (<0.01 x2) -> stop; cum considered=80000 ok=61305
+=== [inca] done: cum considered=80000 ok=61305 batches=16 18:03:35 ===
+=== ALL ENRICH DONE 18:03:35 ===
+{
+  "decision_zones": {
+    "by_source_status": [
+      {
+        "count": 12027,
+        "source": "cass",
+        "status": "invalid_offsets"
+      },
+      {
+        "count": 289,
+        "source": "cass",
+        "status": "not_found"
+      },
+      {
+        "count": 11606,
+        "source": "cass",
+        "status": "ok"
+      },
+      {
+        "count": 1078,
+        "source": "cass",
+        "status": "upstream_error"
+      },
+      {
+        "count": 14832,
+        "source": "inca",
+        "status": "invalid_offsets"
+      },
+      {
+        "count": 3267,
+        "source": "inca",
+        "status": "not_found"
+      },
+      {
+        "count": 61305,
+        "source": "inca",
+        "status": "ok"
+      },
+      {
+        "count": 1,
+        "source": "inca",
+        "status": "upstream_error"
+      }
+    ],
+    "total": 104405
+  },
+  "zone_units": {
+    "by_zone": [],
+    "decisions": 0,
+    "total": 0
+  },
+  "embeddings": {
+    "total": 0,
+    "units_pending": 0
+  },
+  "resolver_reachable": {
+    "by_source": [
+      {
+        "resolver_reachable": 117674,
+        "skipped_no_pourvoi": 23942,
+        "source": "cass",
+        "total": 141616
+      },
+      {
+        "resolver_reachable": 377027,
+        "skipped_no_pourvoi": 7285,
+        "source": "inca",
+        "total": 384312
+      }
+    ],
+    "resolver_reachable_total": 494701
+  }
+}
+=== archive (official_api_responses) counts via status not exposed; see ops/02 for build/embed/eval ===

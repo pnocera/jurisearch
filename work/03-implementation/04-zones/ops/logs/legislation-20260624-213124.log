@@ -1,0 +1,21 @@
+=== legislation enrichment starting 21:31:24 (retry_errors=1) ===
+--- pass [pending] starting 21:31:24 ---
+pass [pending] batch 1: considered=2000 ok=553 nf=1442 err=5 (cum ok=553 nf=1442 err=5) 21:58:15
+pass [pending] batch 2: considered=2000 ok=544 nf=1395 err=61 (cum ok=1097 nf=2837 err=66) 00:01:00
+pass [pending] batch 3: considered=2000 ok=561 nf=1438 err=1 (cum ok=1658 nf=4275 err=67) 00:21:17
+pass [pending] batch 4: considered=2000 ok=528 nf=1472 err=0 (cum ok=2186 nf=5747 err=67) 00:42:34
+pass [pending] batch 5: considered=2000 ok=584 nf=1416 err=0 (cum ok=2770 nf=7163 err=67) 01:03:00
+pass [pending] batch 6: considered=2000 ok=564 nf=1429 err=7 (cum ok=3334 nf=8592 err=74) 01:22:46
+pass [pending] batch 7: considered=2000 ok=551 nf=1449 err=0 (cum ok=3885 nf=10041 err=74) 01:41:59
+pass [pending] batch 8: considered=1902 ok=531 nf=1371 err=0 (cum ok=4416 nf=11412 err=74) 02:00:15
+pass [pending] batch 9: queue drained
+--- pass [pending] DONE (stop=drained): considered=15902 ok=4416 nf=11412 err=74 batches=9 02:00:15 ---
+{"by_legifrance_status":[{"count":11820,"status":"not_found"},{"count":4580,"status":"ok"},{"count":820,"status":"upstream_error"}],"decisions_with_citations":48715,"occurrences":63738,"unique_citations":17220}
+--- pass [retry] starting 02:00:15 ---
+pass [retry] batch 1: considered=820 ok=224 nf=595 err=1 (cum ok=224 nf=595 err=1) 02:08:18
+pass [retry] batch 2: considered=1 ok=0 nf=0 err=1 (cum ok=224 nf=595 err=2) 02:08:23
+pass [retry] batch 2: ALL errored. note:
+all Legifrance calls failed (archived as upstream_error); check PISTE_OAUTH_CLIENT_ID / PISTE_OAUTH_CLIENT_SECRET and the Legifrance subscription
+--- pass [retry] DONE (stop=all_error): considered=821 ok=224 nf=595 err=2 batches=2 02:08:23 ---
+{"by_legifrance_status":[{"count":12415,"status":"not_found"},{"count":4804,"status":"ok"},{"count":1,"status":"upstream_error"}],"decisions_with_citations":48715,"occurrences":63738,"unique_citations":17220}
+=== LEGISLATION ENRICH DONE 02:08:23 ===

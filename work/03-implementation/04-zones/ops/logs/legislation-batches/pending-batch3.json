@@ -1,0 +1,33 @@
+{
+  "command": "ingest enrich-legislation-citations",
+  "considered": 2000,
+  "coverage": {
+    "by_legifrance_status": [
+      {
+        "count": 4683,
+        "status": "not_found"
+      },
+      {
+        "count": 1822,
+        "status": "ok"
+      },
+      {
+        "count": 9902,
+        "status": "pending"
+      },
+      {
+        "count": 813,
+        "status": "upstream_error"
+      }
+    ],
+    "decisions_with_citations": 48715,
+    "occurrences": 63738,
+    "unique_citations": 17220
+  },
+  "errors": 1,
+  "index_dir": "/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624",
+  "not_found": 1438,
+  "note": null,
+  "resolved_ok": 561,
+  "schema_version": "1"
+}

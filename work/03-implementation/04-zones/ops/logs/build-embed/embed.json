@@ -1,0 +1,25 @@
+{
+  "command": "ingest embed-zone-units",
+  "embedding_fingerprint": "bge-m3:1024:normalize:true",
+  "embedding_inputs_truncated": 502,
+  "embeddings": 283333,
+  "embeddings_inserted": 283333,
+  "endpoint_stats": [
+    {
+      "base_url": "https://openrouter.ai/api/v1",
+      "chunks": 283333,
+      "failures": 0,
+      "request_model": "baai/bge-m3",
+      "requests": 8855,
+      "truncated_inputs": 502
+    }
+  ],
+  "index_dir": "/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624",
+  "schema_version": "1",
+  "vector_index": {
+    "index_lists": 532,
+    "name": "zone_unit_embeddings_ivfflat_idx"
+  },
+  "zone_units": 283333,
+  "zone_units_considered": 283333
+}

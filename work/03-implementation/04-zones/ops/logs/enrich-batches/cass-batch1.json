@@ -1,0 +1,46 @@
+{
+  "command": "ingest enrich-zones",
+  "concurrency": 6,
+  "considered": 5000,
+  "coverage": {
+    "decision_zones": {
+      "by_source_status": [
+        {
+          "count": 95,
+          "source": "cass",
+          "status": "invalid_offsets"
+        },
+        {
+          "count": 1,
+          "source": "cass",
+          "status": "not_found"
+        },
+        {
+          "count": 4904,
+          "source": "cass",
+          "status": "ok"
+        }
+      ],
+      "total": 5000
+    },
+    "embedding_manifest": null,
+    "embeddings": {
+      "total": 0,
+      "units_pending": 0
+    },
+    "scope": "official_cour_de_cassation_zones (cass+inca)",
+    "zone_units": {
+      "by_zone": [],
+      "decisions": 0,
+      "total": 0
+    }
+  },
+  "errors": 0,
+  "fallback": 96,
+  "index_dir": "/mnt/models/jurisearch-index/phase2-full-juridic.zone-rollout-20260624",
+  "official_ok": 4904,
+  "order": "recent",
+  "schema_version": "1",
+  "since": null,
+  "source": "cass"
+}
