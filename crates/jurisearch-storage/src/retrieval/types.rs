@@ -82,6 +82,10 @@ pub struct HybridCandidateQuery<'a> {
     pub kind_filter: Option<&'a str>,
     /// Decision-metadata filters (court/formation/publication/decision-date). Empty by default.
     pub decision_filters: DecisionFilters<'a>,
+    /// Gate (A2): when `true`, project `canonical_json->>'publication'` into the candidate JSON so the
+    /// authority re-rank (A4) can read it. When `false` (every OFF caller), the emitted SQL and payload
+    /// are byte-identical to before this field existed — no `publication` column, no JSON key.
+    pub project_authority: bool,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,

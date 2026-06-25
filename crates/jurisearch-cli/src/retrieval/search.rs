@@ -284,6 +284,7 @@ impl<'a> SearchExecution<'a> {
                 after_cursor: self.after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
                 as_of: self.as_of.as_str(),
                 kind_filter: self.kind_filter,
+                project_authority: false,
                 decision_filters: self.req.decision_filters(),
                 lexical_limit: self.lexical_limit,
                 dense_limit: self.dense_limit,

@@ -359,6 +359,7 @@ pub(crate) fn eval_run_payload(
                     after_cursor: None,
                     as_of: as_of.as_str(),
                     kind_filter: Some("article"),
+                    project_authority: false,
                     decision_filters: DecisionFilters::default(),
                     lexical_limit: pool_limit,
                     dense_limit: pool_limit,

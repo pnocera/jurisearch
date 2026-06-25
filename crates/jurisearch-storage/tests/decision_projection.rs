@@ -135,30 +135,49 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
     assert_eq!(insert_chunk_embeddings(&postgres, &embeddings)?, embeddings.len());
 
     // Hybrid search restricted to decisions, valid as of today, returns the judicial decision.
-    let response = hybrid_candidates_json(
-        &postgres,
-        &HybridCandidateQuery {
-            query_text: "clause de non-concurrence",
-            query_embedding: Some(&target_vector),
-            embedding_fingerprint: Some(EMBEDDING_FINGERPRINT),
-            retrieval_mode: RetrievalMode::Hybrid,
-            options: RetrievalOptions::default(),
-            group_by: GroupBy::Document,
-            after_cursor: None,
-            as_of: "2025-12-31",
-            kind_filter: Some("decision"),
-            decision_filters: DecisionFilters::default(),
-            lexical_limit: 20,
-            dense_limit: 20,
-            limit: 5,
-        },
-    )?;
+    let decision_query = HybridCandidateQuery {
+        query_text: "clause de non-concurrence",
+        query_embedding: Some(&target_vector),
+        embedding_fingerprint: Some(EMBEDDING_FINGERPRINT),
+        retrieval_mode: RetrievalMode::Hybrid,
+        options: RetrievalOptions::default(),
+        group_by: GroupBy::Document,
+        after_cursor: None,
+        as_of: "2025-12-31",
+        kind_filter: Some("decision"),
+        project_authority: false,
+        decision_filters: DecisionFilters::default(),
+        lexical_limit: 20,
+        dense_limit: 20,
+        limit: 5,
+    };
+    let response = hybrid_candidates_json(&postgres, &decision_query)?;
     let response: serde_json::Value = serde_json::from_str(&response)?;
     let top = &response["candidates"][0];
     assert_eq!(top["document_id"], "cass:JURITEXT000051824029");
     assert_eq!(top["kind"], "decision");
     assert_eq!(top["source"], "cass");
     assert_eq!(top["validity"]["from"], "2025-06-04");
+    // A2 gate (OFF identity): project_authority=false must NOT emit a `publication` key, so the OFF
+    // candidate payload is byte-identical to before the gate existed.
+    assert!(
+        top.get("publication").is_none(),
+        "OFF projection must not expose publication; got {top:#}"
+    );
+
+    // A2 gate (ON projection): the SAME query with project_authority=true exposes the judicial
+    // `PUBLI_BULL@publie` value ("oui" for this published Cassation decision) for the authority rerank.
+    let projected = hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            project_authority: true,
+            ..decision_query
+        },
+    )?;
+    let projected: serde_json::Value = serde_json::from_str(&projected)?;
+    let projected_top = &projected["candidates"][0];
+    assert_eq!(projected_top["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(projected_top["publication"], "oui");
 
     // Temporal correctness: a decision is not "valid" before it was rendered.
     let before = hybrid_candidates_json(
@@ -173,6 +192,7 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
             after_cursor: None,
             as_of: "2000-01-01",
             kind_filter: Some("decision"),
+            project_authority: false,
             decision_filters: DecisionFilters::default(),
             lexical_limit: 20,
             dense_limit: 20,
@@ -252,6 +272,7 @@ fn decision_search_metadata_filters() -> Result<(), StorageError> {
                 after_cursor: None,
                 as_of: "2025-12-31",
                 kind_filter: Some("decision"),
+                project_authority: false,
                 decision_filters: filters,
                 lexical_limit: 20,
                 dense_limit: 20,
@@ -343,6 +364,7 @@ fn decision_search_metadata_filters() -> Result<(), StorageError> {
             after_cursor: None,
             as_of: "2025-12-31",
             kind_filter: None,
+            project_authority: false,
             decision_filters: DecisionFilters {
                 decided_from: Some("1980-01-01"),
                 ..DecisionFilters::default()

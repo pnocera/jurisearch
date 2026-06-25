@@ -23,6 +23,20 @@ pub fn hybrid_candidates_json(
     };
     let limit = query.limit;
 
+    // A2 gate: project `publication` ONLY when the authority re-rank needs it. Both fragments are the
+    // empty string when OFF, so the emitted SQL is byte-identical to before this field existed (the
+    // OFF-path invariant). Shared by the chunk and document branches so the two stay in lockstep.
+    let publication_select = if query.project_authority {
+        "\n        d.canonical_json->>'publication' AS publication,"
+    } else {
+        ""
+    };
+    let publication_json = if query.project_authority {
+        "\n            'publication', publication,"
+    } else {
+        ""
+    };
+
     let sql = match query.group_by {
         GroupBy::Chunk => {
             let cursor_predicate = cursor_predicate(query.after_cursor);
@@ -33,7 +47,7 @@ limited AS (
     SELECT
         r.chunk_id, c.document_id, d.source, d.kind, d.citation, d.title, d.source_url,
         d.valid_from::text AS valid_from, d.valid_to::text AS valid_to,
-        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
+        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,{publication_select}
         r.lexical_rank, r.dense_rank, r.fused_score
     FROM ranked r
     JOIN chunks c ON c.chunk_id = r.chunk_id
@@ -53,7 +67,7 @@ SELECT jsonb_build_object(
             'chunk_id', chunk_id,
             'document_id', document_id,
             'source', source, 'kind', kind, 'citation', citation, 'title', title,
-            'source_url', source_url, 'snippet', snippet,
+            'source_url', source_url, 'snippet', snippet,{publication_json}
             'validity', jsonb_build_object('from', valid_from, 'to', valid_to, 'to_exclusive', true),
             'scores', jsonb_build_object('rrf', round(fused_score::numeric, 8), 'lexical_rank', lexical_rank, 'dense_rank', dense_rank),
             'cursor', concat(round(fused_score::numeric, 8)::text, ':', chunk_id)
@@ -75,7 +89,7 @@ scored AS (
     SELECT
         r.chunk_id, c.document_id, d.source, d.kind, d.citation, d.title, d.source_url,
         d.valid_from::text AS valid_from, d.valid_to::text AS valid_to,
-        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,
+        left(regexp_replace(c.body, '\s+', ' ', 'g'), 280) AS snippet,{publication_select}
         r.lexical_rank, r.dense_rank,
         round(r.fused_score::numeric, 8) AS cursor_score
     FROM ranked r
@@ -106,7 +120,7 @@ SELECT jsonb_build_object(
             'chunk_id', chunk_id,
             'best_chunk_id', chunk_id,
             'source', source, 'kind', kind, 'citation', citation, 'title', title,
-            'source_url', source_url, 'snippet', snippet,
+            'source_url', source_url, 'snippet', snippet,{publication_json}
             'validity', jsonb_build_object('from', valid_from, 'to', valid_to, 'to_exclusive', true),
             'scores', jsonb_build_object('rrf', cursor_score, 'lexical_rank', lexical_rank, 'dense_rank', dense_rank),
             'cursor', concat('doc:', cursor_score::text, ':', document_id)

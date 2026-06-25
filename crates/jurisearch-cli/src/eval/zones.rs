@@ -142,6 +142,7 @@ pub(crate) fn france_juris_zone_search_documents(
             after_cursor: None,
             zone: zone.as_str(),
             as_of: &today_utc(),
+            project_authority: false,
             decision_filters: DecisionFilters::default(),
             lexical_limit: top_k.saturating_mul(20),
             dense_limit: top_k.saturating_mul(20),

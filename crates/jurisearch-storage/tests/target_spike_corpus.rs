@@ -47,6 +47,7 @@ fn target_spike_corpus_retrieval_stays_under_latency_budget() -> Result<(), Stor
         after_cursor: None,
         as_of: "2024-06-01",
         kind_filter: None,
+        project_authority: false,
         decision_filters: DecisionFilters::default(),
         lexical_limit: 50,
         dense_limit: 50,

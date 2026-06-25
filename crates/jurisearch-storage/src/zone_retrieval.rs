@@ -36,6 +36,9 @@ pub struct ZoneCandidateQuery<'a> {
     pub as_of: &'a str,
     /// Court/formation/publication/decision-date filters (reused verbatim from the main path).
     pub decision_filters: DecisionFilters<'a>,
+    /// Gate (A2): when `true`, project `canonical_json->>'publication'` into the candidate JSON for the
+    /// authority re-rank (A4). When `false` the emitted SQL/payload are byte-identical to before.
+    pub project_authority: bool,
     pub lexical_limit: u32,
     pub dense_limit: u32,
     pub limit: u32,
@@ -222,6 +225,19 @@ pub fn zone_candidates_json(
     let cursor_predicate = document_cursor_predicate(query.after_cursor);
     let limit = query.limit;
 
+    // A2 gate: mirror the main path — project `publication` ONLY for the authority re-rank; both
+    // fragments are empty when OFF so the emitted zone SQL/payload are byte-identical to before.
+    let publication_select = if query.project_authority {
+        "\n        d.canonical_json->>'publication' AS publication,"
+    } else {
+        ""
+    };
+    let publication_json = if query.project_authority {
+        "\n            'publication', publication,"
+    } else {
+        ""
+    };
+
     let sql = format!(
         r#"
 {set_ivfflat_probes}WITH {ranked_ctes},
@@ -230,7 +246,7 @@ scored AS (
         r.zone_unit_id, u.document_id, u.zone, d.source AS doc_source,
         d.citation, d.title, d.source_url,
         d.valid_from::text AS valid_from, d.valid_to::text AS valid_to,
-        left(regexp_replace(u.body, '\s+', ' ', 'g'), 280) AS snippet,
+        left(regexp_replace(u.body, '\s+', ' ', 'g'), 280) AS snippet,{publication_select}
         r.lexical_rank, r.dense_rank,
         round(r.fused_score::numeric, 8) AS cursor_score
     FROM ranked r
@@ -262,7 +278,7 @@ SELECT jsonb_build_object(
             'zone_unit_id', zone_unit_id,
             'best_chunk_id', zone_unit_id,
             'source', doc_source, 'kind', 'decision', 'citation', citation, 'title', title,
-            'source_url', source_url, 'snippet', snippet,
+            'source_url', source_url, 'snippet', snippet,{publication_json}
             'zone', zone, 'zone_accurate', true, 'provider', 'judilibre',
             'validity', jsonb_build_object('from', valid_from, 'to', valid_to, 'to_exclusive', true),
             'scores', jsonb_build_object('rrf', cursor_score, 'lexical_rank', lexical_rank, 'dense_rank', dense_rank),

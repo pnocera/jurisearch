@@ -110,6 +110,7 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
             after_cursor: after_cursor.as_ref().map(ParsedSearchCursor::as_retrieval_cursor),
             zone: zone.as_str(),
             as_of: as_of.as_str(),
+            project_authority: false,
             decision_filters: req.decision_filters(),
             lexical_limit,
             dense_limit,

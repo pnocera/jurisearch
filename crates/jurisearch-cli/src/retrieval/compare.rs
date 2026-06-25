@@ -55,6 +55,7 @@ pub(crate) fn compare_payload(req: CompareRequest) -> Result<Value, ErrorObject>
                 after_cursor: None,
                 as_of: as_of.as_str(),
                 kind_filter,
+                project_authority: false,
                 decision_filters: DecisionFilters::default(),
                 lexical_limit: pool_limit,
                 dense_limit: pool_limit,
