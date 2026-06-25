@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value, json};
 
-pub(crate) fn schemas() -> Map<String, Value> {
+pub(super) fn schemas() -> Map<String, Value> {
     let Value::Object(map) = json!({
         "SearchRequest": {
             "required": ["query"],
