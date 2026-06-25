@@ -281,8 +281,7 @@ pub(crate) fn stats_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObje
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     let response = corpus_stats_json(&postgres).map_err(storage_error_object)?;
-    let stats: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let stats: Value = parse_storage_json(&response)?;
     Ok(json!({ "schema_version": SCHEMA_VERSION, "stats": stats }))
 }
 
