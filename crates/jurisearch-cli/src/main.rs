@@ -84,11 +84,11 @@ use jurisearch_storage::{
         prepare_legi_projection_statements,
     },
     retrieval::{
-        CitationResolutionQuery, ContextDocumentsQuery, DecisionFilters, FetchDocumentsQuery,
-        GroupBy, HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
+        CitationResolutionQuery, ContextDocumentsQuery, DecisionFilters, GroupBy,
+        HybridCandidateQuery, RelatedQuery, RelatedRelation, RetrievalCursor, RetrievalMode,
         RetrievalOptions, context_documents_json, corpus_source_coverage_json, corpus_stats_json,
-        document_diff_json, document_versions_json, fetch_documents_json, hybrid_candidates_json,
-        inspect_document_json, related_neighbours_json, resolve_legi_citation_json, rrf_weights,
+        document_diff_json, document_versions_json, hybrid_candidates_json, inspect_document_json,
+        related_neighbours_json, resolve_legi_citation_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
@@ -2068,13 +2068,6 @@ fn eval_phase1_fixture_search_result(fixture: &LegalRetrievalFixture, search: Va
     })
 }
 
-pub(crate) fn emit_fetch(args: FetchArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
-    match fetch_payload(args, index_dir) {
-        Ok(response) => write_json(&response),
-        Err(error) => emit_error(error),
-    }
-}
-
 pub(crate) fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
     match args.command {
         Some(ModelSubcommand::Fetch {
@@ -2088,37 +2081,6 @@ pub(crate) fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
             "model requires a subcommand; supported subcommand: `fetch`",
         )),
     }
-}
-
-pub(crate) fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    let part = match args.part.as_deref() {
-        None => None,
-        Some(value) => Some(DecisionPart::parse(value).ok_or_else(|| {
-            ErrorObject::bad_input(format!(
-                "unknown --part `{value}`; expected one of: summary, visa, dispositif, motivations, moyens"
-            ))
-        })?),
-    };
-    let index_dir = require_existing_index_dir(index_dir)?;
-    let postgres = open_index(index_dir.as_path())?;
-    ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
-    let ids = args.ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
-        .map_err(storage_error_object)?;
-    let mut response: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
-    if response["documents"]
-        .as_array()
-        .is_some_and(|documents| documents.is_empty())
-    {
-        return Err(no_results(
-            "fetch returned no documents for the requested IDs",
-        ));
-    }
-    if let Some(part) = part {
-        annotate_fetched_parts(&postgres, &mut response, part, args.online)?;
-    }
-    Ok(response)
 }
 
 pub(crate) fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
