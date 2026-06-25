@@ -59,13 +59,24 @@ Reduce `crates/jurisearch-cli/src/main.rs` to a small binary entrypoint and stab
 crates/jurisearch-cli/src/
   main.rs
   args.rs
+  command_registry.rs   # single inventory of name/session-availability/schema-names/handler (see SOLID/DRY follow-ups)
   dispatch.rs
-  output.rs
-  retrieval.rs          # search/fetch/cite/context/related/compare + zone_search
+  output.rs              # serialization/emission only: write_json, emit_error, session response
+  request.rs            # shared command request structs (SearchRequest, FetchRequest, …) + TryFrom<*Args>
+  retrieval/            # split per-command so it does not become a second monolith (SRP)
+    mod.rs              # re-exports narrow payload fns
+    search.rs           # search_payload
+    zone.rs             # zone_search_payload, ensure_zone_retrieval_readiness
+    fetch.rs            # fetch_payload (calls enrichment::annotate_fetched_parts)
+    cite.rs             # cite_payload, citation state, apply_online_citation_confirmation
+    context.rs          # context_payload (structure reader)
+    related.rs          # related_payload (graph reader)
+    compare.rs          # compare_payload
+    expand.rs           # expand_payload
   citation.rs           # shared pure citation parser (parse_citation_target etc.) used by retrieval AND eval
   ascii.rs              # shared case-insensitive ascii find helpers (find_ascii_ci, rfind_ascii_ci) used by retrieval AND enrichment
-  date.rs               # shared date/calendar helpers (is_valid_iso_date, days_in_month, is_leap_year, today_utc, unix_seconds) used by retrieval/status/eval
-  errors.rs             # shared ErrorObject constructors + storage/embed error mapping used by ALL command modules
+  date.rs               # shared date/calendar helpers (is_valid_iso_date, days_in_month, is_leap_year, today_utc, unix_seconds, civil_from_days) used by retrieval/status/eval
+  errors.rs             # shared ErrorObject constructors + storage/embed error mapping used by ALL command modules (definitive owner)
   query_support.rs      # shared retrieval-query helpers (parade_query_text, validate_retrieval_options) used by retrieval AND eval
   legifrance_search.rs  # shared Legifrance request-body builder (sanitize_legifrance_query, legifrance_code_search_body) used by retrieval (cite --online) AND enrichment/legislation
   enrichment/           # NEW domain (decision-part / zone / legislation citations)
@@ -74,8 +85,15 @@ crates/jurisearch-cli/src/
     decision_part.rs    # DecisionPart, annotate_fetched_parts, official_decision_part
     judilibre_zones.rs  # enrich_decision_from_judilibre*, normalize_judilibre_zones, cache helpers
     legislation.rs      # parse_visa_citation, collect/enrich_legislation_citations_payload
-  eval.rs               # includes the france-juris-zones zone benchmark
+  eval/                 # split per benchmark family (SRP) instead of one flat eval.rs
+    mod.rs
+    generic.rs          # eval_run_payload, eval_tune_payload, eval_phase1_payload
+    france_legi.rs      # France-LEGI official benchmark
+    france_juris.rs     # France-juris benchmark
+    zones.rs            # advisory france-juris-zones zone benchmark
+    artifact.rs         # shared metric/category/artifact helpers (only genuinely shared bits)
   ingest.rs             # archives + embed-chunks + enrich-zones/build-zone-units/embed-zone-units
+                        #   (introduces an internal ArchiveIngestRun runner — see SOLID/DRY follow-ups)
   session.rs
   serve.rs
   status.rs
@@ -83,6 +101,7 @@ crates/jurisearch-cli/src/
   index_runtime.rs
   gates/
     mod.rs
+    support.rs          # shared artifact load/parse/diagnostics + dotted-pointer + validator-result shaping
     phase1.rs
     phase2.rs
 ```
@@ -104,10 +123,10 @@ session -> command payload functions, not shell-style emitters
 
 - `citation.rs` — `parse_citation_target` + `ParsedCitationTarget` + their private parser closure (see Phase 3a). Callers: `cite_payload` (retrieval) and `france_juris_cite_documents` (eval).
 - `ascii.rs` — `find_ascii_ci` (`main.rs:3622`), `rfind_ascii_ci` (`main.rs:3636`). Callers: `legi_citation_routing` (retrieval) and `heuristic_dispositif` (`enrichment/decision_part`).
-- `date.rs` — the **calendar** validators `is_valid_iso_date` (`main.rs:11814`), `days_in_month` (`main.rs:11832`), `is_leap_year` (`main.rs:11842`) (distinct from the cheap `is_iso_date` at `main.rs:3608` that stays in `retrieval.rs` with `legi_citation_routing`); plus the current-date helpers `today_utc` (`main.rs:11925`) and its dependency `unix_seconds` (`main.rs:11918`). Callers: calendar validators via `validate_as_of` → `cite_payload`/`context_payload` (retrieval) and `diff_payload` (status, `main.rs:9828`); `today_utc` is passed as `unwrap_or_else(today_utc)` across eval (`main.rs:1843`, `2264`, `2962`) and retrieval (`main.rs:3414`, `3682`, `3910`, `5183`). `validate_as_of` itself (`main.rs:11269`) stays in `retrieval.rs` and imports `date.rs`.
+- `date.rs` — the **calendar** validators `is_valid_iso_date` (`main.rs:11814`), `days_in_month` (`main.rs:11832`), `is_leap_year` (`main.rs:11842`) (distinct from the cheap `is_iso_date` at `main.rs:3608` that stays in `retrieval.rs` with `legi_citation_routing`); plus the current-date helpers `today_utc` (`main.rs:11925`) with its private dependencies `unix_seconds` (`main.rs:11918`) and `civil_from_days` (`main.rs:11931`). Callers: calendar validators via `validate_as_of` → `cite_payload`/`context_payload` (retrieval) and `diff_payload` (status, `main.rs:9828`); `today_utc` is passed as `unwrap_or_else(today_utc)` across eval (`main.rs:1843`, `2264`, `2962`) and retrieval (`main.rs:3414`, `3682`, `3910`, `5183`). `validate_as_of` itself (`main.rs:11269`) stays in `retrieval.rs` and imports `date.rs`. (General rule for every leaf move: a listed helper moves **with its private helper closure** unless a dependency is separately assigned elsewhere.)
 - `query_support.rs` — `parade_query_text` (`main.rs:11879`) and `validate_retrieval_options` (`main.rs:420`). Callers span eval (`eval_run_payload`, France-LEGI/juris/zones search) and retrieval (`search_payload`, `zone_search_payload`, `compare_payload`). (Alternatively make these `pub(crate)` in `retrieval.rs` and let `eval.rs` import them; a dedicated leaf is cleaner and avoids eval→retrieval coupling.)
 - `legifrance_search.rs` — the Legifrance **request-body** builder `legifrance_code_search_body` (`main.rs:4591`) + its dependency `sanitize_legifrance_query` (`main.rs:4569`) and the `LEGIFRANCE_QUERY_MAX_CHARS` const (`main.rs:4561`), with their tests. Cross-command: `enrich_legislation_citations_payload` (`main.rs:4776`, enrichment) **and** `cite_payload`'s `--online` path via `apply_online_citation_confirmation` → `legifrance_code_search_body` (`main.rs:11716`, retrieval). This is the CLI-side JSON shaping; it stays distinct from the official-api crate's generic `legifrance_search_exchange`. (`legifrance_response_has_results` is currently used only by `enrich_legislation_citations_payload` — `main.rs:4792`, passed as `.is_some_and(legifrance_response_has_results)` — so it stays with `enrichment/legislation.rs`.)
-- `errors.rs` — the `ErrorObject` constructors and error mapping used everywhere: `index_unavailable` (`main.rs:11232`), `dependency_unavailable` (`main.rs:11243`), `no_results` (`main.rs:11253`), `upstream_unavailable` (`main.rs:11261`), `index_not_query_ready`, `storage_error_object` (`main.rs:11846`), `embedding_error_object`/`embedding_error_object_with_context` (`main.rs:11856`). These appear across eval, retrieval, status, ingest, enrichment, and embedding paths, so they need a single shared home rather than living in any one command module. (`output.rs` would also be an acceptable host since it already owns `emit_error`; pick one and import it everywhere.)
+- `errors.rs` — the `ErrorObject` constructors and error mapping used everywhere: `index_unavailable` (`main.rs:11232`), `dependency_unavailable` (`main.rs:11243`), `no_results` (`main.rs:11253`), `upstream_unavailable` (`main.rs:11261`), `index_not_query_ready`, `storage_error_object` (`main.rs:11846`), `embedding_error_object`/`embedding_error_object_with_context` (`main.rs:11856`). These appear across eval, retrieval, status, ingest, enrichment, and embedding paths, so they need a single shared home rather than living in any one command module. **Decision: `errors.rs` is the definitive owner** — it owns error *construction/mapping*, while `output.rs` owns only *serialization/emission* (`write_json`, `emit_error`, session-response writing) and depends on `ErrorObject`. Do not leave this to the mechanical move.
 - `embedding_runtime.rs` — `PreparedQueryEmbedder` (`main.rs:3528`) moves here (not `retrieval.rs`): it is built by both eval search paths (`france_legi_search_documents`, `france_juris*` categories) and retrieval (`search_with_postgres`, `compare_payload`), so it belongs with the other embedding runtime that both import.
 - `enrichment/archive.rs` — `archive_exchange`, `sha256_hex`, `archive_local_unsupported` (see Phase 3b). Callers: `enrichment/legislation.rs` and `enrichment/judilibre_zones.rs`.
 
@@ -199,22 +218,17 @@ Validation:
 
 ## Phase 3a: Retrieval Command Split (fetch excluded)
 
-Target: move the high-frequency query commands that do **not** depend on the enrichment band out of the CLI monolith. `fetch_payload` is deliberately deferred to Phase 3c because it calls into the decision-part/Judilibre-zone helpers extracted in Phase 3b — moving `fetch` first would drag that whole band into `retrieval.rs` or force a second large move right after.
+Target: move the high-frequency query commands that do **not** depend on the enrichment band out of the CLI monolith. `fetch_payload` is deliberately deferred to Phase 3c because it calls into the decision-part/Judilibre-zone helpers extracted in Phase 3b — moving `fetch` first would drag that whole band into `retrieval/` or force a second large move right after.
 
-Move to `retrieval.rs`:
+Create the `retrieval/` subtree (one submodule per command, re-exported from `retrieval/mod.rs`) rather than a single flat `retrieval.rs` — these payloads are not one responsibility (query/pagination/diagnostics vs citation state vs graph/structure reads), so a flat file becomes a second monolith. Move:
 
-- `search_payload`
-- `search_with_postgres`
-- `zone_search_payload` and `ensure_zone_retrieval_readiness` (the parallel zone retrieval index path)
-- `compare_payload`
-- `cite_payload`
-- `context_payload`
-- `related_payload`
-- `expand_payload`
-- command emitters: `emit_search`, `emit_cite`, `emit_context`, `emit_related`, `emit_compare`, `emit_expand`
-- the citation-routing helpers used by `search_with_postgres`: `legi_citation_routing` + `LegiCitationRouting` (`main.rs:3578`/`3564`) and `is_iso_date` (`main.rs:3608`)
-- retrieval-specific validation helpers such as cursor/date/candidate helpers if only used here (`parse_search_cursor`, `search_pagination_value`, `validate_cursor_score`)
-- cite-only state helpers (`classify_citation_state`, `annotate_valid_matches`) — both have `cite_payload` as their only caller
+- `search.rs` — `search_payload`, `search_with_postgres`, `emit_search`, and the routing helpers used by `search_with_postgres`: `legi_citation_routing` + `LegiCitationRouting` (`main.rs:3578`/`3564`) and `is_iso_date` (`main.rs:3608`); plus the cursor/pagination helpers if only used here (`parse_search_cursor`, `search_pagination_value`, `validate_cursor_score`)
+- `zone.rs` — `zone_search_payload`, `ensure_zone_retrieval_readiness` (the parallel zone retrieval index path)
+- `cite.rs` — `cite_payload`, `emit_cite`, and the cite-only state helpers `classify_citation_state` / `annotate_valid_matches` (both have `cite_payload` as their only caller)
+- `context.rs` — `context_payload`, `emit_context`
+- `related.rs` — `related_payload`, `emit_related`
+- `compare.rs` — `compare_payload`, `emit_compare`
+- `expand.rs` — `expand_payload`, `emit_expand`
 
 First extract the shared leaf-helper modules (see "Shared leaf-helper modules" above) as a small mechanical step, because `retrieval` is the first command module to move and it touches most of them. Concretely, before moving the payloads create: `ascii.rs`, `date.rs`, `query_support.rs`, `errors.rs`, `citation.rs`, and `legifrance_search.rs`; and move `PreparedQueryEmbedder` into `embedding_runtime.rs`. Notes on the trickier ones:
 
@@ -272,9 +286,9 @@ Validation:
 
 ## Phase 3c: Fetch Command Split
 
-Target: move `fetch_payload` and `emit_fetch` into `retrieval.rs` now that the enrichment helpers they reach live in `enrichment/` (Phase 3b). `fetch_payload` directly uses `annotate_fetched_parts`, which in turn uses `official_decision_part`, `zone_cache_action`, and `part_block_from_cached_zones`. `fetch_payload` calls across to the enrichment module instead of owning the decision-part/zone-cache logic, so the read path and the ingest-side enrichment share one implementation.
+Target: move `fetch_payload` and `emit_fetch` into `retrieval/fetch.rs` now that the enrichment helpers they reach live in `enrichment/` (Phase 3b). `fetch_payload` directly uses `annotate_fetched_parts`, which in turn uses `official_decision_part`, `zone_cache_action`, and `part_block_from_cached_zones`. `fetch_payload` calls across to the enrichment module instead of owning the decision-part/zone-cache logic, so the read path and the ingest-side enrichment share one implementation.
 
-Move to `retrieval.rs`:
+Move to `retrieval/fetch.rs`:
 
 - `fetch_payload`
 - `emit_fetch`
@@ -323,7 +337,12 @@ Move to `status.rs`:
 - `ingest_health_payload`
 - `zone_retrieval_status_block` (new; reports the parallel zone-unit index health inside `status`)
 
-Move to `gates/phase1.rs` and `gates/phase2.rs`:
+Move to `gates/support.rs` (shared mechanics — factor these out so adding a gate does not re-duplicate artifact plumbing, per the SOLID/DRY review):
+
+- the common artifact lifecycle: read an env-configured artifact path, parse JSON, normalize diagnostics, run a validator, set `state`/`artifact_error`, expose evidence/metrics/categories
+- the generic dotted-pointer helpers (`artifact_pointer_value`/`_str`/`_f64`, `main.rs:10283`) and the shared category-validation result shape
+
+Move to `gates/phase1.rs` and `gates/phase2.rs` (phase-specific floor logic and claims only — they call `gates::support`):
 
 - `phase1_gate_payload`
 - `phase1_external_benchmark_payload*`
@@ -336,7 +355,7 @@ Move to `gates/phase1.rs` and `gates/phase2.rs`:
 
 Reasoning:
 
-The gates are high-risk contractual code. They should not stay mixed with socket serving, model cache probing, archive ingestion, and command argument parsing. Splitting them also makes future reviews easier because gate changes will be localized.
+The gates are high-risk contractual code. They should not stay mixed with socket serving, model cache probing, archive ingestion, and command argument parsing. Splitting them also makes future reviews easier because gate changes will be localized. Keeping the load/parse/validate/report mechanics in `gates/support.rs` (not duplicated per phase) means a future Phase-3 gate reuses the plumbing and only adds its floors/claims.
 
 Validation:
 
@@ -352,14 +371,14 @@ Target: move official-source ingestion orchestration out of the CLI entrypoint w
 Move to `ingest.rs`:
 
 - `emit_ingest`
-- `sync_payload` and `emit_sync`/dispatch equivalent if it remains a stub or source-ingest helper
+- `sync_payload` and `emit_sync`/dispatch equivalent — keep it in `ingest.rs` **only while** it stays a thin incremental wrapper over `ingest_legi_archives_payload` / `ingest_juri_archives_payload` (`main.rs:1341`); if `sync` later gains independent delta/transactional-history semantics, split it into its own `sync.rs` rather than growing `ingest.rs`.
 - archive manifest helpers:
   - `legi_archive_manifest`
   - `juri_archive_manifest`
   - `planned_archive_manifest`
   - `select_archives_to_process`
 - `ingest_legi_archives_payload`
-- `ingest_juri_archives_payload`
+- `ingest_juri_archives_payload` (these two share an archive-run lifecycle — see SOLID/DRY follow-up #3, the `ArchiveIngestRun` runner, sequenced after this mechanical move)
 - per-member processing helpers (`process_legi_archive_member*`, `process_juri_archive_member`, `record_*_member*`, batch flush helpers)
 - quarantine helpers (`maybe_quarantine_payload`, `sanitize_quarantine_component`, parse-error classifiers)
 - `embed_chunks_payload`
@@ -415,6 +434,18 @@ Rules:
 Validation:
 
 - `cargo test -p jurisearch-cli --tests`
+
+## SOLID/DRY Design Follow-ups (post-mechanical)
+
+The file split above is a behavior-preserving *mechanical* decomposition; it reduces merge conflicts but does not by itself fix the structural duplication baked into the current command surface. A codex SOLID/DRY review (2026-06-25, GO; `reviews/2026-06-25-refactoring-plan-solid-dry-codex-review.md`) flagged the following. **Sequence these AFTER the mechanical moves** so the moved-symbol diffs stay reviewable; each is its own focused, behavior-preserving commit with the contract tests as the guard. None requires a command-handler trait.
+
+1. **Command inventory / registry (OCP).** Today, adding a command or argument forces coordinated edits across the clap `Command` enum (`main.rs:186`), `dispatch::run` (`main.rs:1231`), `dispatch_session_request` (`main.rs:9398`), `contract::COMMANDS` (`jurisearch-core/src/contract.rs:66`), `SESSION_EXCLUDED_COMMANDS` (`contract.rs:255`), and `compiled_schema()` (`schema.rs:5`). Introduce a single internal command descriptor table — name, session availability, request/response schema names, handler entrypoint where practical — and derive `agent_help`, session-exclusion checks, and schema command listing from that one inventory instead of parallel literal lists. Keep clap derive types; this is metadata unification, not a handler trait.
+
+2. **Shared command request structs (DRY — biggest hole).** The `Session*Args` DTOs duplicate nearly every field of their clap `*Args` twin (e.g. `SessionSearchArgs` vs `SearchArgs`, `main.rs:473`/`295`) and every `session_*_payload` manually rebuilds the clap struct field-by-field (`main.rs:5309`, `5333`, `5352`, `5370`, `5389`, `5407`). Introduce shared internal request structs (`SearchRequest`, `FetchRequest`, `CiteRequest`, …) in `request.rs`: produced by `TryFrom<SearchArgs>` for the one-shot/clap path and by `serde` deserialization for the session path. Payload functions take the shared request type, not clap structs. This collapses the parallel `*_payload`/`session_*_payload` argument surface without a trait. (Refines the Phase 2/Phase 3a boundaries: the `Session*Args` still live in `session.rs`, but the conversion target is the shared request.)
+
+3. **Generic archive-ingest runner (DRY).** `ingest_legi_archives_payload` (`main.rs:5843`) and `ingest_juri_archives_payload` (`main.rs:6209`) share the whole archive-run lifecycle — plan, start run, select archives, read/flush member batches, fatal-error handling, manifest update, terminal status, replay-snapshot refresh, response shaping — differing only in source-specific manifest/counter/member parsing. Introduce a private `ArchiveIngestRun` (or a small generic runner) in `ingest.rs` that owns the common lifecycle and delegates source-specific bits via parameters / a tiny source adapter. Keep it private to `ingest`; do not promote it into `jurisearch-ingest` yet.
+
+The remaining review points are already reflected in the module map and phases above: `retrieval/` is split per command (SRP — search/zone/fetch/cite/context/related/compare/expand, see Phase 3a/3c) rather than one flat file; `eval/` is split per benchmark family (generic/france_legi/france_juris/zones/artifact) with only genuinely shared metric/category/artifact helpers factored out; and `gates/support.rs` holds the shared artifact-load/parse/dotted-pointer/validator-result mechanics so `phase1.rs`/`phase2.rs` keep only floor logic and claims (see Phase 4).
 
 ## Secondary Refactors
 
@@ -571,25 +602,34 @@ Two hard constraints from codex:
 
 ## Suggested Commit Plan
 
+Mechanical decomposition (behavior-preserving file moves):
+
 1. `cli: split args and output helpers from main`
 2. `cli: move dispatcher into dispatch module`
 3. `cli: move jsonl session and serve protocol modules`
-4. `cli: extract shared leaf helpers (citation/ascii/date/errors/query_support + PreparedQueryEmbedder)` (Phase 3a prerequisite)
-5. `cli: move retrieval command payloads except fetch (incl. zone_search)` (Phase 3a)
+4. `cli: extract shared leaf helpers (citation/ascii/date/errors/query_support/legifrance_search + PreparedQueryEmbedder)` (Phase 3a prerequisite)
+5. `cli: move retrieval command payloads except fetch into retrieval/ submodules (incl. zone_search)` (Phase 3a)
 6. `cli: extract enrichment domain (decision-part / judilibre-zones / legislation)` (Phase 3b)
-7. `cli: move fetch command onto enrichment helpers` (Phase 3c)
+7. `cli: move fetch command into retrieval/fetch.rs onto enrichment helpers` (Phase 3c)
 8. `cli: move status/runtime helpers (incl. zone_retrieval_status_block)`
-9. `cli: move phase gates and artifact validators`
-10. `cli: move ingest command orchestration (incl. zone-unit pipeline)`
-11. `cli: split integration contract tests`
-12. `official-api: split piste/legifrance/auth/retry/error` (bumped earlier; highest secondary)
-13. `ingest: split legi parser internals`
-14. `ingest: split juri parser internals`
-15. `storage: split retrieval SQL emitters`
-16. `storage: split projection write paths`
-17. `core: split schema.rs into schema/ fragments (golden byte-identical test)`
+9. `cli: move phase gates + gates/support.rs artifact validators`
+10. `cli: move eval payloads into eval/ subtree (generic/france_legi/france_juris/zones/artifact)`
+11. `cli: move ingest command orchestration (incl. zone-unit pipeline)`
+12. `cli: split integration contract tests`
+13. `official-api: split piste/legifrance/auth/retry/error` (bumped earlier; highest secondary)
+14. `ingest: split legi parser internals`
+15. `ingest: split juri parser internals`
+16. `storage: split retrieval SQL emitters`
+17. `storage: split projection write paths`
+18. `core: split schema.rs into schema/ fragments (golden byte-identical test)`
 
-Each source-split commit should compile independently and should avoid semantic changes except the small `emit_artifact` duplication cleanup if done with a focused test. Ordering notes: the shared leaf helpers (commit 4) come out **first** so no later command-module move has to reach back into `main.rs` for a cross-cutting helper; the enrichment extraction (commit 6 / Phase 3b) lands **before** the `fetch` move (commit 7 / Phase 3c) and the ingest move (commit 10), so both the read path (`fetch --part`) and the ingest path (`enrich-zones`, legislation citations) call into one shared module instead of duplicating the zone-cache logic. The non-fetch retrieval commands (commit 5 / Phase 3a) have no enrichment dependency and can move once the leaves exist.
+SOLID/DRY structural follow-ups (post-mechanical — only after the moves above so moved-symbol diffs stay reviewable; each is its own behavior-preserving commit guarded by the contract tests):
+
+19. `cli: introduce command inventory/registry (unify dispatch + session-exclusion + schema listing)` [OCP]
+20. `cli: shared command request structs + TryFrom<*Args> (collapse session-DTO rebuild)` [DRY]
+21. `cli/ingest: introduce ArchiveIngestRun runner (collapse legi/juri archive lifecycle)` [DRY]
+
+Each source-split commit should compile independently and should avoid semantic changes except the small `emit_artifact` duplication cleanup if done with a focused test. Ordering notes: the shared leaf helpers (commit 4) come out **first** so no later command-module move has to reach back into `main.rs` for a cross-cutting helper; the enrichment extraction (commit 6 / Phase 3b) lands **before** the `fetch` move (commit 7 / Phase 3c) and the ingest move (commit 11), so both the read path (`fetch --part`) and the ingest path (`enrich-zones`, legislation citations) call into one shared module instead of duplicating the zone-cache logic. The non-fetch retrieval commands (commit 5 / Phase 3a) have no enrichment dependency and can move once the leaves exist. The follow-ups (19-21) are deliberately last: they introduce small new abstractions (registry, shared request structs, archive runner) and are easier to review once the code already lives in its target modules.
 
 ## Risk Areas
 
