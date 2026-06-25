@@ -15,10 +15,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Context;
 use jurisearch_core::{
     SCHEMA_VERSION,
-    contract::{CitationState, LegalKind, OutputFormat, SESSION_EXCLUDED_COMMANDS, agent_help},
+    contract::{CitationState, LegalKind, OutputFormat, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
     eval::{
         LegalRetrievalFixture, phase1_eval_fixture_summary, phase1_eval_fixtures,
@@ -26,7 +25,6 @@ use jurisearch_core::{
     },
     expand::expand_query,
     schema::compiled_schema,
-    session::{SessionRequest, SessionResponse},
 };
 use jurisearch_embed::{
     EmbeddingConfig, EmbeddingFingerprint, EmbeddingProvider, OpenAiCompatibleClient,
@@ -108,6 +106,8 @@ use url::Url;
 mod args;
 mod dispatch;
 mod output;
+mod serve;
+mod session;
 
 use crate::args::*;
 use crate::output::*;
@@ -176,128 +176,6 @@ const PHASE2_MIN_DECISION_CITATION_ACCURACY: f64 = 0.95;
 // "ECLI/pourvoi/CETATEXT verification" claim cannot pass on an ECLI-only benchmark.
 const PHASE2_MIN_CITATION_QUERIES_PER_IDENTIFIER: u64 = 10;
 const PHASE2_REQUIRED_CITATION_IDENTIFIERS: [&str; 3] = ["ecli", "pourvoi", "cetatext"];
-
-#[derive(Debug, Deserialize)]
-struct SessionSearchArgs {
-    query: String,
-    #[serde(default = "default_cli_kind")]
-    kind: CliKind,
-    #[serde(default = "default_search_mode")]
-    mode: CliSearchMode,
-    #[serde(default = "default_output_format")]
-    format: CliOutputFormat,
-    #[serde(default = "default_group_by")]
-    group_by: CliGroupBy,
-    #[serde(default = "default_top_k")]
-    top_k: u32,
-    #[serde(default)]
-    cursor: Option<String>,
-    #[serde(default)]
-    as_of: Option<String>,
-    #[serde(default)]
-    rrf_lexical_weight: Option<f64>,
-    #[serde(default)]
-    rrf_dense_weight: Option<f64>,
-    #[serde(default)]
-    probes: Option<u32>,
-    #[serde(default)]
-    court: Option<String>,
-    #[serde(default)]
-    formation: Option<String>,
-    #[serde(default)]
-    publication: Option<String>,
-    #[serde(default)]
-    decided_from: Option<String>,
-    #[serde(default)]
-    decided_to: Option<String>,
-    #[serde(default)]
-    zone: Option<CliZone>,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionFetchArgs {
-    ids: Vec<String>,
-    #[serde(default)]
-    part: Option<String>,
-    #[serde(default)]
-    online: bool,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionCiteArgs {
-    cite: String,
-    #[serde(default)]
-    strict: bool,
-    #[serde(default)]
-    online: bool,
-    #[serde(default)]
-    as_of: Option<String>,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionContextArgs {
-    id: String,
-    #[serde(default)]
-    siblings: bool,
-    #[serde(default)]
-    as_of: Option<String>,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionRelatedArgs {
-    id: String,
-    #[serde(default = "default_related_rel")]
-    rel: String,
-    #[serde(default = "default_related_limit")]
-    limit: u32,
-    #[serde(default = "default_related_depth")]
-    depth: u32,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionCompareArgs {
-    query: String,
-    #[serde(default = "default_compare_kind")]
-    kind: CliKind,
-    #[serde(default = "default_top_k")]
-    top_k: u32,
-    #[serde(default)]
-    as_of: Option<String>,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct SessionStatusArgs {
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-    #[serde(default)]
-    deep: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionEvalPhase1Args {
-    #[serde(default)]
-    list: bool,
-    #[serde(default)]
-    include_dev: bool,
-    #[serde(default = "default_search_mode")]
-    mode: CliSearchMode,
-    #[serde(default = "default_top_k")]
-    top_k: u32,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
 
 fn main() -> ExitCode {
     match dispatch::run() {
@@ -2000,7 +1878,7 @@ fn zone_benchmark_artifact(
     })
 }
 
-fn eval_phase1_payload(
+pub(crate) fn eval_phase1_payload(
     args: EvalPhase1Args,
     index_dir: Option<&Path>,
 ) -> Result<Value, ErrorObject> {
@@ -2205,7 +2083,7 @@ fn search_pagination_value(
     })
 }
 
-fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn search_payload(args: SearchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     validate_retrieval_options(&args.retrieval_options())?;
     // Explicit opt-in: --zone routes to the parallel official-zone subsystem (Cassation-only), which
     // bypasses the chunk readiness gate and uses its own zone index. Absent --zone, behaviour is
@@ -2780,7 +2658,7 @@ pub(crate) fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyho
     }
 }
 
-fn related_payload(args: RelatedArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn related_payload(args: RelatedArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     if args.depth != 1 {
         return Err(ErrorObject::bad_input(
             "related --depth > 1 is reserved for a later multi-hop graph feature; only depth 1 is supported",
@@ -2822,7 +2700,7 @@ pub(crate) fn emit_related(args: RelatedArgs, index_dir: Option<&Path>) -> anyho
 /// Run the same query through bm25/dense/hybrid (document grouping) and return aligned per-mode
 /// top-k plus the pooled union with per-mode ranks and pairwise overlap. Single-page (no cursor):
 /// cross-mode pagination has no honest shared meaning.
-fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     if args.query.trim().is_empty() {
         return Err(ErrorObject::bad_input("compare requires a query"));
     }
@@ -2979,7 +2857,7 @@ pub(crate) fn emit_model(args: ModelCommand) -> anyhow::Result<()> {
     }
 }
 
-fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn fetch_payload(args: FetchArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let part = match args.part.as_deref() {
         None => None,
         Some(value) => Some(DecisionPart::parse(value).ok_or_else(|| {
@@ -4103,7 +3981,7 @@ fn heuristic_visa(body: &str) -> Option<String> {
     (!visa.is_empty()).then(|| visa.join("\n"))
 }
 
-fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     validate_as_of(args.as_of.as_deref())?;
     let parsed = parse_citation_target(&args.cite);
     let effective_as_of = args.as_of.clone().unwrap_or_else(today_utc);
@@ -4189,7 +4067,7 @@ fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, Error
     Ok(response)
 }
 
-fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     validate_as_of(args.as_of.as_deref())?;
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
@@ -4214,154 +4092,12 @@ fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value,
     }
 }
 
-fn expand_payload(args: QueryArgs) -> Result<Value, ErrorObject> {
+pub(crate) fn expand_payload(args: QueryArgs) -> Result<Value, ErrorObject> {
     if args.query.trim().is_empty() {
         return Err(ErrorObject::bad_input("expand query must not be empty"));
     }
     serde_json::to_value(expand_query(&args.query))
         .map_err(|error| dependency_unavailable(error.to_string()))
-}
-
-fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionSearchArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid search args: {error}")))?;
-    if args.query.trim().is_empty() {
-        return Err(ErrorObject::bad_input("search query must not be empty"));
-    }
-    if args.top_k == 0 {
-        return Err(ErrorObject::bad_input("search top_k must be at least 1"));
-    }
-    let index_dir = args.index_dir;
-    search_payload(
-        SearchArgs {
-            query: args.query,
-            kind: args.kind,
-            mode: args.mode,
-            format: args.format,
-            group_by: args.group_by,
-            top_k: args.top_k,
-            cursor: args.cursor,
-            as_of: args.as_of,
-            rrf_lexical_weight: args.rrf_lexical_weight,
-            rrf_dense_weight: args.rrf_dense_weight,
-            probes: args.probes,
-            court: args.court,
-            formation: args.formation,
-            publication: args.publication,
-            decided_from: args.decided_from,
-            decided_to: args.decided_to,
-            zone: args.zone,
-        },
-        index_dir.as_deref(),
-    )
-}
-
-fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionFetchArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid fetch args: {error}")))?;
-    if args.ids.is_empty() {
-        return Err(ErrorObject::bad_input(
-            "fetch requires at least one stable ID",
-        ));
-    }
-    let index_dir = args.index_dir;
-    fetch_payload(
-        FetchArgs {
-            ids: args.ids,
-            part: args.part,
-            online: args.online,
-        },
-        index_dir.as_deref(),
-    )
-}
-
-fn session_cite_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionCiteArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid cite args: {error}")))?;
-    if args.cite.trim().is_empty() {
-        return Err(ErrorObject::bad_input("cite requires a non-empty citation"));
-    }
-    let index_dir = args.index_dir;
-    cite_payload(
-        CiteArgs {
-            cite: args.cite,
-            strict: args.strict,
-            online: args.online,
-            as_of: args.as_of,
-        },
-        index_dir.as_deref(),
-    )
-}
-
-fn session_context_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionContextArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid context args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input(
-            "context requires a non-empty stable ID",
-        ));
-    }
-    let index_dir = args.index_dir;
-    context_payload(
-        ContextArgs {
-            id: args.id,
-            siblings: args.siblings,
-            as_of: args.as_of,
-        },
-        index_dir.as_deref(),
-    )
-}
-
-fn session_related_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionRelatedArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid related args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input("related requires a non-empty stable ID"));
-    }
-    let index_dir = args.index_dir;
-    related_payload(
-        RelatedArgs {
-            id: args.id,
-            rel: args.rel,
-            limit: args.limit,
-            depth: args.depth,
-        },
-        index_dir.as_deref(),
-    )
-}
-
-fn session_compare_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionCompareArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid compare args: {error}")))?;
-    let index_dir = args.index_dir;
-    compare_payload(
-        CompareArgs {
-            query: args.query,
-            kind: args.kind,
-            top_k: args.top_k,
-            as_of: args.as_of,
-        },
-        index_dir.as_deref(),
-    )
-}
-
-fn session_expand_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<QueryArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid expand args: {error}")))?;
-    expand_payload(args)
-}
-
-fn session_status_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = if args.is_null() {
-        SessionStatusArgs::default()
-    } else {
-        serde_json::from_value::<SessionStatusArgs>(args)
-            .map_err(|error| ErrorObject::bad_input(format!("invalid status args: {error}")))?
-    };
-    Ok(status_payload(
-        args.index_dir.as_deref(),
-        replay_snapshot_mode(args.deep),
-    ))
 }
 
 pub(crate) fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
@@ -8103,288 +7839,7 @@ fn line_column_for_offset(contents: &str, byte_offset: usize) -> (usize, usize) 
     (line, column)
 }
 
-/// Inject the server's bound index dir into a request that doesn't specify one, so clients of a
-/// daemon bound to one index can omit `index_dir`.
-fn inject_server_index_dir(args: &mut Value, default_index_dir: &Option<String>) {
-    let Some(dir) = default_index_dir else {
-        return;
-    };
-    if !args.is_object() {
-        *args = json!({});
-    }
-    if let Some(map) = args.as_object_mut() {
-        map.entry("index_dir")
-            .or_insert_with(|| Value::String(dir.clone()));
-    }
-}
-
-/// Max bytes for one request line on the socket; oversize requests are rejected and the connection
-/// closed, so a client can't exhaust memory with an unbounded line.
-const SERVE_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
-
-/// Read one newline-terminated request, bounded to `max` bytes. `Ok(None)` at EOF; an oversize line
-/// is an `InvalidData` error (the caller replies bad_input and closes).
-fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Option<String>> {
-    let mut buf: Vec<u8> = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        match reader.read(&mut byte)? {
-            0 => {
-                return Ok(if buf.is_empty() {
-                    None
-                } else {
-                    Some(String::from_utf8_lossy(&buf).into_owned())
-                });
-            }
-            _ => {
-                if byte[0] == b'\n' {
-                    return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
-                }
-                buf.push(byte[0]);
-                if buf.len() > max {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "request line exceeds the size limit",
-                    ));
-                }
-            }
-        }
-    }
-}
-
-/// Serve the JSONL request protocol over one socket, sequentially (the index's advisory lock means
-/// one request holds the index at a time). Reuses `dispatch_session_request` — the same transport-
-/// neutral handler the warm session uses — so results are byte-identical to the one-shot CLI.
-fn serve_jsonl<R: BufRead, W: Write>(
-    mut reader: R,
-    mut writer: W,
-    default_index_dir: &Option<String>,
-) -> io::Result<()> {
-    loop {
-        let line = match read_bounded_line(&mut reader, SERVE_MAX_REQUEST_BYTES) {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                let response = SessionResponse::err(None, ErrorObject::bad_input(error.to_string()));
-                let _ = writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&response).unwrap_or_default()
-                );
-                break; // close the connection so the listener can accept the next client
-            }
-            Err(error) => return Err(error),
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let (response, should_exit) = match serde_json::from_str::<SessionRequest>(&line) {
-            Ok(mut request) => {
-                inject_server_index_dir(&mut request.args, default_index_dir);
-                dispatch_session_request(request)
-            }
-            Err(error) => (
-                SessionResponse::err(
-                    None,
-                    ErrorObject::bad_input(format!("malformed request: {error}")),
-                ),
-                false,
-            ),
-        };
-        let encoded = serde_json::to_string(&response).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":{"code":"internal","message":"failed to encode response"}}"#
-                .to_owned()
-        });
-        writeln!(writer, "{encoded}")?;
-        writer.flush()?;
-        if should_exit {
-            break;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
-    let default_index_dir = index_dir.map(|path| path.display().to_string());
-    match (args.tcp.as_deref(), args.socket.as_deref()) {
-        (Some(_), Some(_)) | (None, None) => emit_error(ErrorObject::bad_input(
-            "serve requires exactly one of --tcp or --socket",
-        )),
-        (Some(addr), None) => {
-            // Resolve and refuse a non-loopback bind unless explicitly allowed: the protocol is
-            // unauthenticated, so binding 0.0.0.0/a LAN address would expose the index off-host.
-            let resolved = addr
-                .to_socket_addrs()
-                .map_err(|error| anyhow::anyhow!("invalid --tcp address {addr}: {error}"))?
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("--tcp address {addr} did not resolve"))?;
-            if !resolved.ip().is_loopback() && !args.allow_remote {
-                return emit_error(ErrorObject::bad_input(format!(
-                    "refusing to bind non-loopback address {resolved} without --allow-remote (the protocol is unauthenticated)"
-                )));
-            }
-            let listener = std::net::TcpListener::bind(resolved)
-                .map_err(|error| anyhow::anyhow!("failed to bind TCP {resolved}: {error}"))?;
-            eprintln!(
-                "jurisearch serve: listening on tcp://{resolved} (JSONL session protocol; single-client sequential)"
-            );
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                // Drop a slow/idle client instead of holding the single-client daemon forever.
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
-                let reader = io::BufReader::new(stream.try_clone()?);
-                let _ = serve_jsonl(reader, stream, &default_index_dir);
-            }
-            Ok(())
-        }
-        (None, Some(path)) => {
-            use std::os::unix::fs::FileTypeExt;
-            use std::os::unix::net::{UnixListener, UnixStream};
-            // Only remove a CONFIRMED stale jurisearch socket — never a regular file/dir/symlink the
-            // user mistyped, and not a live server's socket.
-            if let Ok(meta) = fs::symlink_metadata(path) {
-                if !meta.file_type().is_socket() {
-                    return emit_error(ErrorObject::bad_input(format!(
-                        "refusing to bind: {} exists and is not a socket",
-                        path.display()
-                    )));
-                }
-                if UnixStream::connect(path).is_ok() {
-                    return emit_error(ErrorObject::bad_input(format!(
-                        "a server is already listening on {}",
-                        path.display()
-                    )));
-                }
-                fs::remove_file(path).map_err(|error| {
-                    anyhow::anyhow!("failed to remove stale socket {}: {error}", path.display())
-                })?;
-            }
-            let listener = UnixListener::bind(path).map_err(|error| {
-                anyhow::anyhow!("failed to bind socket {}: {error}", path.display())
-            })?;
-            eprintln!(
-                "jurisearch serve: listening on unix://{} (JSONL session protocol; single-client sequential)",
-                path.display()
-            );
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
-                // Match the TCP path: a read timeout drops a slow/idle client, and a write timeout
-                // stops a client that sends a request then never drains the response from blocking
-                // the single-client daemon.
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(120)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(30)));
-                let reader = io::BufReader::new(stream.try_clone()?);
-                let _ = serve_jsonl(reader, stream, &default_index_dir);
-            }
-            Ok(())
-        }
-    }
-}
-
-pub(crate) fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
-    if !args.jsonl {
-        return emit_error(ErrorObject::bad_input(
-            "session and batch require the explicit `--jsonl` flag",
-        ));
-    }
-
-    let stdin = io::stdin();
-    let mut stdout = io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line.context("failed to read JSONL stdin")?;
-        let (response, should_exit) = match serde_json::from_str::<SessionRequest>(&line) {
-            Ok(request) => dispatch_session_request(request),
-            Err(error) => {
-                let response = SessionResponse::err(
-                    None,
-                    ErrorObject::bad_input(format!("malformed JSONL request: {error}")),
-                );
-                if args.fatal {
-                    write_session_response(&mut stdout, &response)?;
-                    break;
-                }
-                (response, false)
-            }
-        };
-        write_session_response(&mut stdout, &response)?;
-        if should_exit {
-            break;
-        }
-    }
-    Ok(())
-}
-
-fn dispatch_session_request(request: SessionRequest) -> (SessionResponse, bool) {
-    let SessionRequest { id, command, args } = request;
-    let command = command.trim();
-    if command == "exit" {
-        return (SessionResponse::ok(id, json!({ "bye": true })), true);
-    }
-    let result = match command {
-        "help" | "help agent" => Ok(json!({ "text": agent_help() })),
-        "help schema" | "schema" => Ok(compiled_schema()),
-        "status" => session_status_payload(args),
-        "search" => session_search_payload(args),
-        "fetch" => session_fetch_payload(args),
-        "cite" => session_cite_payload(args),
-        "context" => session_context_payload(args),
-        "related" => session_related_payload(args),
-        "compare" => session_compare_payload(args),
-        "expand" => session_expand_payload(args),
-        "model fetch" => session_model_fetch_payload(args),
-        "eval phase1" => session_eval_phase1_payload(args),
-        "setup" => Ok(setup_payload()),
-        "doctor" => session_doctor_payload(args),
-        "stats" => session_stats_payload(args),
-        "inspect" => session_inspect_payload(args),
-        "versions" => session_versions_payload(args),
-        "diff" => session_diff_payload(args),
-        // One-shot-only commands (the contract's SESSION_EXCLUDED_COMMANDS, e.g. `related`, `ingest`,
-        // `eval france-legi`, `sync`) are advertised but not session-callable: reject with
-        // not_implemented so the dispatcher matches the agent contract exactly.
-        other if SESSION_EXCLUDED_COMMANDS.contains(&other) => {
-            Err(ErrorObject::not_implemented(other))
-        }
-        _ => Err(ErrorObject::bad_input(format!(
-            "unknown session command `{command}`"
-        ))),
-    };
-
-    match result {
-        Ok(result) => (SessionResponse::ok(id, result), false),
-        Err(error) => (SessionResponse::err(id, error), false),
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct SessionModelFetchArgs {
-    model: Option<String>,
-    #[serde(default)]
-    allow_download: bool,
-}
-
-fn session_model_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionModelFetchArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid model fetch args: {error}")))?;
-    model_fetch_payload(args.model, args.allow_download)
-}
-
-fn session_eval_phase1_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionEvalPhase1Args>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid eval phase1 args: {error}")))?;
-    eval_phase1_payload(
-        EvalPhase1Args {
-            list: args.list,
-            include_dev: args.include_dev,
-            mode: args.mode,
-            top_k: args.top_k,
-        },
-        args.index_dir.as_deref(),
-    )
-}
-
-fn model_fetch_payload(model: Option<String>, allow_download: bool) -> Result<Value, ErrorObject> {
+pub(crate) fn model_fetch_payload(model: Option<String>, allow_download: bool) -> Result<Value, ErrorObject> {
     let mut embedding_config = embedding_config_from_env();
     if let Some(model) = nonempty_string(model) {
         embedding_config.model = model;
@@ -8667,18 +8122,6 @@ pub(crate) fn doctor_payload(index_dir: Option<&Path>) -> Value {
     })
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct SessionDoctorArgs {
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-fn session_doctor_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionDoctorArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid doctor args: {error}")))?;
-    Ok(doctor_payload(args.index_dir.as_deref()))
-}
-
 pub(crate) fn stats_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
@@ -8699,35 +8142,6 @@ pub(crate) fn inspect_payload(args: InspectArgs, index_dir: Option<&Path>) -> Re
         return Err(no_results(format!("no document with id `{}`", args.id)));
     }
     Ok(value)
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct SessionStatsArgs {
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-fn session_stats_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionStatsArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid stats args: {error}")))?;
-    stats_payload(args.index_dir.as_deref())
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionInspectArgs {
-    id: String,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-fn session_inspect_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionInspectArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid inspect args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input("inspect requires a document id"));
-    }
-    let index_dir = args.index_dir;
-    inspect_payload(InspectArgs { id: args.id }, index_dir.as_deref())
 }
 
 pub(crate) fn versions_payload(args: VersionsArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
@@ -8777,46 +8191,6 @@ pub(crate) fn diff_payload(args: DiffArgs, index_dir: Option<&Path>) -> Result<V
         map.insert("missing_to".to_owned(), Value::Bool(missing_to));
     }
     Ok(value)
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionVersionsArgs {
-    id: String,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-fn session_versions_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionVersionsArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid versions args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input("versions requires a document id"));
-    }
-    let index_dir = args.index_dir;
-    versions_payload(VersionsArgs { id: args.id }, index_dir.as_deref())
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionDiffArgs {
-    id: String,
-    from: String,
-    to: String,
-    #[serde(default)]
-    index_dir: Option<PathBuf>,
-}
-
-fn session_diff_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionDiffArgs>(args)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid diff args: {error}")))?;
-    let index_dir = args.index_dir;
-    diff_payload(
-        DiffArgs {
-            id: args.id,
-            from: args.from,
-            to: args.to,
-        },
-        index_dir.as_deref(),
-    )
 }
 
 fn phase1_gate_payload(index: &Value, ingest_health: &Value) -> Value {
@@ -10872,7 +10246,10 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::dispatch_session_request;
+    use jurisearch_core::contract::SESSION_EXCLUDED_COMMANDS;
     use jurisearch_core::eval::{FixtureTier, ReviewStatus};
+    use jurisearch_core::session::{SessionRequest, SessionResponse};
 
     fn phase2_index_ready() -> Value {
         json!({ "query_ready": true })

@@ -8,6 +8,8 @@ use jurisearch_core::error::ErrorObject;
 
 use crate::args::*;
 use crate::output::*;
+use crate::serve::run_serve;
+use crate::session::run_jsonl;
 use crate::*;
 
 pub(crate) fn run() -> anyhow::Result<()> {
