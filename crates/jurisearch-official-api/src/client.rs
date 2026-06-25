@@ -4,10 +4,10 @@ use crate::*;
 
 #[derive(Debug)]
 pub struct PisteClient {
-    pub(crate) config: OfficialApiConfig,
-    pub(crate) agent: ureq::Agent,
-    pub(crate) legifrance_token: Option<CachedToken>,
-    pub(crate) retry: RetryPolicy,
+    config: OfficialApiConfig,
+    agent: ureq::Agent,
+    legifrance_token: Option<CachedToken>,
+    retry: RetryPolicy,
 }
 
 impl PisteClient {
@@ -457,15 +457,15 @@ pub(crate) fn missing_credential_exchange(
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct TokenResponse {
-    pub(crate) access_token: String,
-    pub(crate) expires_in: Option<u64>,
+struct TokenResponse {
+    access_token: String,
+    expires_in: Option<u64>,
 }
 
 #[derive(Clone)]
-pub(crate) struct CachedToken {
+struct CachedToken {
     pub(crate) access_token: String,
-    pub(crate) expires_at: Option<Instant>,
+    expires_at: Option<Instant>,
 }
 
 impl fmt::Debug for CachedToken {
