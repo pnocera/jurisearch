@@ -87,6 +87,7 @@ pub(crate) fn benchmark_search_request(
         decided_from: None,
         decided_to: None,
         zone: None,
+        authority_weight: None,
         index_dir: None,
     }
 }
@@ -136,9 +137,15 @@ mod tests {
                 let query = qrel["query"].as_str().unwrap();
                 // q1 ranks gold at position 1; q2 ranks gold at position 3.
                 let (docs, backend) = if query == "q1" {
-                    (vec!["A".to_owned(), "z".to_owned(), "z".to_owned()], "structured")
+                    (
+                        vec!["A".to_owned(), "z".to_owned(), "z".to_owned()],
+                        "structured",
+                    )
                 } else {
-                    (vec!["z".to_owned(), "z".to_owned(), "B".to_owned()], "hybrid")
+                    (
+                        vec!["z".to_owned(), "z".to_owned(), "B".to_owned()],
+                        "hybrid",
+                    )
                 };
                 Ok(Some((docs, Some(backend.to_owned()))))
             },

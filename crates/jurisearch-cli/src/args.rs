@@ -197,6 +197,12 @@ pub(crate) struct SearchArgs {
     /// zones, ranked within that zone. Cannot be combined with `--kind code`.
     #[arg(long)]
     pub(crate) zone: Option<CliZone>,
+    /// Decision-only authority re-rank weight in `[0.0, 1.0]` (default off; `0.0` is treated as off).
+    /// Re-orders near-tied jurisprudence results within the same legal order by publication authority.
+    /// EXPERIMENTAL: first-page-only — a positive weight disables cursor paging for the response and
+    /// requires `--kind decision` (or `--zone`); it cannot be combined with an inbound `--cursor`.
+    #[arg(long)]
+    pub(crate) authority_weight: Option<f64>,
 }
 
 /// Official Judilibre zone scopes available to `search --zone` (Cour de cassation only).

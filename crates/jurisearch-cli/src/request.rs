@@ -50,6 +50,8 @@ pub(crate) struct SearchRequest {
     #[serde(default)]
     pub(crate) zone: Option<CliZone>,
     #[serde(default)]
+    pub(crate) authority_weight: Option<f64>,
+    #[serde(default)]
     pub(crate) index_dir: Option<PathBuf>,
 }
 
@@ -59,9 +61,7 @@ impl SearchRequest {
             rrf_lexical_weight: self.rrf_lexical_weight,
             rrf_dense_weight: self.rrf_dense_weight,
             ivfflat_probes: self.probes,
-            // A3 surfaces `--authority-weight` here; until then the field stays unset so every request
-            // is on the inert OFF path (effective_authority_weight == None).
-            authority_weight: None,
+            authority_weight: self.authority_weight,
         }
     }
 
@@ -99,6 +99,7 @@ impl SearchArgs {
             decided_from: self.decided_from,
             decided_to: self.decided_to,
             zone: self.zone,
+            authority_weight: self.authority_weight,
             index_dir,
         }
     }

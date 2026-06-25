@@ -20,7 +20,8 @@ pub(super) fn schemas() -> Map<String, Value> {
                 "rrf_lexical_weight": { "type": "number", "minimum": 0, "description": "Per-request hybrid RRF lexical weight (default from env, else 1.0)." },
                 "rrf_dense_weight": { "type": "number", "minimum": 0, "description": "Per-request hybrid RRF dense weight (default from env, else 0.3)." },
                 "probes": { "type": "integer", "minimum": 1, "maximum": 4096, "description": "Per-request ivfflat.probes for dense ANN (default 4)." },
-                "zone": { "enum": ["motivations", "moyens", "dispositif"], "description": "Official Cour de cassation zone scope (case-law only): restrict retrieval to a decision part — `motivations` (reasoning), `moyens` (grounds raised), or `dispositif` (holding). Routes to the coverage-bounded official-zone subsystem (cass+inca only); incompatible with kind=code." }
+                "zone": { "enum": ["motivations", "moyens", "dispositif"], "description": "Official Cour de cassation zone scope (case-law only): restrict retrieval to a decision part — `motivations` (reasoning), `moyens` (grounds raised), or `dispositif` (holding). Routes to the coverage-bounded official-zone subsystem (cass+inca only); incompatible with kind=code." },
+                "authority_weight": { "type": "number", "minimum": 0, "maximum": 1, "description": "Decision-only authority re-rank weight in [0.0, 1.0] (default off; 0.0 is treated as off). Re-orders near-tied jurisprudence results within the same legal order by publication authority. EXPERIMENTAL: a positive weight is first-page-only (disables cursor paging for the response) and requires kind=decision (or zone); it cannot be combined with an inbound cursor." }
             }
         },
         "SearchResponse": {

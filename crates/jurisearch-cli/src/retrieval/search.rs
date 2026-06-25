@@ -51,6 +51,20 @@ pub(crate) fn search_payload(req: SearchRequest) -> Result<Value, ErrorObject> {
     if let Some(zone) = req.zone {
         return zone_search_payload(req, zone);
     }
+    // Authority routing (non-zone main path only — the zone path implies decisions and gates itself).
+    // `0.0`/unset is inert (`effective_authority_weight` is None), so these rejections never fire OFF.
+    if effective_authority_weight(&req.retrieval_options()).is_some() {
+        if !matches!(req.kind, CliKind::Decision) {
+            return Err(ErrorObject::bad_input(
+                "--authority-weight re-ranks jurisprudence only; rerun with --kind decision (or use --zone)",
+            ));
+        }
+        if req.cursor.is_some() {
+            return Err(ErrorObject::bad_input(
+                "--authority-weight is first-page-only and cannot be combined with --cursor; omit the cursor to get the authority-ranked first page",
+            ));
+        }
+    }
     let retrieval_mode: RetrievalMode = req.mode.into();
     let output_format: OutputFormat = req.format.into();
     let after_cursor = req
@@ -103,7 +117,10 @@ pub(crate) struct LegiCitationRouting {
 /// suffix) — those route to structured citation resolution. `None` means a conceptual query that
 /// goes to hybrid semantic search. This classification is production-visible (the shared search
 /// path), so the gate measures the same routing users hit.
-pub(crate) fn legi_citation_routing(query: &str, default_as_of: &str) -> Option<LegiCitationRouting> {
+pub(crate) fn legi_citation_routing(
+    query: &str,
+    default_as_of: &str,
+) -> Option<LegiCitationRouting> {
     const EN_VIGUEUR: &str = " en vigueur au ";
     let (article_part, as_of) = match find_ascii_ci(query, EN_VIGUEUR) {
         Some(idx) => {
@@ -281,7 +298,9 @@ impl<'a> SearchExecution<'a> {
                 retrieval_mode: self.retrieval_mode,
                 group_by: self.group_by,
                 options: self.req.retrieval_options(),
-                after_cursor: self.after_cursor.map(ParsedSearchCursor::as_retrieval_cursor),
+                after_cursor: self
+                    .after_cursor
+                    .map(ParsedSearchCursor::as_retrieval_cursor),
                 as_of: self.as_of.as_str(),
                 kind_filter: self.kind_filter,
                 project_authority: false,
@@ -441,14 +460,18 @@ impl ParsedSearchCursor {
     pub(crate) fn as_retrieval_cursor(&self) -> RetrievalCursor<'_> {
         match self {
             Self::Chunk { score, chunk_id } => RetrievalCursor::Chunk { score, chunk_id },
-            Self::Document { score, document_id } => RetrievalCursor::Document { score, document_id },
+            Self::Document { score, document_id } => {
+                RetrievalCursor::Document { score, document_id }
+            }
         }
     }
 }
 
 pub(crate) fn validate_cursor_score(score: &str, tail: &str) -> Result<(), ErrorObject> {
     let parsed = score.parse::<f64>().map_err(|_| {
-        ErrorObject::bad_input("search --cursor must start with a numeric score followed by ':' and an id")
+        ErrorObject::bad_input(
+            "search --cursor must start with a numeric score followed by ':' and an id",
+        )
     })?;
     if !parsed.is_finite() || parsed < 0.0 || tail.trim().is_empty() {
         return Err(ErrorObject::bad_input(
@@ -461,7 +484,10 @@ pub(crate) fn validate_cursor_score(score: &str, tail: &str) -> Result<(), Error
 /// Parse the opaque cursor, tagged by grouping. A `doc:`-prefixed cursor is a document cursor; an
 /// unprefixed `<score>:<chunk_id>` is a chunk cursor. A cursor from the other grouping is rejected
 /// rather than silently mis-paging.
-pub(crate) fn parse_search_cursor(cursor: &str, group_by: CliGroupBy) -> Result<ParsedSearchCursor, ErrorObject> {
+pub(crate) fn parse_search_cursor(
+    cursor: &str,
+    group_by: CliGroupBy,
+) -> Result<ParsedSearchCursor, ErrorObject> {
     if let Some(rest) = cursor.strip_prefix("doc:") {
         if group_by != CliGroupBy::Document {
             return Err(ErrorObject::bad_input(

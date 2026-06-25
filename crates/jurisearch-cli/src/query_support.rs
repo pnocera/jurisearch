@@ -35,7 +35,18 @@ pub(crate) fn validate_retrieval_options(options: &RetrievalOptions) -> Result<(
     if let Some(probes) = options.ivfflat_probes
         && !(1..=4096).contains(&probes)
     {
-        return Err(ErrorObject::bad_input("--probes must be between 1 and 4096"));
+        return Err(ErrorObject::bad_input(
+            "--probes must be between 1 and 4096",
+        ));
+    }
+    // Authority weight is valid in [0.0, 1.0]; `0.0` is allowed but normalized to inert
+    // (effective_authority_weight returns None), so it is a clean OFF baseline rather than a reject.
+    if let Some(weight) = options.authority_weight
+        && (!weight.is_finite() || !(0.0..=1.0).contains(&weight))
+    {
+        return Err(ErrorObject::bad_input(
+            "--authority-weight must be a finite value in [0.0, 1.0]",
+        ));
     }
     Ok(())
 }

@@ -65,6 +65,12 @@ fn help_schema_json_is_valid_and_lists_commands() {
         json["schemas"]["SearchRequest"]["properties"]["probes"]["maximum"],
         4096
     );
+    // A3: the decision-only authority re-rank knob must be discoverable through the schema with its
+    // [0.0, 1.0] bounds, so JSONL/session clients can find it (not just the one-shot CLI flag).
+    let authority_weight = &json["schemas"]["SearchRequest"]["properties"]["authority_weight"];
+    assert_eq!(authority_weight["type"], "number");
+    assert_eq!(authority_weight["minimum"], 0);
+    assert_eq!(authority_weight["maximum"], 1);
     assert_eq!(
         json["schemas"]["SearchRequest"]["properties"]["cursor"]["type"],
         "string"

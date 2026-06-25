@@ -43,6 +43,7 @@ use jurisearch_official_api::{
 };
 use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
+    authority::effective_authority_weight,
     citation::{CitationLookupQuery, citation_lookup_json},
     decision_zones::{
         UpsertDecisionZones, decision_resolution_metadata_with_client, decision_zones_json,
@@ -52,9 +53,14 @@ use jurisearch_storage::{
         DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
         load_chunk_embedding_inputs,
     },
+    france_juris::{
+        FranceJurisGoldLimits, FranceJurisZoneGoldLimits, france_juris_gold_json,
+        france_juris_index_revision, france_juris_zone_gold_json,
+    },
+    france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     ingest_accounting::{
-        IngestCompatibility, IngestErrorInput, IngestHealthReport,
-        IngestMemberInput, IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
+        IngestCompatibility, IngestErrorInput, IngestHealthReport, IngestMemberInput,
+        IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
         ReplaySnapshotMode, ReplaySnapshotReport, finish_ingest_run_with_client,
         ingest_resume_decision_with_client, invalidate_cached_query_readiness,
         load_ingest_health_with_replay_snapshot_mode, load_or_compute_query_readiness,
@@ -62,11 +68,6 @@ use jurisearch_storage::{
         start_ingest_run_with_client, update_ingest_member_status_with_client,
         update_ingest_run_manifest_with_client,
     },
-    france_juris::{
-        FranceJurisGoldLimits, FranceJurisZoneGoldLimits, france_juris_gold_json,
-        france_juris_index_revision, france_juris_zone_gold_json,
-    },
-    france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     legislation_citations::{
         InsertCitationOccurrence, finalize_citation_occurrence_counts,
         insert_citation_occurrence_with_client, legislation_citations_coverage_json,
@@ -94,9 +95,10 @@ use jurisearch_storage::{
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
     zone_units::{
         ZoneUnitEmbeddingInsert, ZoneUnitRow, enrich_zone_candidates_json,
-        finalize_zone_dense_rebuild, insert_zone_unit_embeddings, load_derivable_decision_zones_json,
-        load_zone_unit_embedding_inputs, replace_zone_units_for_document,
-        zone_resolver_reachable_json, zone_retrieval_coverage_json,
+        finalize_zone_dense_rebuild, insert_zone_unit_embeddings,
+        load_derivable_decision_zones_json, load_zone_unit_embedding_inputs,
+        replace_zone_units_for_document, zone_resolver_reachable_json,
+        zone_retrieval_coverage_json,
     },
 };
 use serde::{Deserialize, Deserializer};

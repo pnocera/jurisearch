@@ -2076,6 +2076,12 @@
           "format": "date",
           "type": "string"
         },
+        "authority_weight": {
+          "description": "Decision-only authority re-rank weight in [0.0, 1.0] (default off; 0.0 is treated as off). Re-orders near-tied jurisprudence results within the same legal order by publication authority. EXPERIMENTAL: a positive weight is first-page-only (disables cursor paging for the response) and requires kind=decision (or zone); it cannot be combined with an inbound cursor.",
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
         "cursor": {
           "description": "Chunk cursor <score>:<chunk_id> or document cursor doc:<score>:<document_id>; must match --group-by.",
           "type": "string"

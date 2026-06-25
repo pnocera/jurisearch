@@ -1269,3 +1269,218 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
     assert_eq!(json["candidates"][0]["scores"]["dense_rank"], 1);
     Ok(())
 }
+
+// ---- A3: --authority-weight config + validation (no index needed; rejections fire pre-index) ----
+
+/// Run `search` with the given trailing args and no index configured, returning parsed JSON stdout.
+/// The authority validation/routing rejections all fire before any index access, so these need no DB.
+fn search_cli_json(args: &[&str]) -> Value {
+    let mut command = Command::cargo_bin("jurisearch").unwrap();
+    command.env_remove("JURISEARCH_INDEX_DIR").arg("search");
+    let output = command.args(args).assert().get_output().stdout.clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+#[test]
+fn search_rejects_non_finite_and_out_of_range_authority_weight() {
+    // Equals form so clap never mistakes a leading-dash value for a flag.
+    for weight in ["=-0.5", "=1.5", "=nan", "=inf"] {
+        let output = Command::cargo_bin("jurisearch")
+            .unwrap()
+            .env_remove("JURISEARCH_INDEX_DIR")
+            .args(["search", "clause de non-concurrence"])
+            .arg(format!("--authority-weight{weight}"))
+            .assert()
+            .code(2)
+            .get_output()
+            .stdout
+            .clone();
+        assert_json_error_contains(
+            &output,
+            "bad_input",
+            "--authority-weight must be a finite value in [0.0, 1.0]",
+        );
+    }
+}
+
+#[test]
+fn search_rejects_positive_authority_weight_on_non_decision_kinds() {
+    // Default kind is `all`, plus explicit `code`/`all`: authority is jurisprudence-only on the main path.
+    for kind in [None, Some("all"), Some("code")] {
+        let mut args = vec!["clause", "--authority-weight", "0.5"];
+        if let Some(kind) = kind {
+            args.push("--kind");
+            args.push(kind);
+        }
+        let json = search_cli_json(&args);
+        assert_eq!(json["ok"], false, "kind={kind:?} should be rejected");
+        assert_eq!(json["error"]["code"], "bad_input");
+        assert!(
+            json["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("re-ranks jurisprudence only"),
+            "kind={kind:?} message was {}",
+            json["error"]["message"]
+        );
+    }
+}
+
+#[test]
+fn search_rejects_positive_authority_weight_with_inbound_cursor() {
+    let json = search_cli_json(&[
+        "clause",
+        "--kind",
+        "decision",
+        "--authority-weight",
+        "0.5",
+        "--cursor",
+        "0.5:chunk-1",
+    ]);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("first-page-only")
+    );
+}
+
+#[test]
+fn search_authority_weight_zero_is_inert_and_takes_the_off_path() {
+    // 0.0 is valid but normalized to inert: it must BYPASS the decision-only/cursor authority rejections
+    // and behave exactly like unset. With no index it therefore reaches the index check (index_unavailable,
+    // exit 3) instead of an authority bad_input — proving 0.0 took the OFF path even with --kind code.
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "search",
+            "clause",
+            "--kind",
+            "code",
+            "--authority-weight",
+            "0.0",
+        ])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "index_unavailable");
+}
+
+#[test]
+fn session_search_validates_authority_weight_like_the_cli() {
+    // The JSONL session path deserializes the shared SearchRequest, so it must validate/route identically.
+    let input = concat!(
+        "{\"id\":\"bad-range\",\"command\":\"search\",\"args\":{\"query\":\"x\",\"authority_weight\":1.5}}\n",
+        "{\"id\":\"bad-kind\",\"command\":\"search\",\"args\":{\"query\":\"x\",\"kind\":\"code\",\"authority_weight\":0.5}}\n",
+        "{\"id\":\"done\",\"command\":\"exit\"}\n",
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let values = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values[0]["id"], "bad-range");
+    assert_eq!(values[0]["error"]["code"], "bad_input");
+    assert!(
+        values[0]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("[0.0, 1.0]")
+    );
+    assert_eq!(values[1]["id"], "bad-kind");
+    assert_eq!(values[1]["error"]["code"], "bad_input");
+    assert!(
+        values[1]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("re-ranks jurisprudence only")
+    );
+    assert_eq!(values[2]["result"]["bye"], true);
+}
+
+#[test]
+fn zone_search_rejects_positive_authority_weight_with_inbound_cursor() {
+    // The zone path implies decisions (so --kind all is fine), but authority is still first-page-only.
+    let json = search_cli_json(&[
+        "clause",
+        "--zone",
+        "motivations",
+        "--authority-weight",
+        "0.5",
+        "--cursor",
+        "doc:0.5:cass:DEC1",
+    ]);
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["code"], "bad_input");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("first-page-only")
+    );
+}
+
+#[test]
+fn search_accepts_positive_authority_weight_on_decision_kind_without_cursor() {
+    // The explicitly-ALLOWED case: a positive finite weight with --kind decision and no cursor must
+    // PASS A3 validation/routing. With no index it therefore reaches the index check
+    // (index_unavailable, exit 3), NOT an authority bad_input — guarding against a regression that
+    // would reject every positive weight on the main path. Same assertion through the JSONL session.
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "search",
+            "clause",
+            "--kind",
+            "decision",
+            "--authority-weight",
+            "0.5",
+        ])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["error"]["code"], "index_unavailable");
+
+    let input = concat!(
+        "{\"id\":\"ok-positive\",\"command\":\"search\",\"args\":{\"query\":\"clause\",\"kind\":\"decision\",\"authority_weight\":0.5}}\n",
+        "{\"id\":\"done\",\"command\":\"exit\"}\n",
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let values = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values[0]["id"], "ok-positive");
+    // Accepted by A3 (not a bad_input); fails later only because no index is configured.
+    assert_eq!(values[0]["error"]["code"], "index_unavailable");
+}

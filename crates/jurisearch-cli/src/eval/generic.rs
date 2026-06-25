@@ -74,16 +74,31 @@ pub(crate) fn eval_question_seed(id: &str) -> u64 {
     hash
 }
 
-pub(crate) fn load_eval_json<T: serde::de::DeserializeOwned>(path: &Path, what: &str) -> Result<T, ErrorObject> {
-    let bytes = fs::read(path)
-        .map_err(|error| ErrorObject::bad_input(format!("failed to read {what} file {}: {error}", path.display())))?;
-    serde_json::from_slice(&bytes)
-        .map_err(|error| ErrorObject::bad_input(format!("invalid {what} JSON in {}: {error}", path.display())))
+pub(crate) fn load_eval_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+    what: &str,
+) -> Result<T, ErrorObject> {
+    let bytes = fs::read(path).map_err(|error| {
+        ErrorObject::bad_input(format!(
+            "failed to read {what} file {}: {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        ErrorObject::bad_input(format!(
+            "invalid {what} JSON in {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 pub(crate) fn parse_eval_modes(value: &str) -> Result<Vec<RetrievalMode>, ErrorObject> {
     let mut modes = Vec::new();
-    for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+    for token in value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
         let mode = match token {
             "bm25" => RetrievalMode::Bm25,
             "dense" => RetrievalMode::Dense,
@@ -109,11 +124,13 @@ pub(crate) fn parse_eval_modes(value: &str) -> Result<Vec<RetrievalMode>, ErrorO
 pub(crate) fn parse_eval_metric(value: &str) -> Result<MetricSpec, ErrorObject> {
     let value = value.trim();
     let (name, k_str) = value.split_once('@').unwrap_or((value, "10"));
-    let k: usize = k_str.parse().map_err(|_| {
-        ErrorObject::bad_input(format!("metric `{value}` has a non-numeric @k"))
-    })?;
+    let k: usize = k_str
+        .parse()
+        .map_err(|_| ErrorObject::bad_input(format!("metric `{value}` has a non-numeric @k")))?;
     if k == 0 {
-        return Err(ErrorObject::bad_input(format!("metric `{value}` @k must be >= 1")));
+        return Err(ErrorObject::bad_input(format!(
+            "metric `{value}` @k must be >= 1"
+        )));
     }
     let kind = match name {
         "p" | "precision" => MetricKind::Precision,
@@ -198,7 +215,11 @@ pub(crate) fn mean_of(values: &[Option<f64>]) -> Option<f64> {
 }
 
 /// Bootstrap a 95% CI for the mean difference (a - b), resampling QUESTIONS with replacement.
-pub(crate) fn bootstrap_delta_ci(a: &[Option<f64>], b: &[Option<f64>], resamples: u32) -> (f64, f64, f64) {
+pub(crate) fn bootstrap_delta_ci(
+    a: &[Option<f64>],
+    b: &[Option<f64>],
+    resamples: u32,
+) -> (f64, f64, f64) {
     let n = a.len();
     let resample_mean = |idx: &[usize], values: &[Option<f64>]| -> Option<f64> {
         let present: Vec<f64> = idx.iter().filter_map(|&i| values[i]).collect();
@@ -242,8 +263,9 @@ pub(crate) fn run_external_judge(command: &str, input: &Value) -> Result<Value, 
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| dependency_unavailable(format!("failed to spawn judge: {error}")))?;
-    let payload = serde_json::to_vec(input)
-        .map_err(|error| dependency_unavailable(format!("failed to encode judge input: {error}")))?;
+    let payload = serde_json::to_vec(input).map_err(|error| {
+        dependency_unavailable(format!("failed to encode judge input: {error}"))
+    })?;
     child
         .stdin
         .take()
@@ -296,7 +318,9 @@ pub(crate) fn eval_run_payload(
         .map(parse_eval_metric)
         .collect::<Result<Vec<_>, _>>()?;
     if metrics.is_empty() {
-        return Err(ErrorObject::bad_input("--metrics must list at least one metric"));
+        return Err(ErrorObject::bad_input(
+            "--metrics must list at least one metric",
+        ));
     }
     let questions: Vec<EvalQuestion> = load_eval_json(&args.questions, "questions")?;
     if questions.is_empty() {
@@ -369,7 +393,10 @@ pub(crate) fn eval_run_payload(
             .map_err(storage_error_object)?;
             let response: Value = serde_json::from_str(&response)
                 .map_err(|error| dependency_unavailable(error.to_string()))?;
-            let candidates = response["candidates"].as_array().cloned().unwrap_or_default();
+            let candidates = response["candidates"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let mut top = Vec::new();
             for candidate in &candidates {
                 let Some(uid) = candidate["document_id"].as_str() else {
@@ -471,8 +498,11 @@ pub(crate) fn eval_run_payload(
                     // doc. For qrels this includes judged-relevant docs no retriever returned (so
                     // recall/nDCG can't look perfect when a retriever missed gold); for an external
                     // judge it equals the pool (the judge only labels pooled candidates).
-                    let mut universe: HashSet<String> =
-                        result.pool.iter().map(|candidate| candidate.uid.clone()).collect();
+                    let mut universe: HashSet<String> = result
+                        .pool
+                        .iter()
+                        .map(|candidate| candidate.uid.clone())
+                        .collect();
                     universe.extend(result.labels.keys().cloned());
                     let universe: Vec<String> = universe.into_iter().collect();
                     let empty = Vec::new();
@@ -553,13 +583,18 @@ pub(crate) fn eval_run_payload(
 
 /// Sweep one hybrid retrieval parameter against a fixture and report the metric-maximizing value.
 /// Re-runs `eval_run_payload` (hybrid only) per sweep point with request-scoped options.
-pub(crate) fn eval_tune_payload(args: EvalTuneArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn eval_tune_payload(
+    args: EvalTuneArgs,
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
     let (param, range) = args.sweep.split_once('=').ok_or_else(|| {
         ErrorObject::bad_input("--sweep must be PARAM=start:stop:step (e.g. rrf-dense=0.1:1.5:0.1)")
     })?;
     let bounds: Vec<&str> = range.split(':').collect();
     if bounds.len() != 3 {
-        return Err(ErrorObject::bad_input("--sweep range must be start:stop:step"));
+        return Err(ErrorObject::bad_input(
+            "--sweep range must be start:stop:step",
+        ));
     }
     let parse = |s: &str| -> Result<f64, ErrorObject> {
         s.trim()
@@ -568,7 +603,9 @@ pub(crate) fn eval_tune_payload(args: EvalTuneArgs, index_dir: Option<&Path>) ->
     };
     let (start, stop, step) = (parse(bounds[0])?, parse(bounds[1])?, parse(bounds[2])?);
     if !start.is_finite() || !stop.is_finite() || !step.is_finite() {
-        return Err(ErrorObject::bad_input("--sweep start/stop/step must be finite"));
+        return Err(ErrorObject::bad_input(
+            "--sweep start/stop/step must be finite",
+        ));
     }
     if step <= 0.0 || stop < start {
         return Err(ErrorObject::bad_input(
@@ -741,6 +778,7 @@ pub(crate) fn eval_phase1_fixture_result(
         decided_from: None,
         decided_to: None,
         zone: None,
+        authority_weight: None,
         index_dir: index_dir.map(Path::to_path_buf),
     });
 
@@ -767,7 +805,10 @@ pub(crate) fn eval_phase1_fixture_result(
     }
 }
 
-pub(crate) fn eval_phase1_fixture_search_result(fixture: &LegalRetrievalFixture, search: Value) -> Value {
+pub(crate) fn eval_phase1_fixture_search_result(
+    fixture: &LegalRetrievalFixture,
+    search: Value,
+) -> Value {
     let expected_ids = fixture
         .expected_ids
         .iter()

@@ -12,9 +12,10 @@ pub(crate) fn ensure_zone_retrieval_readiness(
     needs_dense: bool,
     expected_fingerprint: Option<&str>,
 ) -> Result<(), ErrorObject> {
-    let coverage: Value =
-        serde_json::from_str(&zone_retrieval_coverage_json(postgres).map_err(storage_error_object)?)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &zone_retrieval_coverage_json(postgres).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     if coverage["zone_units"]["total"].as_u64().unwrap_or(0) == 0 {
         return Err(index_unavailable(
             "no official zone units are indexed; run `ingest enrich-zones` then `ingest build-zone-units` \
@@ -56,6 +57,14 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
             "--zone is Cour de cassation case-law scope and cannot be combined with --kind code",
         ));
     }
+    // Authority on the zone path: --zone already implies decisions (so --kind all is fine), so only the
+    // first-page-only cursor restriction applies. `0.0`/unset is inert; numeric validation already ran
+    // in `search_payload` before the zone dispatch.
+    if effective_authority_weight(&req.retrieval_options()).is_some() && req.cursor.is_some() {
+        return Err(ErrorObject::bad_input(
+            "--authority-weight is first-page-only and cannot be combined with --cursor; omit the cursor to get the authority-ranked first page",
+        ));
+    }
     let retrieval_mode: RetrievalMode = req.mode.into();
     let output_format: OutputFormat = req.format.into();
     // Zone retrieval always groups by decision; a chunk cursor from the main path is rejected.
@@ -88,7 +97,8 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
 
     let as_of = req.as_of.clone().unwrap_or_else(today_utc);
     let (query_embedding, embedding_fingerprint) = if needs_dense {
-        let (literal, fingerprint) = PreparedQueryEmbedder::from_env()?.embed(req.query.as_str())?;
+        let (literal, fingerprint) =
+            PreparedQueryEmbedder::from_env()?.embed(req.query.as_str())?;
         (Some(literal), Some(fingerprint))
     } else {
         (None, None)
@@ -107,7 +117,9 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
             embedding_fingerprint: embedding_fingerprint.as_deref(),
             retrieval_mode,
             options: req.retrieval_options(),
-            after_cursor: after_cursor.as_ref().map(ParsedSearchCursor::as_retrieval_cursor),
+            after_cursor: after_cursor
+                .as_ref()
+                .map(ParsedSearchCursor::as_retrieval_cursor),
             zone: zone.as_str(),
             as_of: as_of.as_str(),
             project_authority: false,
@@ -121,9 +133,10 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
     let mut response: Value = serde_json::from_str(&response)
         .map_err(|error| dependency_unavailable(error.to_string()))?;
 
-    let coverage: Value =
-        serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     // Shared search decoration (expansion, format, limit) so the zone surface matches ordinary search.
     let expansion = expand_query(&req.query);
     response["format"] = json!(output_format.as_str());
