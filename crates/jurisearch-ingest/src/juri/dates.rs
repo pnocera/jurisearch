@@ -8,11 +8,13 @@ pub(super) fn validate_uid(value: &str, family: JuriFamily) -> Result<(), JuriPa
         JuriFamily::Judicial => "JURITEXT[0-9]{12}",
         JuriFamily::Administrative => "CETATEXT[0-9]{12}",
     };
-    let suffix = value.strip_prefix(prefix).ok_or(JuriParseError::InvalidId {
-        field: "ID",
-        value: value.to_owned(),
-        expected,
-    })?;
+    let suffix = value
+        .strip_prefix(prefix)
+        .ok_or(JuriParseError::InvalidId {
+            field: "ID",
+            value: value.to_owned(),
+            expected,
+        })?;
     if suffix.len() == 12 && suffix.chars().all(|character| character.is_ascii_digit()) {
         Ok(())
     } else {

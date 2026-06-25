@@ -20,7 +20,9 @@ pub(crate) fn require_existing_index_dir(index_dir: Option<&Path>) -> Result<Pat
     Ok(index_dir)
 }
 
-pub(crate) fn require_configured_index_dir(index_dir: Option<&Path>) -> Result<PathBuf, ErrorObject> {
+pub(crate) fn require_configured_index_dir(
+    index_dir: Option<&Path>,
+) -> Result<PathBuf, ErrorObject> {
     configured_index_dir(index_dir).ok_or_else(|| {
         index_unavailable(
             "index directory is required; pass `--index-dir` or set JURISEARCH_INDEX_DIR",

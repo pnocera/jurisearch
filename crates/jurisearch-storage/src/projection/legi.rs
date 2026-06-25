@@ -216,5 +216,10 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
     chunk_embedding_fingerprint: Option<&str>,
 ) -> Result<CanonicalInsertReport, StorageError> {
     let statements = prepare_legi_projection_statements(client)?;
-    insert_legi_documents_with_statements(client, &statements, documents, chunk_embedding_fingerprint)
+    insert_legi_documents_with_statements(
+        client,
+        &statements,
+        documents,
+        chunk_embedding_fingerprint,
+    )
 }

@@ -193,8 +193,14 @@ impl HybridCandidateQuery<'_> {
 /// grouping instead of silently mis-paging.
 #[derive(Debug, Clone, Copy)]
 pub enum RetrievalCursor<'a> {
-    Chunk { score: &'a str, chunk_id: &'a str },
-    Document { score: &'a str, document_id: &'a str },
+    Chunk {
+        score: &'a str,
+        chunk_id: &'a str,
+    },
+    Document {
+        score: &'a str,
+        document_id: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

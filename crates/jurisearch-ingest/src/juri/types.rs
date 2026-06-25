@@ -9,7 +9,9 @@ pub(super) const JURI_DECISION_CANONICAL_VERSION: &str = "juri_decision:v1";
 pub enum ParsedJuriXml {
     Decision(Box<CanonicalDecision>),
     /// A root we do not (yet) project into canonical decisions. Counted, never silently inserted.
-    UnsupportedRoot { root: String },
+    UnsupportedRoot {
+        root: String,
+    },
 }
 
 impl ParsedJuriXml {
@@ -281,7 +283,9 @@ pub enum DecisionValidationError {
     InvalidSource { dataset: String },
     #[error("bulk decision chunking_provenance must be `heuristic`, got `{chunking_provenance}`")]
     InvalidChunkingProvenance { chunking_provenance: String },
-    #[error("canonical decision canonical_version must be `juri_decision:v1`, got `{canonical_version}`")]
+    #[error(
+        "canonical decision canonical_version must be `juri_decision:v1`, got `{canonical_version}`"
+    )]
     InvalidCanonicalVersion { canonical_version: String },
     #[error("canonical decision source_uid `{source_uid}` must start with `{expected_prefix}`")]
     InvalidSourceUid {
@@ -326,10 +330,7 @@ pub enum JuriParseError {
     #[error("unknown jurisprudence source `{dataset}`")]
     UnknownSource { dataset: String },
     #[error("jurisprudence source `{dataset}` does not match XML root family `{root}`")]
-    SourceFamilyMismatch {
-        dataset: String,
-        root: &'static str,
-    },
+    SourceFamilyMismatch { dataset: String, root: &'static str },
     #[error("decision `{source_uid}` has no textual body (empty BLOC_TEXTUEL/CONTENU)")]
     EmptyBody { source_uid: String },
 }

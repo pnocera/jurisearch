@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
-    retrieval::{GroupBy, DecisionFilters, HybridCandidateQuery, RetrievalOptions, RetrievalMode, hybrid_candidates_json},
+    retrieval::{
+        DecisionFilters, GroupBy, HybridCandidateQuery, RetrievalMode, RetrievalOptions,
+        hybrid_candidates_json,
+    },
     runtime::{ManagedPostgres, StorageError},
 };
 

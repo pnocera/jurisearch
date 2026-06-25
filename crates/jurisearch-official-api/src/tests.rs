@@ -239,7 +239,8 @@ fn does_not_retry_non_retryable_status() {
     // Single-request server: if the client retried a 404 it would hit a closed listener and
     // surface a transport error instead of the mapped 404.
     let base_url = spawn_server(1, |_request| {
-        "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 9\r\n\r\nnot found".to_owned()
+        "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 9\r\n\r\nnot found"
+            .to_owned()
     });
     let mut config = OfficialApiConfig::production();
     config.api_base_url = base_url;
@@ -273,7 +274,10 @@ fn retry_delay_honors_retry_after_and_backs_off_exponentially() {
     assert_eq!(super::retry_delay(None, 0, policy), Duration::from_secs(1));
     assert_eq!(super::retry_delay(None, 1, policy), Duration::from_secs(2));
     assert_eq!(super::retry_delay(None, 2, policy), Duration::from_secs(4));
-    assert_eq!(super::retry_delay(None, 10, policy), Duration::from_secs(30));
+    assert_eq!(
+        super::retry_delay(None, 10, policy),
+        Duration::from_secs(30)
+    );
 }
 
 #[test]
@@ -281,12 +285,14 @@ fn retry_after_from_error_reads_header_for_429_and_5xx() {
     let parse = |raw: &str| raw.parse::<ureq::Response>().unwrap();
 
     // Both 429 and 5xx carry Retry-After; both must be honored.
-    let r429 = parse("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 12\r\nContent-Length: 0\r\n\r\n");
+    let r429 =
+        parse("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 12\r\nContent-Length: 0\r\n\r\n");
     assert_eq!(
         super::retry_after_from_error(&ureq::Error::Status(429, r429)),
         Some(Duration::from_secs(12))
     );
-    let r503 = parse("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n");
+    let r503 =
+        parse("HTTP/1.1 503 Service Unavailable\r\nRetry-After: 30\r\nContent-Length: 0\r\n\r\n");
     assert_eq!(
         super::retry_after_from_error(&ureq::Error::Status(503, r503)),
         Some(Duration::from_secs(30))
@@ -382,16 +388,29 @@ fn legifrance_search_exchange_archives_missing_credential_as_upstream_error() {
     let exchange = client.legifrance_search_exchange(&body);
     assert_eq!(exchange.provider, "legifrance");
     assert_eq!(exchange.http_method, "POST");
-    assert!(matches!(exchange.outcome, super::OfficialApiOutcome::UpstreamError));
+    assert!(matches!(
+        exchange.outcome,
+        super::OfficialApiOutcome::UpstreamError
+    ));
     assert!(exchange.http_status.is_none(), "no HTTP request was made");
     assert!(exchange.response_json.is_none());
-    assert!(exchange.error.is_some(), "the missing-credential reason is recorded");
+    assert!(
+        exchange.error.is_some(),
+        "the missing-credential reason is recorded"
+    );
     // Regression: the fingerprint must be a non-empty, body-derived sha256 — NOT the old empty
     // `legifrance-search:` that resulted from reading a now-absent top-level `query` field.
-    assert!(exchange.request_fingerprint.starts_with("legifrance-search:sha256:"));
+    assert!(
+        exchange
+            .request_fingerprint
+            .starts_with("legifrance-search:sha256:")
+    );
     assert_ne!(exchange.request_fingerprint, "legifrance-search:");
     // Stable & body-sensitive: same body -> same fingerprint; different body -> different fingerprint.
-    assert_eq!(exchange.request_fingerprint, legifrance_search_fingerprint(&body.to_string()));
+    assert_eq!(
+        exchange.request_fingerprint,
+        legifrance_search_fingerprint(&body.to_string())
+    );
     let other = json!({ "fond": "CODE_DATE", "recherche": { "champs": [{ "typeChamp": "ALL",
         "criteres": [{ "typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP", "valeur": "1147 code civil" }]}]}});
     assert_ne!(

@@ -88,7 +88,6 @@ pub fn compiled_schema() -> Value {
     })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,10 +149,16 @@ mod tests {
             .filter(|c| c.session_excluded)
             .map(|c| c.name)
             .collect();
-        let expected: std::collections::BTreeSet<&str> =
-            ["eval france-legi", "eval run", "eval tune", "ingest", "serve", "sync"]
-                .into_iter()
-                .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "eval france-legi",
+            "eval run",
+            "eval tune",
+            "ingest",
+            "serve",
+            "sync",
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(excluded, expected);
     }
 }

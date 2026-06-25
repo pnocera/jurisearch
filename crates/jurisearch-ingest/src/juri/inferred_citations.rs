@@ -30,7 +30,9 @@ static NEXT_ARTICLE_RE: LazyLock<Regex> =
 /// treaty/convention articles), a reference is kept only when it carries an `L`/`R`/`D` statutory
 /// prefix OR is followed by a "du [même] code …" hint. Targets are NOT resolved here (`to_source_uid`
 /// stays `None`); the normalized article number + optional code hint are preserved as evidence.
-pub(super) fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec<CanonicalGraphEdge> {
+pub(super) fn build_inferred_citation_edges(
+    decision: &CanonicalDecision,
+) -> Vec<CanonicalGraphEdge> {
     let body = decision.body.as_str();
     let mut edges = Vec::new();
     let mut seen = BTreeSet::new();
@@ -45,7 +47,8 @@ pub(super) fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec
         if normalized.is_empty() {
             continue;
         }
-        let has_statutory_prefix = matches!(normalized.as_bytes().first(), Some(b'L' | b'R' | b'D'));
+        let has_statutory_prefix =
+            matches!(normalized.as_bytes().first(), Some(b'L' | b'R' | b'D'));
 
         // Look just past the number for a "du [même] code …" hint, but stop at the next "article"
         // keyword so a following reference's code is never mis-attributed to this one. The window end
@@ -59,7 +62,10 @@ pub(super) fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec
             if code_capture.name("same").is_some() {
                 "même code".to_owned()
             } else {
-                let name = code_capture["name"].split_whitespace().collect::<Vec<_>>().join(" ");
+                let name = code_capture["name"]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 format!("code {name}").trim().to_owned()
             }
         });
@@ -132,7 +138,11 @@ fn normalize_article_number(raw: &str) -> String {
     normalized
 }
 
-fn inferred_edge_id(from_document_id: &str, article_number: &str, code_hint: Option<&str>) -> String {
+fn inferred_edge_id(
+    from_document_id: &str,
+    article_number: &str,
+    code_hint: Option<&str>,
+) -> String {
     let evidence = format!(
         "{from_document_id}|inferred|cites_article|{article_number}|{}",
         code_hint.unwrap_or_default()

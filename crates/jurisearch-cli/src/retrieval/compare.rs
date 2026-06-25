@@ -34,7 +34,11 @@ pub(crate) fn compare_payload(req: CompareRequest) -> Result<Value, ErrorObject>
     let mut pool_index: HashMap<String, usize> = HashMap::new();
     let mut docs_by_mode: HashMap<&str, HashSet<String>> = HashMap::new();
 
-    for mode in [RetrievalMode::Bm25, RetrievalMode::Dense, RetrievalMode::Hybrid] {
+    for mode in [
+        RetrievalMode::Bm25,
+        RetrievalMode::Dense,
+        RetrievalMode::Hybrid,
+    ] {
         let (embedding, fingerprint) = if mode.uses_dense() {
             (
                 Some(embedding_literal.as_str()),
@@ -64,7 +68,10 @@ pub(crate) fn compare_payload(req: CompareRequest) -> Result<Value, ErrorObject>
         )
         .map_err(storage_error_object)?;
         let response: Value = parse_storage_json(&response)?;
-        let candidates = response["candidates"].as_array().cloned().unwrap_or_default();
+        let candidates = response["candidates"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let mode_name = mode.as_str();
         let mut mode_docs = HashSet::new();
         for (rank, candidate) in candidates.iter().enumerate() {

@@ -11,9 +11,9 @@ use jurisearch_ingest::legi::SourceProvenance;
 use jurisearch_storage::{
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_decision_documents},
     retrieval::{
-        FetchDocumentsQuery, GroupBy, DecisionFilters, HybridCandidateQuery, RelatedQuery, RelatedRelation,
-        RetrievalMode, RetrievalOptions, fetch_documents_json, hybrid_candidates_json,
-        related_neighbours_json,
+        DecisionFilters, FetchDocumentsQuery, GroupBy, HybridCandidateQuery, RelatedQuery,
+        RelatedRelation, RetrievalMode, RetrievalOptions, fetch_documents_json,
+        hybrid_candidates_json, related_neighbours_json,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -132,7 +132,10 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
             dimension: 1024,
         });
     }
-    assert_eq!(insert_chunk_embeddings(&postgres, &embeddings)?, embeddings.len());
+    assert_eq!(
+        insert_chunk_embeddings(&postgres, &embeddings)?,
+        embeddings.len()
+    );
 
     // Hybrid search restricted to decisions, valid as of today, returns the judicial decision.
     let decision_query = HybridCandidateQuery {
@@ -385,7 +388,10 @@ fn decision_search_metadata_filters() -> Result<(), StorageError> {
         !ids.contains(&"legi:LEGIARTI000000000001@1990-01-01"),
         "article leaked through a decision-date filter: {ids:?}"
     );
-    assert!(ids.iter().all(|id| id.starts_with("cass:") || id.starts_with("jade:")));
+    assert!(
+        ids.iter()
+            .all(|id| id.starts_with("cass:") || id.starts_with("jade:"))
+    );
 
     postgres.stop()?;
     Ok(())
@@ -446,7 +452,10 @@ fn decision_graph_edges_and_interpreted_by() -> Result<(), StorageError> {
     assert_eq!(interpreted["rel"], "interpreted_by");
     assert_eq!(interpreted["returned"], 1);
     let neighbour = &interpreted["neighbours"][0];
-    assert_eq!(neighbour["document"]["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(
+        neighbour["document"]["document_id"],
+        "cass:JURITEXT000051824029"
+    );
     assert_eq!(neighbour["edge"]["edge_source"], "publisher");
 
     // cites: from the decision, find the article it applies (the inverse direction).

@@ -5,7 +5,11 @@ use super::*;
 /// Format a finite, non-negative f64 as a plain SQL numeric literal (no locale/exponent surprises).
 /// `rrf_weights` already guarantees finiteness; clamp defensively.
 pub(crate) fn format_sql_f64(value: f64) -> String {
-    let value = if value.is_finite() { value.max(0.0) } else { 0.0 };
+    let value = if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    };
     format!("{value:.6}")
 }
 

@@ -77,9 +77,7 @@ pub fn citation_lookup_json(
         CitationLookup::DecisionEcli(ecli) => {
             let literal = sql_string_literal(&ecli.to_ascii_uppercase());
             document_lookup_sql(
-                &format!(
-                    "d.kind = 'decision' AND upper(d.canonical_json->>'ecli') = {literal}"
-                ),
+                &format!("d.kind = 'decision' AND upper(d.canonical_json->>'ecli') = {literal}"),
                 &format!("upper(d.canonical_json->>'ecli') = {literal}"),
             )
         }

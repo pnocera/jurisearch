@@ -271,8 +271,13 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
                     "ingest embed-zone-units --pool-concurrency must be at least 1",
                 ));
             }
-            match embed_zone_units_payload(index_dir, limit, index_lists, batch_size, pool_concurrency)
-            {
+            match embed_zone_units_payload(
+                index_dir,
+                limit,
+                index_lists,
+                batch_size,
+                pool_concurrency,
+            ) {
                 Ok(response) => write_json(&response),
                 Err(error) => emit_error(error),
             }
@@ -288,7 +293,10 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
                 Err(error) => emit_error(error),
             }
         }
-        Some(IngestSubcommand::EnrichLegislationCitations { limit, retry_errors }) => {
+        Some(IngestSubcommand::EnrichLegislationCitations {
+            limit,
+            retry_errors,
+        }) => {
             if limit == Some(0) {
                 return emit_error(ErrorObject::bad_input(
                     "ingest enrich-legislation-citations --limit must be at least 1 when provided",

@@ -130,6 +130,10 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
     let judilibre_rows = postgres.execute_sql(
         "SELECT count(*)::text FROM official_api_responses WHERE provider='judilibre';",
     )?;
-    assert_eq!(judilibre_rows.trim(), "2", "append-only history, not upsert");
+    assert_eq!(
+        judilibre_rows.trim(),
+        "2",
+        "append-only history, not upsert"
+    );
     Ok(())
 }

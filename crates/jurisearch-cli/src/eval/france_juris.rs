@@ -114,13 +114,8 @@ pub(crate) fn france_juris_search_documents(
     let Some(query_text) = parade_query_text(query) else {
         return Ok(Vec::new());
     };
-    let request = benchmark_search_request(
-        query,
-        CliKind::Decision,
-        CliGroupBy::Document,
-        None,
-        top_k,
-    );
+    let request =
+        benchmark_search_request(query, CliKind::Decision, CliGroupBy::Document, None, top_k);
     let response = match search_with_postgres(
         postgres,
         &request,

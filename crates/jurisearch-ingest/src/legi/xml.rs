@@ -2,7 +2,9 @@
 
 use super::*;
 
-pub(super) fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>, LegiParseError> {
+pub(super) fn collect_attributes(
+    start: &BytesStart<'_>,
+) -> Result<Vec<GraphEdgeAttribute>, LegiParseError> {
     let mut attributes = Vec::new();
     for attribute in start.attributes().with_checks(false) {
         let attribute = attribute.map_err(|error| LegiParseError::Xml {
@@ -21,7 +23,10 @@ pub(super) fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdge
     Ok(attributes)
 }
 
-pub(super) fn attribute_value(start: &BytesStart<'_>, wanted: &str) -> Result<Option<String>, LegiParseError> {
+pub(super) fn attribute_value(
+    start: &BytesStart<'_>,
+    wanted: &str,
+) -> Result<Option<String>, LegiParseError> {
     for attribute in start.attributes().with_checks(false) {
         let attribute = attribute.map_err(|error| LegiParseError::Xml {
             message: error.to_string(),

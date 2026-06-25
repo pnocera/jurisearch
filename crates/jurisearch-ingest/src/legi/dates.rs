@@ -26,12 +26,18 @@ pub(super) fn validate_id(
     }
 }
 
-pub(super) fn normalize_required_date(field: &'static str, value: &str) -> Result<String, LegiParseError> {
+pub(super) fn normalize_required_date(
+    field: &'static str,
+    value: &str,
+) -> Result<String, LegiParseError> {
     validate_date(field, value)?;
     Ok(value.to_owned())
 }
 
-pub(super) fn normalize_end_date(field: &'static str, value: &str) -> Result<Option<String>, LegiParseError> {
+pub(super) fn normalize_end_date(
+    field: &'static str,
+    value: &str,
+) -> Result<Option<String>, LegiParseError> {
     validate_date(field, value)?;
     if matches!(value, "2999-01-01" | "2999-12-31") {
         Ok(None)

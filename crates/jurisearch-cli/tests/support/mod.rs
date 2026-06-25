@@ -113,7 +113,10 @@ pub(crate) fn assert_json_error_contains(output: &[u8], code: &str, message: &st
     assert!(json["error"]["message"].as_str().unwrap().contains(message));
 }
 
-pub(crate) fn write_tar_gz(path: &Path, members: &[(&str, &[u8])]) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn write_tar_gz(
+    path: &Path,
+    members: &[(&str, &[u8])],
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(path)?;
     let encoder = GzEncoder::new(file, Compression::default());
     let mut builder = Builder::new(encoder);

@@ -28,8 +28,7 @@ pub(crate) fn eval_france_juris_zones_payload(
         moyens: args.moyens,
         dispositif: args.dispositif,
     };
-    let gold_json =
-        france_juris_zone_gold_json(&postgres, limits).map_err(storage_error_object)?;
+    let gold_json = france_juris_zone_gold_json(&postgres, limits).map_err(storage_error_object)?;
     let gold: Value = serde_json::from_str(&gold_json)
         .map_err(|error| dependency_unavailable(error.to_string()))?;
 

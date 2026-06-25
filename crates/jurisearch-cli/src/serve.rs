@@ -38,7 +38,10 @@ pub(crate) const SERVE_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
 /// Read one newline-terminated request, bounded to `max` bytes. `Ok(None)` at EOF; an oversize line
 /// is an `InvalidData` error (the caller replies bad_input and closes).
-pub(crate) fn read_bounded_line<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Option<String>> {
+pub(crate) fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max: usize,
+) -> io::Result<Option<String>> {
     let mut buf: Vec<u8> = Vec::new();
     let mut byte = [0u8; 1];
     loop {
@@ -79,7 +82,8 @@ pub(crate) fn serve_jsonl<R: BufRead, W: Write>(
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                let response = SessionResponse::err(None, ErrorObject::bad_input(error.to_string()));
+                let response =
+                    SessionResponse::err(None, ErrorObject::bad_input(error.to_string()));
                 let _ = writeln!(
                     writer,
                     "{}",

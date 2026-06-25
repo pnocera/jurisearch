@@ -122,7 +122,9 @@ pub(crate) fn embedding_endpoint_pool_configs(
         .collect()
 }
 
-pub(crate) fn legacy_embedding_pool_endpoints(config: &EmbeddingConfig) -> Vec<EmbeddingPoolEndpoint> {
+pub(crate) fn legacy_embedding_pool_endpoints(
+    config: &EmbeddingConfig,
+) -> Vec<EmbeddingPoolEndpoint> {
     let mut endpoints = config
         .base_urls
         .iter()
@@ -174,7 +176,11 @@ pub(crate) fn merge_embedding_endpoint_stats(accumulator: &mut Vec<Value>, page:
             .and_then(Value::as_str)
             .map(str::to_owned);
         let existing = accumulator.iter_mut().find(|entry| {
-            entry.get("base_url").and_then(Value::as_str).map(str::to_owned) == base_url
+            entry
+                .get("base_url")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                == base_url
         });
         match existing {
             Some(entry) => {
@@ -550,7 +556,10 @@ pub(crate) fn retryable_embedding_error(error: &jurisearch_embed::EmbeddingError
     )
 }
 
-pub(crate) fn embedding_request_text<'a>(input: &'a str, config: &EmbeddingConfig) -> (Cow<'a, str>, bool) {
+pub(crate) fn embedding_request_text<'a>(
+    input: &'a str,
+    config: &EmbeddingConfig,
+) -> (Cow<'a, str>, bool) {
     let Some(max_input_chars) = embedding_request_char_budget(config) else {
         return (Cow::Borrowed(input), false);
     };

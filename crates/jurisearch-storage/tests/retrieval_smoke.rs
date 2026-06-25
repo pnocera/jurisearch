@@ -3,9 +3,10 @@ mod common;
 use common::{discover_pg_config, vector_literal};
 use jurisearch_storage::{
     retrieval::{
-        CitationResolutionQuery, ContextDocumentsQuery, FetchDocumentsQuery, GroupBy, DecisionFilters, HybridCandidateQuery, RetrievalOptions,
-        RetrievalCursor, RetrievalMode, context_documents_json, fetch_documents_json,
-        hybrid_candidates_json, resolve_legi_citation_json,
+        CitationResolutionQuery, ContextDocumentsQuery, DecisionFilters, FetchDocumentsQuery,
+        GroupBy, HybridCandidateQuery, RetrievalCursor, RetrievalMode, RetrievalOptions,
+        context_documents_json, fetch_documents_json, hybrid_candidates_json,
+        resolve_legi_citation_json,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -73,10 +74,16 @@ fn resolve_legi_citation_pins_version_by_as_of_and_excludes_siblings() -> Result
     };
 
     // As-of 1975: only V1 is valid; the sibling Article 34 is excluded by the article-number match.
-    assert_eq!(resolve("1975-01-01")?, vec!["legi:ART33V1@1973-07-14".to_owned()]);
+    assert_eq!(
+        resolve("1975-01-01")?,
+        vec!["legi:ART33V1@1973-07-14".to_owned()]
+    );
     // As-of 1990: V2 is the valid version. The prefix sibling "Article 330" (valid from 1985, a
     // later valid_from) must NOT be returned for "Article 33" — exact title match, not a prefix.
-    assert_eq!(resolve("1990-01-01")?, vec!["legi:ART33V2@1981-05-16".to_owned()]);
+    assert_eq!(
+        resolve("1990-01-01")?,
+        vec!["legi:ART33V2@1981-05-16".to_owned()]
+    );
 
     Ok(())
 }

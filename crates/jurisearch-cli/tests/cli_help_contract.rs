@@ -102,7 +102,9 @@ fn help_schema_json_is_valid_and_lists_commands() {
     assert!(
         routing["chosen_backend"]["enum"]
             .as_array()
-            .is_some_and(|values| values.iter().any(|value| value == "official_zone_retrieval")),
+            .is_some_and(|values| values
+                .iter()
+                .any(|value| value == "official_zone_retrieval")),
         "routing.chosen_backend must include official_zone_retrieval"
     );
     assert_eq!(

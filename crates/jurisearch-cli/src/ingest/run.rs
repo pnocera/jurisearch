@@ -151,7 +151,11 @@ mod tests {
                 .append_data(&mut header, format!("member-{index:05}.xml"), &body[..])
                 .expect("append member");
         }
-        let bytes = builder.into_inner().expect("finish tar").finish().expect("gzip");
+        let bytes = builder
+            .into_inner()
+            .expect("finish tar")
+            .finish()
+            .expect("gzip");
         std::fs::write(file.path(), bytes).expect("write archive");
         file
     }
@@ -207,7 +211,10 @@ mod tests {
             recording_flush(&mut sizes, None),
         )
         .unwrap_or_else(|_| panic!("clean read"));
-        assert_eq!(report.visited_members, LEGI_INGEST_TRANSACTION_BATCH_SIZE + 1);
+        assert_eq!(
+            report.visited_members,
+            LEGI_INGEST_TRANSACTION_BATCH_SIZE + 1
+        );
         assert!(!report.stopped_by_limit);
         assert_eq!(sizes, vec![LEGI_INGEST_TRANSACTION_BATCH_SIZE, 1]);
     }
@@ -252,7 +259,9 @@ mod tests {
                 assert_eq!(visited_members, 3);
                 assert!(matches!(error, StorageError::MissingHome));
             }
-            ArchiveBatchReadError::Read { .. } => panic!("expected a flush error, not a read error"),
+            ArchiveBatchReadError::Read { .. } => {
+                panic!("expected a flush error, not a read error")
+            }
         }
     }
 }

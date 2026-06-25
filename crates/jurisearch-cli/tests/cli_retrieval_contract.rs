@@ -764,7 +764,13 @@ fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .args([
+            "ingest",
+            "juri-archives",
+            "--source",
+            "cass",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .args(["--run-id", "run-cite-decision"])
         .assert()
@@ -796,20 +802,29 @@ fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>
     assert_eq!(by_uid["input_class"], "decision_id");
     assert_eq!(by_uid["state"], "exact");
     assert_eq!(by_uid["match_count"], 1);
-    assert_eq!(by_uid["matches"][0]["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(
+        by_uid["matches"][0]["document_id"],
+        "cass:JURITEXT000051824029"
+    );
     assert_eq!(by_uid["matches"][0]["kind"], "decision");
 
     // ECLI (case-insensitive).
     let by_ecli = cite("ecli:fr:ccass:2025:so00111");
     assert_eq!(by_ecli["input_class"], "ecli");
     assert_eq!(by_ecli["state"], "exact");
-    assert_eq!(by_ecli["matches"][0]["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(
+        by_ecli["matches"][0]["document_id"],
+        "cass:JURITEXT000051824029"
+    );
 
     // Pourvoi / numéro d'affaire (dotted input normalizes to the stored 23-14999).
     let by_pourvoi = cite("23-14.999");
     assert_eq!(by_pourvoi["input_class"], "pourvoi");
     assert_eq!(by_pourvoi["state"], "normalized");
-    assert_eq!(by_pourvoi["matches"][0]["document_id"], "cass:JURITEXT000051824029");
+    assert_eq!(
+        by_pourvoi["matches"][0]["document_id"],
+        "cass:JURITEXT000051824029"
+    );
 
     // Decision document_id.
     let by_doc = cite("cass:JURITEXT000051824029");
@@ -828,7 +843,13 @@ fn cite_resolves_decision_identifiers() -> Result<(), Box<dyn std::error::Error>
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["cite", "cass:JURITEXT000051824029", "--as-of", "2024-01-01", "--strict"])
+        .args([
+            "cite",
+            "cass:JURITEXT000051824029",
+            "--as-of",
+            "2024-01-01",
+            "--strict",
+        ])
         .assert()
         .success()
         .get_output()
@@ -916,7 +937,13 @@ PAR CES MOTIFS, la Cour REJETTE le pourvoi.</CONTENU></BLOC_TEXTUEL>
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .args([
+            "ingest",
+            "juri-archives",
+            "--source",
+            "cass",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .args(["--run-id", "run-fetch-part"])
         .assert()
@@ -968,7 +995,10 @@ PAR CES MOTIFS, la Cour REJETTE le pourvoi.</CONTENU></BLOC_TEXTUEL>
 
     // Moyens has no bulk marker -> unavailable.
     let moyens = fetch_part("moyens");
-    assert_eq!(moyens["documents"][0]["part"]["zone_provenance"], "unavailable");
+    assert_eq!(
+        moyens["documents"][0]["part"]["zone_provenance"],
+        "unavailable"
+    );
 
     // Unknown part -> bad_input.
     Command::cargo_bin("jurisearch")

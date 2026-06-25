@@ -82,10 +82,7 @@ fn parses_judicial_decision_core_fields() {
     assert_eq!(decision.solution.as_deref(), Some("Cassation partielle"));
     assert_eq!(decision.formation.as_deref(), Some("ASSEMBLEE_PLENIERE"));
     assert_eq!(decision.nature.as_deref(), Some("ARRET"));
-    assert_eq!(
-        decision.ecli.as_deref(),
-        Some("ECLI:FR:CCASS:2025:AP00683")
-    );
+    assert_eq!(decision.ecli.as_deref(), Some("ECLI:FR:CCASS:2025:AP00683"));
     assert_eq!(decision.publication.as_deref(), Some("oui"));
     assert_eq!(decision.case_numbers, vec!["22-21812".to_owned()]);
     assert_eq!(
@@ -175,7 +172,11 @@ fn judicial_publisher_edges_from_liens() {
             .iter()
             .any(|attribute| attribute.key == "sens" && attribute.value == "source")
     );
-    assert!(edge.attributes.iter().all(|attribute| !attribute.value.is_empty()));
+    assert!(
+        edge.attributes
+            .iter()
+            .all(|attribute| !attribute.value.is_empty())
+    );
 }
 
 #[test]
@@ -224,7 +225,10 @@ fn rejects_non_jurisprudence_source() {
 fn rejects_invalid_source_uid() {
     let xml = JUDI_XML.replace("JURITEXT000051824029", "JURITEXT123");
     let error = parse_juri_xml(ArchiveSource::Cass, &xml, provenance()).unwrap_err();
-    assert!(matches!(error, JuriParseError::InvalidId { field: "ID", .. }));
+    assert!(matches!(
+        error,
+        JuriParseError::InvalidId { field: "ID", .. }
+    ));
 }
 
 #[test]
@@ -347,16 +351,10 @@ fn rejects_calendar_invalid_date_accepts_leap_day() {
 fn rejects_source_family_mismatch() {
     // WARN 4: a judicial JURITEXT XML handed to the JADE (administrative) source is rejected.
     let error = parse_juri_xml(ArchiveSource::Jade, JUDI_XML, provenance()).unwrap_err();
-    assert!(matches!(
-        error,
-        JuriParseError::SourceFamilyMismatch { .. }
-    ));
+    assert!(matches!(error, JuriParseError::SourceFamilyMismatch { .. }));
     // And an administrative CETATEXT XML handed to a judicial source is rejected.
     let error = parse_juri_xml(ArchiveSource::Cass, ADMIN_XML, provenance()).unwrap_err();
-    assert!(matches!(
-        error,
-        JuriParseError::SourceFamilyMismatch { .. }
-    ));
+    assert!(matches!(error, JuriParseError::SourceFamilyMismatch { .. }));
 }
 
 #[test]
@@ -367,7 +365,10 @@ fn validate_rejects_cross_family_record() {
     decision.source = "jade".to_owned();
     decision.document_id = "jade:JURITEXT000051824029".to_owned();
     let error = decision.validate().unwrap_err();
-    assert!(matches!(error, DecisionValidationError::InvalidSource { .. }));
+    assert!(matches!(
+        error,
+        DecisionValidationError::InvalidSource { .. }
+    ));
 }
 
 #[test]
@@ -406,7 +407,10 @@ fn inferred_citation_edges_from_body_text() {
     assert!(numbers.contains(&"R1332-2"), "got {numbers:?}");
     assert!(numbers.contains(&"1014"), "got {numbers:?}");
     // "article 8 de la convention" has no statutory prefix and no code hint -> not inferred.
-    assert!(!numbers.contains(&"8"), "bare convention article leaked: {numbers:?}");
+    assert!(
+        !numbers.contains(&"8"),
+        "bare convention article leaked: {numbers:?}"
+    );
 
     // Every inferred edge is clearly distinguishable from publisher edges.
     for edge in &decision.inferred_edges {
@@ -428,10 +432,14 @@ fn inferred_citation_edges_from_body_text() {
         .map(|attribute| attribute.value.as_str())
         .collect();
     assert!(
-        code_hints.iter().any(|hint| hint.contains("procédure civile")),
+        code_hints
+            .iter()
+            .any(|hint| hint.contains("procédure civile")),
         "got {code_hints:?}"
     );
-    decision.validate().expect("valid decision with inferred edges");
+    decision
+        .validate()
+        .expect("valid decision with inferred edges");
 }
 
 #[test]
@@ -543,5 +551,7 @@ fn over_long_paragraph_is_labelled_hard_split() {
         assert!(chunk.body.chars().count() <= JURI_DECISION_CHUNK_MAX_CHARS);
         assert_eq!(chunk.chunking, "heuristic");
     }
-    decision.validate().expect("valid decision with hard splits");
+    decision
+        .validate()
+        .expect("valid decision with hard splits");
 }

@@ -21,7 +21,10 @@ pub fn insert_chunk_embeddings(
 
     // Build per-column arrays so the whole batch is applied set-based (one UNNEST into a temp stage,
     // one UPDATE, one upsert) instead of two statement executions per embedding.
-    let chunk_ids: Vec<&str> = embeddings.iter().map(|embedding| embedding.chunk_id).collect();
+    let chunk_ids: Vec<&str> = embeddings
+        .iter()
+        .map(|embedding| embedding.chunk_id)
+        .collect();
     let fingerprints: Vec<&str> = embeddings
         .iter()
         .map(|embedding| embedding.embedding_fingerprint)

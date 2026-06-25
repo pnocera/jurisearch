@@ -256,8 +256,12 @@ pub(crate) fn ingest_legi_archives_payload(
     } else {
         IngestRunStatus::Failed
     };
-    let final_manifest =
-        legi_archive_manifest(&plan, latest_processed, &counters, manifest_run_status.as_str());
+    let final_manifest = legi_archive_manifest(
+        &plan,
+        latest_processed,
+        &counters,
+        manifest_run_status.as_str(),
+    );
     let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest_with_client(
         &mut ingest_client,
@@ -761,7 +765,9 @@ pub(crate) fn legi_article_id_from_member_path(member_path: &str) -> Option<&str
     }
 }
 
-pub(crate) fn backfill_legi_hierarchy_payload(index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
+pub(crate) fn backfill_legi_hierarchy_payload(
+    index_dir: Option<&Path>,
+) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
     // Hierarchy backfill can delete chunk_embeddings / clear embedding fingerprints, making the

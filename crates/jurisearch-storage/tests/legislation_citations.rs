@@ -94,11 +94,14 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
     }
 
     // load_archived_decisions_with_visa_json returns both decisions with their visa.
-    let archived: serde_json::Value = serde_json::from_str(&load_archived_decisions_with_visa_json(
-        &postgres, None, 100,
-    )?)
+    let archived: serde_json::Value = serde_json::from_str(
+        &load_archived_decisions_with_visa_json(&postgres, None, 100)?,
+    )
     .expect("archived JSON");
-    assert_eq!(archived["decisions"].as_array().expect("decisions").len(), 2);
+    assert_eq!(
+        archived["decisions"].as_array().expect("decisions").len(),
+        2
+    );
 
     finalize_citation_occurrence_counts(&postgres)?;
 
@@ -122,12 +125,14 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
         "legi-cite:art609cpc",
         "ok",
         None,
-        Some("legifrance-search:sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+        Some(
+            "legifrance-search:sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        ),
         None,
     )?;
-    let still_pending: serde_json::Value = serde_json::from_str(&load_pending_citation_resolutions_json(
-        &postgres, None, false, 100,
-    )?)
+    let still_pending: serde_json::Value = serde_json::from_str(
+        &load_pending_citation_resolutions_json(&postgres, None, false, 100)?,
+    )
     .expect("pending JSON");
     assert_eq!(
         still_pending["citations"].as_array().expect("c").len(),

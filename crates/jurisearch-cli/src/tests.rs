@@ -112,7 +112,10 @@ fn legifrance_code_search_body_uses_real_contract() {
     // must use fond=CODE_DATE + recherche.champs with TOUS_LES_MOTS_DANS_UN_CHAMP (validated live).
     let body = legifrance_code_search_body("609 code de procédure civile");
     assert_eq!(body["fond"], "CODE_DATE");
-    assert!(body.get("query").is_none(), "the bogus top-level query field must be gone");
+    assert!(
+        body.get("query").is_none(),
+        "the bogus top-level query field must be gone"
+    );
     let critere = &body["recherche"]["champs"][0]["criteres"][0];
     assert_eq!(critere["typeRecherche"], "TOUS_LES_MOTS_DANS_UN_CHAMP");
     assert_eq!(critere["valeur"], "609 code de procédure civile");
@@ -125,8 +128,14 @@ fn cite_online_shares_real_contract_body() {
     // body via the shared legifrance_code_search_body, so the known-bad {query,pageSize} shape (live
     // HTTP 500) cannot reappear on that user-facing path.
     let body = legifrance_code_search_body("L. 121-1 du code de la consommation");
-    assert!(body.get("query").is_none(), "no top-level query (the bad cite --online shape)");
-    assert!(body.get("pageSize").is_none(), "no top-level pageSize (the bad cite --online shape)");
+    assert!(
+        body.get("query").is_none(),
+        "no top-level query (the bad cite --online shape)"
+    );
+    assert!(
+        body.get("pageSize").is_none(),
+        "no top-level pageSize (the bad cite --online shape)"
+    );
     assert_eq!(body["fond"], "CODE_DATE");
 }
 
@@ -173,7 +182,8 @@ fn parse_visa_citation_prefers_url_query_and_dedups() {
     assert_eq!(parsed.citation_key, fallback.citation_key);
 
     // Article-number normalization collapses spaces and uppercases.
-    let lettered = parse_visa_citation("Article L. 121-1 du code de la consommation").expect("lettered");
+    let lettered =
+        parse_visa_citation("Article L. 121-1 du code de la consommation").expect("lettered");
     assert_eq!(lettered.article_number_norm, "L.121-1");
     assert_eq!(lettered.code_name_norm, "code de la consommation");
 
@@ -204,7 +214,10 @@ fn zone_benchmark_artifact_records_actual_fingerprint_and_never_gates() {
     assert_eq!(bm25["kind"], "phase2_zone_benchmark");
     assert_eq!(bm25["gate_input"], false);
     assert_eq!(bm25["uses_dense"], false);
-    assert!(bm25["fingerprint"].is_null(), "BM25 run must not claim a dense fingerprint");
+    assert!(
+        bm25["fingerprint"].is_null(),
+        "BM25 run must not claim a dense fingerprint"
+    );
     // Only the zone with qrels counts toward the advisory floor verdict (empty zone excluded).
     assert_eq!(bm25["all_meet_proposed_floor"], true);
 
@@ -255,36 +268,69 @@ fn phase2_benchmark_re_derives_pass_and_rejects_bad_artifacts() {
 
     // Below-floor retrieval recall is rejected.
     assert_eq!(
-        derived("low.json", &|a| a["categories"]["judicial_retrieval"]["value"] = json!(0.10)),
+        derived(
+            "low.json",
+            &|a| a["categories"]["judicial_retrieval"]["value"] = json!(0.10)
+        ),
         "failed"
     );
     // Wrong jurisdiction rejected.
-    assert_eq!(derived("juris.json", &|a| a["jurisdiction"] = json!("belgium")), "failed");
+    assert_eq!(
+        derived("juris.json", &|a| a["jurisdiction"] = json!("belgium")),
+        "failed"
+    );
     // Sampled artifact rejected.
-    assert_eq!(derived("sampled.json", &|a| a["provenance"]["sampled"] = json!(true)), "failed");
+    assert_eq!(
+        derived("sampled.json", &|a| a["provenance"]["sampled"] =
+            json!(true)),
+        "failed"
+    );
     // Missing production provenance (pipeline/code_version/index_revision) rejected (BLOCKER 1).
-    assert_eq!(derived("pipe.json", &|a| a["provenance"]["pipeline"] = json!("proxy")), "failed");
-    assert_eq!(derived("cv.json", &|a| a["provenance"]["code_version"] = json!("")), "failed");
-    assert_eq!(derived("ir.json", &|a| { a["provenance"]["index_revision"] = Value::Null; }), "failed");
+    assert_eq!(
+        derived("pipe.json", &|a| a["provenance"]["pipeline"] =
+            json!("proxy")),
+        "failed"
+    );
+    assert_eq!(
+        derived("cv.json", &|a| a["provenance"]["code_version"] = json!("")),
+        "failed"
+    );
+    assert_eq!(
+        derived("ir.json", &|a| {
+            a["provenance"]["index_revision"] = Value::Null;
+        }),
+        "failed"
+    );
     // Missing administrative family rejected (BLOCKER 2: both families required).
     assert_eq!(
-        derived("judonly.json", &|a| { a["categories"]["administrative_retrieval"] = Value::Null; }),
+        derived("judonly.json", &|a| {
+            a["categories"]["administrative_retrieval"] = Value::Null;
+        }),
         "failed"
     );
     // Wrong citation metric rejected (BLOCKER 2).
     assert_eq!(
-        derived("metric.json", &|a| a["categories"]["decision_citation"]["metric"] = json!("f1")),
+        derived(
+            "metric.json",
+            &|a| a["categories"]["decision_citation"]["metric"] = json!("f1")
+        ),
         "failed"
     );
     // A declared-but-unmeasured identifier (pourvoi breakdown removed) is rejected (r2 BLOCKER):
     // coverage must be MEASURED, not just listed.
     assert_eq!(
-        derived("ids.json", &|a| { a["categories"]["decision_citation"]["by_identifier"]["pourvoi"] = Value::Null; }),
+        derived("ids.json", &|a| {
+            a["categories"]["decision_citation"]["by_identifier"]["pourvoi"] = Value::Null;
+        }),
         "failed"
     );
     // A below-per-identifier-query-floor breakdown (cetatext = 2 queries) is rejected.
     assert_eq!(
-        derived("idq.json", &|a| a["categories"]["decision_citation"]["by_identifier"]["cetatext"]["queries"] = json!(2)),
+        derived(
+            "idq.json",
+            &|a| a["categories"]["decision_citation"]["by_identifier"]["cetatext"]["queries"] =
+                json!(2)
+        ),
         "failed"
     );
     // A non-string artifact `state` does not crash; it re-derives and coerces the diagnostic.
@@ -307,8 +353,11 @@ fn phase2_benchmark_re_derives_pass_and_rejects_bad_artifacts() {
     // An object artifact whose `categories`/`provenance` are non-objects is rejected, and those
     // diagnostic fields are normalized to null so the failure payload stays schema-shaped.
     let malformed_path = dir.path().join("malformed_members.json");
-    std::fs::write(&malformed_path, json!({ "categories": [], "provenance": false }).to_string())
-        .unwrap();
+    std::fs::write(
+        &malformed_path,
+        json!({ "categories": [], "provenance": false }).to_string(),
+    )
+    .unwrap();
     let payload = phase2_benchmark_payload_with_path(Some(&malformed_path));
     assert_eq!(payload["state"], "failed");
     assert!(payload["artifact"].is_object()); // the artifact itself IS an object
@@ -386,8 +435,14 @@ fn derive_zone_unit_rows_handles_multi_fragment_and_skips_empty() {
     assert_eq!(motivations[0].body, "premier motif");
     assert_eq!(motivations[1].fragment_index, 1); // contiguous despite the skipped blank
     assert_eq!(motivations[1].body, "second motif");
-    assert!(rows.iter().all(|r| r.builder_version == ZONE_UNIT_BUILDER_VERSION));
-    assert!(rows.iter().all(|r| r.body == r.search_body && r.source == "cass" && r.text_hash == "h"));
+    assert!(
+        rows.iter()
+            .all(|r| r.builder_version == ZONE_UNIT_BUILDER_VERSION)
+    );
+    assert!(
+        rows.iter()
+            .all(|r| r.body == r.search_body && r.source == "cass" && r.text_hash == "h")
+    );
 }
 
 #[test]
@@ -396,7 +451,11 @@ fn worker_join_error_counts_whole_slice_as_errors() {
     // silently drop those decisions from accounting.
     let panicked = worker_outcomes_or_errors(None, 3);
     assert_eq!(panicked.len(), 3);
-    assert!(panicked.iter().all(|o| matches!(o, ZoneEnrichOutcome::Error)));
+    assert!(
+        panicked
+            .iter()
+            .all(|o| matches!(o, ZoneEnrichOutcome::Error))
+    );
     let returned = vec![ZoneEnrichOutcome::Official, ZoneEnrichOutcome::Fallback];
     assert_eq!(worker_outcomes_or_errors(Some(returned), 2).len(), 2);
 }
@@ -413,10 +472,22 @@ fn zone_text_hash_is_deterministic_and_change_sensitive() {
     assert!(h1.starts_with("sha256:"));
 
     let other_text = json!({ "text": "CHANGED.", "update_date": "2024-01-01" });
-    assert_ne!(h1, zone_text_hash(&other_text, &zones, "jdl-1"), "text change -> new hash");
+    assert_ne!(
+        h1,
+        zone_text_hash(&other_text, &zones, "jdl-1"),
+        "text change -> new hash"
+    );
     let other_date = json!({ "text": "MOTIVATIONS de la cour.", "update_date": "2024-02-02" });
-    assert_ne!(h1, zone_text_hash(&other_date, &zones, "jdl-1"), "update_date change -> new hash");
-    assert_ne!(h1, zone_text_hash(&decision, &zones, "jdl-2"), "provider id change -> new hash");
+    assert_ne!(
+        h1,
+        zone_text_hash(&other_date, &zones, "jdl-1"),
+        "update_date change -> new hash"
+    );
+    assert_ne!(
+        h1,
+        zone_text_hash(&decision, &zones, "jdl-2"),
+        "provider id change -> new hash"
+    );
 }
 
 #[test]
@@ -443,7 +514,12 @@ fn judilibre_zones_normalize_with_char_safe_offsets() {
     let mot = zones["motivations"][0]["text"].as_str().unwrap();
     assert_eq!(mot, &chars[m_start..m_end].iter().collect::<String>());
     assert!(mot.starts_with("MOTIVATIONS"));
-    assert!(zones["dispositif"][0]["text"].as_str().unwrap().contains("DISPOSITIF"));
+    assert!(
+        zones["dispositif"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("DISPOSITIF")
+    );
     // moyens had only an out-of-range fragment -> empty array
     assert_eq!(zones["moyens"].as_array().unwrap().len(), 0);
 }
@@ -482,17 +558,23 @@ fn cached_zone_part_block_is_official_only_when_present() {
             "dispositif": []
         }
     });
-    let block = part_block_from_cached_zones(&cached, DecisionPart::Motivations, "motivations").unwrap();
+    let block =
+        part_block_from_cached_zones(&cached, DecisionPart::Motivations, "motivations").unwrap();
     assert_eq!(block["official_zones"], json!(true));
     assert_eq!(block["zone_accurate"], json!(true));
     assert_eq!(block["zone_provenance"], json!("judilibre"));
     assert_eq!(block["text"], json!("Motif"));
     // dispositif present but empty -> not an official part
-    assert!(part_block_from_cached_zones(&cached, DecisionPart::Dispositif, "dispositif").is_none());
+    assert!(
+        part_block_from_cached_zones(&cached, DecisionPart::Dispositif, "dispositif").is_none()
+    );
     // summary/visa are not Judilibre-zone parts
     assert!(judilibre_zone_key(DecisionPart::Summary).is_none());
     assert!(judilibre_zone_key(DecisionPart::Visa).is_none());
-    assert_eq!(judilibre_zone_key(DecisionPart::Motivations), Some("motivations"));
+    assert_eq!(
+        judilibre_zone_key(DecisionPart::Motivations),
+        Some("motivations")
+    );
 }
 
 #[test]
@@ -515,24 +597,60 @@ fn zone_cache_action_honors_status_and_ttl() {
     };
 
     // Fresh ok with the zone -> official, regardless of --online.
-    assert!(is(zone_cache_action(&ok_fresh, part, key, false, "cass"), "official"));
+    assert!(is(
+        zone_cache_action(&ok_fresh, part, key, false, "cass"),
+        "official"
+    ));
     // Fresh ok but that zone is empty -> fallback (decision genuinely has no such zone; no re-fetch).
-    assert!(is(zone_cache_action(&ok_no_zone, part, key, true, "cass"), "fallback"));
+    assert!(is(
+        zone_cache_action(&ok_no_zone, part, key, true, "cass"),
+        "fallback"
+    ));
     // Expired ok -> re-enrich when online+cass, else fallback.
-    assert!(is(zone_cache_action(&ok_expired, part, key, true, "cass"), "enrich"));
-    assert!(is(zone_cache_action(&ok_expired, part, key, false, "cass"), "fallback"));
+    assert!(is(
+        zone_cache_action(&ok_expired, part, key, true, "cass"),
+        "enrich"
+    ));
+    assert!(is(
+        zone_cache_action(&ok_expired, part, key, false, "cass"),
+        "fallback"
+    ));
     // Fresh negative -> suppress network even when online.
-    assert!(is(zone_cache_action(&neg_fresh, part, key, true, "cass"), "fallback"));
+    assert!(is(
+        zone_cache_action(&neg_fresh, part, key, true, "cass"),
+        "fallback"
+    ));
     // Fresh upstream error -> suppress (short TTL); expired upstream error -> retry.
-    assert!(is(zone_cache_action(&err_fresh, part, key, true, "cass"), "fallback"));
-    assert!(is(zone_cache_action(&err_expired, part, key, true, "cass"), "enrich"));
+    assert!(is(
+        zone_cache_action(&err_fresh, part, key, true, "cass"),
+        "fallback"
+    ));
+    assert!(is(
+        zone_cache_action(&err_expired, part, key, true, "cass"),
+        "enrich"
+    ));
     // No cache row -> enrich only when online + a Judilibre-resolvable Cour de cassation source.
-    assert!(is(zone_cache_action(&no_row, part, key, true, "cass"), "enrich"));
-    assert!(is(zone_cache_action(&no_row, part, key, false, "cass"), "fallback"));
+    assert!(is(
+        zone_cache_action(&no_row, part, key, true, "cass"),
+        "enrich"
+    ));
+    assert!(is(
+        zone_cache_action(&no_row, part, key, false, "cass"),
+        "fallback"
+    ));
     // INCA (inédit Cassation) enriches like cass; CAPP (Cour d'appel) and JADE fall back.
-    assert!(is(zone_cache_action(&no_row, part, key, true, "inca"), "enrich"));
-    assert!(is(zone_cache_action(&no_row, part, key, true, "capp"), "fallback"));
-    assert!(is(zone_cache_action(&no_row, part, key, true, "jade"), "fallback"));
+    assert!(is(
+        zone_cache_action(&no_row, part, key, true, "inca"),
+        "enrich"
+    ));
+    assert!(is(
+        zone_cache_action(&no_row, part, key, true, "capp"),
+        "fallback"
+    ));
+    assert!(is(
+        zone_cache_action(&no_row, part, key, true, "jade"),
+        "fallback"
+    ));
 
     assert!(is_judilibre_cassation_source(Some("cass")));
     assert!(is_judilibre_cassation_source(Some("inca")));
@@ -561,16 +679,23 @@ fn phase2_gate_opens_with_a_passing_benchmark() {
 fn default_run_ids_are_unique_across_rapid_calls() {
     // Two rapid default run ids must differ, or ON CONFLICT(run_id) would let one run overwrite
     // another's manifest. Generate many in a tight loop (same second) and require all distinct.
-    let ids: std::collections::HashSet<String> =
-        (0..1000).map(|_| default_juri_run_id(ArchiveSource::Cass)).collect();
+    let ids: std::collections::HashSet<String> = (0..1000)
+        .map(|_| default_juri_run_id(ArchiveSource::Cass))
+        .collect();
     assert_eq!(ids.len(), 1000);
     assert_ne!(default_legi_run_id(), default_legi_run_id());
 }
 
 #[test]
 fn normalize_since_accepts_date_and_compact_forms() {
-    assert_eq!(normalize_since("2025-01-15").as_deref(), Some("20250115000000"));
-    assert_eq!(normalize_since("20250201000000").as_deref(), Some("20250201000000"));
+    assert_eq!(
+        normalize_since("2025-01-15").as_deref(),
+        Some("20250115000000")
+    );
+    assert_eq!(
+        normalize_since("20250201000000").as_deref(),
+        Some("20250201000000")
+    );
     // Only the two documented shapes are accepted; separators/noise/extra precision are rejected.
     assert_eq!(normalize_since("not-a-date"), None);
     assert_eq!(normalize_since("2025"), None);
@@ -589,7 +714,10 @@ fn heuristic_dispositif_is_utf8_safe_with_accents_before_marker() {
     assert!(dispositif.starts_with("PAR CES MOTIFS"));
     assert!(dispositif.contains("REJETTE"));
     // No marker -> None.
-    assert_eq!(heuristic_dispositif("Texte sans marqueur de dispositif."), None);
+    assert_eq!(
+        heuristic_dispositif("Texte sans marqueur de dispositif."),
+        None
+    );
 }
 
 #[test]
@@ -600,7 +728,10 @@ fn heuristic_visa_collects_only_the_leading_block() {
     assert!(visa.contains("1240"));
     assert!(visa.contains("procédure civile"));
     assert!(!visa.contains("Faits"));
-    assert!(!visa.contains("conclut"), "a later 'Vu' line leaked: {visa}");
+    assert!(
+        !visa.contains("conclut"),
+        "a later 'Vu' line leaked: {visa}"
+    );
 }
 
 #[test]
@@ -615,7 +746,10 @@ fn heuristic_dispositif_matches_accented_decide() {
 fn decision_part_parse_is_lenient() {
     assert_eq!(DecisionPart::parse("Summary"), Some(DecisionPart::Summary));
     assert_eq!(DecisionPart::parse("sommaire"), Some(DecisionPart::Summary));
-    assert_eq!(DecisionPart::parse("dispositif"), Some(DecisionPart::Dispositif));
+    assert_eq!(
+        DecisionPart::parse("dispositif"),
+        Some(DecisionPart::Dispositif)
+    );
     assert_eq!(DecisionPart::parse("MOYEN"), Some(DecisionPart::Moyens));
     assert_eq!(DecisionPart::parse("bogus"), None);
 }
@@ -702,14 +836,21 @@ fn session_dispatch_matches_one_shot_only_set() {
     // Iterate the contract's source of truth (CommandSpec::session_excluded) so the dispatcher
     // and the inventory cannot drift (this is exactly the `eval france-legi` gap a hard-coded
     // list missed).
-    for cmd in COMMANDS.iter().filter(|c| c.session_excluded).map(|c| c.name) {
+    for cmd in COMMANDS
+        .iter()
+        .filter(|c| c.session_excluded)
+        .map(|c| c.name)
+    {
         let request = SessionRequest {
             id: None,
             command: cmd.to_string(),
             args: serde_json::json!({}),
         };
         let (response, exit) = dispatch_session_request(request);
-        assert!(!exit, "session command `{cmd}` must not terminate the session");
+        assert!(
+            !exit,
+            "session command `{cmd}` must not terminate the session"
+        );
         match response {
             SessionResponse::Err { error, .. } => assert!(
                 matches!(error.code, ErrorCode::NotImplemented),
@@ -1207,8 +1348,7 @@ fn phase1_gate_payload_maps_ready_inputs_and_failed_members() {
     let mut wrong_fingerprint_ingest_health = ingest_health.clone();
     wrong_fingerprint_ingest_health["embedding_manifest"]["embedding_fingerprint"] =
         json!("bge-m3:768:normalize:true");
-    let wrong_fingerprint_payload =
-        phase1_gate_payload(&index, &wrong_fingerprint_ingest_health);
+    let wrong_fingerprint_payload = phase1_gate_payload(&index, &wrong_fingerprint_ingest_health);
     assert_eq!(
         check_status(&wrong_fingerprint_payload, "final_embedding_model"),
         "fail"
@@ -1440,9 +1580,9 @@ fn france_legi_payload_rejects_low_metrics_wrong_jurisdiction_and_small_eval() {
     assert!(
         error.contains("thresholds.structured_citation_recall_at_10_min must be at least 0.950")
     );
-    assert!(
-        error.contains("categories.structured_citation_resolution.metric_value must be at least threshold")
-    );
+    assert!(error.contains(
+        "categories.structured_citation_resolution.metric_value must be at least threshold"
+    ));
     assert!(
         error.contains("categories.structured_citation_resolution.queries must be at least 10")
     );
@@ -1505,15 +1645,17 @@ fn france_legi_runner_artifact_passes_when_structured_floors_met_even_if_semanti
         artifact["categories"]["structured_citation_resolution"]["gating"],
         true
     );
-    assert_eq!(artifact["categories"]["semantic_retrieval"]["gating"], false);
+    assert_eq!(
+        artifact["categories"]["semantic_retrieval"]["gating"],
+        false
+    );
     assert_eq!(
         artifact["categories"]["semantic_retrieval"]["advisory"],
         true
     );
     // The routing-backend audit is recorded per category.
     assert_eq!(
-        artifact["categories"]["structured_citation_resolution"]["routing_backends"]
-            ["structured_citation"],
+        artifact["categories"]["structured_citation_resolution"]["routing_backends"]["structured_citation"],
         60
     );
 

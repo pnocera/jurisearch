@@ -84,7 +84,9 @@ pub(crate) fn model_cache_status_json(status: &ModelCacheStatus) -> Value {
     })
 }
 
-pub(crate) fn embedding_pool_endpoints_status_json(endpoints: &[EmbeddingPoolEndpoint]) -> Vec<Value> {
+pub(crate) fn embedding_pool_endpoints_status_json(
+    endpoints: &[EmbeddingPoolEndpoint],
+) -> Vec<Value> {
     endpoints
         .iter()
         .map(|endpoint| {

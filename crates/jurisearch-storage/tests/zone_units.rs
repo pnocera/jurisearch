@@ -12,7 +12,8 @@ use jurisearch_storage::{
         EnrichZoneOrder, ZONE_UNIT_VECTOR_INDEX_NAME, ZoneUnitEmbeddingInsert, ZoneUnitRow,
         enrich_zone_candidates_json, finalize_zone_dense_rebuild, insert_zone_unit_embeddings,
         load_derivable_decision_zones_json, load_zone_unit_embedding_inputs,
-        replace_zone_units_for_document, zone_resolver_reachable_json, zone_retrieval_coverage_json,
+        replace_zone_units_for_document, zone_resolver_reachable_json,
+        zone_retrieval_coverage_json,
     },
 };
 

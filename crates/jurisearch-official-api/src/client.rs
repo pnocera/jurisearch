@@ -58,7 +58,8 @@ impl PisteClient {
         provider_id: &str,
         query: Option<&str>,
     ) -> Result<Value, OfficialApiError> {
-        let mut params: Vec<(&str, &str)> = vec![("id", provider_id), ("resolve_references", "false")];
+        let mut params: Vec<(&str, &str)> =
+            vec![("id", provider_id), ("resolve_references", "false")];
         if let Some(query) = query {
             params.push(("query", query));
         }
@@ -88,7 +89,14 @@ impl PisteClient {
             .as_deref()
             .filter(|key| !key.trim().is_empty())
         else {
-            return missing_credential_exchange("judilibre", endpoint, "GET", url, request_json, fingerprint);
+            return missing_credential_exchange(
+                "judilibre",
+                endpoint,
+                "GET",
+                url,
+                request_json,
+                fingerprint,
+            );
         };
         let result = send_with_retry(self.retry, || {
             let mut request = self
@@ -101,7 +109,16 @@ impl PisteClient {
             }
             request.call()
         });
-        build_exchange("judilibre", endpoint, "GET", url, request_json, None, fingerprint, result)
+        build_exchange(
+            "judilibre",
+            endpoint,
+            "GET",
+            url,
+            request_json,
+            None,
+            fingerprint,
+            result,
+        )
     }
 
     /// Judilibre `/decision?id=…` as an archivable exchange (see [`Self::judilibre_search_params_exchange`]).
@@ -125,7 +142,14 @@ impl PisteClient {
             .as_deref()
             .filter(|key| !key.trim().is_empty())
         else {
-            return missing_credential_exchange("judilibre", endpoint, "GET", url, request_json, fingerprint);
+            return missing_credential_exchange(
+                "judilibre",
+                endpoint,
+                "GET",
+                url,
+                request_json,
+                fingerprint,
+            );
         };
         let result = send_with_retry(self.retry, || {
             let mut request = self
@@ -138,7 +162,16 @@ impl PisteClient {
             }
             request.call()
         });
-        build_exchange("judilibre", endpoint, "GET", url, request_json, None, fingerprint, result)
+        build_exchange(
+            "judilibre",
+            endpoint,
+            "GET",
+            url,
+            request_json,
+            None,
+            fingerprint,
+            result,
+        )
     }
 
     fn judilibre_get_with_query(
@@ -362,7 +395,11 @@ fn build_exchange(
     let (http_status, response_body, transport_error) = match result {
         Ok(response) => {
             let status = response.status();
-            (Some(status), response.into_string().unwrap_or_default(), None)
+            (
+                Some(status),
+                response.into_string().unwrap_or_default(),
+                None,
+            )
         }
         Err(ureq::Error::Status(status, response)) => (
             Some(status),
@@ -416,7 +453,11 @@ pub(super) fn legifrance_search_fingerprint(request_body: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(request_body.as_bytes());
-    let hex: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("legifrance-search:sha256:{hex}")
 }
 

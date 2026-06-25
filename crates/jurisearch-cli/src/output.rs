@@ -32,7 +32,9 @@ pub(crate) fn emit_artifact(response: Value, out: Option<PathBuf>) -> anyhow::Re
                 )));
             }
         };
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
             && let Err(error) = fs::create_dir_all(parent)
         {
             return emit_error(dependency_unavailable(format!(

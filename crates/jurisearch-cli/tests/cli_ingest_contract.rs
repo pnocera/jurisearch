@@ -953,8 +953,8 @@ fn ingest_backfill_legi_hierarchy_updates_full_index() -> Result<(), StorageErro
 }
 
 #[test]
-fn sync_pulls_new_deltas_incrementally_with_since_filter()
--> Result<(), Box<dyn std::error::Error>> {
+fn sync_pulls_new_deltas_incrementally_with_since_filter() -> Result<(), Box<dyn std::error::Error>>
+{
     let Some(_pg_config) = discover_pg_config("CLI sync")? else {
         return Ok(());
     };
@@ -982,7 +982,13 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .args([
+            "ingest",
+            "juri-archives",
+            "--source",
+            "cass",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .args(["--run-id", "run-base"])
         .assert()
@@ -990,14 +996,20 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
 
     // Two deltas: one BEFORE the --since cutoff (decision C), one AFTER (decision B).
     write_tar_gz(
-        archives.path().join("CASS_20250110-000000.tar.gz").as_path(),
+        archives
+            .path()
+            .join("CASS_20250110-000000.tar.gz")
+            .as_path(),
         &[(
             "juri/cass/JURITEXT000000000003.xml",
             cass_decision_fixture("JURITEXT000000000003", "23-10003").as_slice(),
         )],
     )?;
     write_tar_gz(
-        archives.path().join("CASS_20250201-000000.tar.gz").as_path(),
+        archives
+            .path()
+            .join("CASS_20250201-000000.tar.gz")
+            .as_path(),
         &[(
             "juri/cass/JURITEXT000000000002.xml",
             cass_decision_fixture("JURITEXT000000000002", "23-10002").as_slice(),
@@ -1034,7 +1046,10 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
 
     // A NEWER delta that a no-op sync will NOT process: status freshness must not jump to it.
     write_tar_gz(
-        archives.path().join("CASS_20250301-000000.tar.gz").as_path(),
+        archives
+            .path()
+            .join("CASS_20250301-000000.tar.gz")
+            .as_path(),
         &[(
             "juri/cass/JURITEXT000000000004.xml",
             cass_decision_fixture("JURITEXT000000000004", "23-10004").as_slice(),
@@ -1044,7 +1059,14 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["sync", "--source", "cass", "--since", "2999-01-01", "--archives-dir"])
+        .args([
+            "sync",
+            "--source",
+            "cass",
+            "--since",
+            "2999-01-01",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .assert()
         .success()
@@ -1071,7 +1093,10 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
         .stdout
         .clone();
     let status: Value = serde_json::from_slice(&status).unwrap();
-    assert_eq!(status["corpus_sources"]["cass"]["source_version"], "20250201-000000");
+    assert_eq!(
+        status["corpus_sources"]["cass"]["source_version"],
+        "20250201-000000"
+    );
 
     // The index holds the baseline A + the synced B, but NOT the pre-cutoff C or the unprocessed D.
     let postgres = ManagedPostgres::start_durable(_pg_config, index.path())?;
@@ -1098,7 +1123,14 @@ fn sync_pulls_new_deltas_incrementally_with_since_filter()
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["sync", "--source", "cass", "--since", "not-a-date", "--archives-dir"])
+        .args([
+            "sync",
+            "--source",
+            "cass",
+            "--since",
+            "not-a-date",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .assert()
         .code(2);
@@ -1487,7 +1519,13 @@ fn ingest_juri_archives_records_accounting_and_quarantines_failures()
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .args([
+            "ingest",
+            "juri-archives",
+            "--source",
+            "cass",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .args(["--run-id", "run-juri", "--quarantine-dir"])
         .arg(quarantine.path())
@@ -1578,7 +1616,13 @@ fn ingest_juri_archives_skips_empty_body_decisions() -> Result<(), Box<dyn std::
         .unwrap()
         .arg("--index-dir")
         .arg(index.path())
-        .args(["ingest", "juri-archives", "--source", "cass", "--archives-dir"])
+        .args([
+            "ingest",
+            "juri-archives",
+            "--source",
+            "cass",
+            "--archives-dir",
+        ])
         .arg(archives.path())
         .args(["--run-id", "run-empty"])
         .assert()
@@ -1590,7 +1634,10 @@ fn ingest_juri_archives_skips_empty_body_decisions() -> Result<(), Box<dyn std::
     assert_eq!(json["run_status"], "completed"); // empty body did NOT abort the run
     assert_eq!(json["inserted_documents"], 1); // the valid decision
     assert_eq!(json["skipped_empty_body_members"], 1);
-    assert_eq!(json["manifest"]["coverage"]["skipped_empty_body_members"], 1);
+    assert_eq!(
+        json["manifest"]["coverage"]["skipped_empty_body_members"],
+        1
+    );
     assert_eq!(json["failed_members"], 0);
 
     Ok(())
@@ -1637,7 +1684,13 @@ fn ingest_juri_archives_compatible_replay_skips_inserted_members()
             .unwrap()
             .arg("--index-dir")
             .arg(index.path())
-            .args(["ingest", "juri-archives", "--source", "jade", "--archives-dir"])
+            .args([
+                "ingest",
+                "juri-archives",
+                "--source",
+                "jade",
+                "--archives-dir",
+            ])
             .arg(archives.path())
             .args(["--run-id", run_id])
             .assert()
@@ -1742,11 +1795,19 @@ fn enrich_legislation_citations_archives_missing_credential_attempt() -> Result<
         "SELECT count(*)::text FROM official_api_responses \
          WHERE provider='legifrance' AND outcome='upstream_error';",
     )?;
-    assert_eq!(archived.trim(), "1", "the failed Legifrance attempt is archived");
+    assert_eq!(
+        archived.trim(),
+        "1",
+        "the failed Legifrance attempt is archived"
+    );
     let status = postgres.execute_sql(
         "SELECT legifrance_status FROM legislation_citation_resolutions \
          WHERE citation_key='legi-cite:test';",
     )?;
-    assert_eq!(status.trim(), "upstream_error", "resolution recorded as upstream_error");
+    assert_eq!(
+        status.trim(),
+        "upstream_error",
+        "resolution recorded as upstream_error"
+    );
     Ok(())
 }

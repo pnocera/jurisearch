@@ -102,8 +102,9 @@ impl ParsedCitationTarget {
 
     pub(crate) fn normalized_value(&self) -> Option<&str> {
         match self {
-            Self::DocumentId { document_id, .. }
-            | Self::DecisionDocumentId { document_id, .. } => Some(document_id),
+            Self::DocumentId { document_id, .. } | Self::DecisionDocumentId { document_id, .. } => {
+                Some(document_id)
+            }
             Self::ArticleSourceUid(source_uid)
             | Self::TextSourceUid(source_uid)
             | Self::SectionSourceUid(source_uid)

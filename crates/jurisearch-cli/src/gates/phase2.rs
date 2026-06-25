@@ -6,7 +6,11 @@ use crate::*;
 /// jurisprudence is ingested, the index is query-ready, bulk zone provenance is reported honestly, and
 /// a passing jurisprudence eval benchmark (re-derived from per-category floors, not self-reported) is
 /// supplied via `JURISEARCH_PHASE2_BENCHMARK`. Until then `claim_allowed=false` / `state=not_ready`.
-pub(crate) fn phase2_gate_payload(index: &Value, ingest_health: &Value, corpus_sources: &Value) -> Value {
+pub(crate) fn phase2_gate_payload(
+    index: &Value,
+    ingest_health: &Value,
+    corpus_sources: &Value,
+) -> Value {
     let benchmark = phase2_benchmark_payload();
     phase2_gate_payload_with(index, ingest_health, corpus_sources, benchmark)
 }
@@ -26,7 +30,9 @@ pub(crate) fn phase2_gate_payload_with(
         .into_iter()
         .filter(|source| corpus_sources.get(source).is_some_and(Value::is_object))
         .collect();
-    let judicial_present = juri_sources.iter().any(|s| matches!(*s, "cass" | "capp" | "inca"));
+    let judicial_present = juri_sources
+        .iter()
+        .any(|s| matches!(*s, "cass" | "capp" | "inca"));
     let administrative_present = juri_sources.contains(&"jade");
     let corpus_present = judicial_present && administrative_present;
 
@@ -129,13 +135,16 @@ pub(crate) fn phase2_benchmark_payload_with_path(artifact_path: Option<&Path>) -
     payload["artifact"] = object_or_null(&artifact);
     payload["categories"] = object_or_null(&artifact["categories"]);
     payload["provenance"] = object_or_null(&artifact["provenance"]);
-    payload["evidence"] = artifact["evidence"].as_array().map_or(json!([]), |_| artifact["evidence"].clone());
+    payload["evidence"] = artifact["evidence"]
+        .as_array()
+        .map_or(json!([]), |_| artifact["evidence"].clone());
 
     let errors = phase2_benchmark_artifact_errors(&artifact);
     // Re-derive the state from the validation, never the artifact's self-reported `state` (which is
     // preserved only as a string-or-null diagnostic). Empty errors over the full contract == passed.
-    payload["artifact_reported_state"] =
-        artifact["state"].as_str().map_or(Value::Null, |state| json!(state));
+    payload["artifact_reported_state"] = artifact["state"]
+        .as_str()
+        .map_or(Value::Null, |state| json!(state));
     if errors.is_empty() {
         payload["state"] = json!("passed");
         payload["artifact_error"] = Value::Null;
@@ -189,7 +198,10 @@ pub(crate) fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> 
     if artifact["fingerprint"].as_str() != Some("bge-m3:1024:normalize:true") {
         errors.push("fingerprint must be the locked bge-m3:1024:normalize:true".to_owned());
     }
-    if !artifact["evidence"].as_array().is_some_and(|evidence| !evidence.is_empty()) {
+    if !artifact["evidence"]
+        .as_array()
+        .is_some_and(|evidence| !evidence.is_empty())
+    {
         errors.push("evidence must be a non-empty array".to_owned());
     }
 
@@ -202,7 +214,10 @@ pub(crate) fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> 
         ));
     }
     for field in ["code_version", "index_revision"] {
-        if !provenance[field].as_str().is_some_and(|value| !value.trim().is_empty()) {
+        if !provenance[field]
+            .as_str()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
             errors.push(format!("provenance.{field} must be a non-empty string"));
         }
     }
@@ -240,7 +255,9 @@ pub(crate) fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> 
     // ECLI-only run cannot open the "ECLI/pourvoi/CETATEXT verification" claim.
     let decision_citation = &artifact["categories"]["decision_citation"];
     if decision_citation["metric"].as_str() != Some("decision_citation_accuracy") {
-        errors.push("category `decision_citation` metric must be `decision_citation_accuracy`".to_owned());
+        errors.push(
+            "category `decision_citation` metric must be `decision_citation_accuracy`".to_owned(),
+        );
     }
     for identifier in PHASE2_REQUIRED_CITATION_IDENTIFIERS {
         phase2_benchmark_validate_category(
@@ -268,14 +285,18 @@ pub(crate) fn phase2_benchmark_validate_category(
         return;
     }
     if category["metric"].as_str() != Some(expected_metric) {
-        errors.push(format!("category `{name}` metric must be `{expected_metric}`"));
+        errors.push(format!(
+            "category `{name}` metric must be `{expected_metric}`"
+        ));
     }
     let Some(value) = category["value"].as_f64() else {
         errors.push(format!("category `{name}` is missing a numeric `value`"));
         return;
     };
     if value < floor {
-        errors.push(format!("category `{name}` value {value} is below floor {floor}"));
+        errors.push(format!(
+            "category `{name}` value {value} is below floor {floor}"
+        ));
     }
     match category["queries"].as_u64() {
         Some(queries) if queries >= min_queries => {}

@@ -54,7 +54,11 @@ pub(crate) fn zone_cache_action(
 
 /// Build the official-part response block from a cached zones row, or `None` if that part has no
 /// non-empty official zone.
-pub(crate) fn part_block_from_cached_zones(cached: &Value, part: DecisionPart, zone_key: &str) -> Option<Value> {
+pub(crate) fn part_block_from_cached_zones(
+    cached: &Value,
+    part: DecisionPart,
+    zone_key: &str,
+) -> Option<Value> {
     let fragments = cached["zones"][zone_key].as_array()?;
     if fragments.is_empty() {
         return None;
@@ -116,11 +120,22 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         // No parser-valid pourvoi -> cannot even request Judilibre. Archive a durable 'local' accounting
         // row (so every touched decision is recorded) and cache as unsupported.
         archive_local_unsupported(db, document_id, source_uid, api_environment)?;
-        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "unsupported", None)?;
+        cache_zone_status_with_client(
+            db,
+            document_id,
+            source_uid,
+            ecli,
+            decision_date,
+            "unsupported",
+            None,
+        )?;
         return Ok(None);
     };
 
-    let normalized_pourvoi: String = pourvoi.chars().filter(|c| !matches!(c, '.' | ' ')).collect();
+    let normalized_pourvoi: String = pourvoi
+        .chars()
+        .filter(|c| !matches!(c, '.' | ' '))
+        .collect();
 
     // Resolve: search by pourvoi (free-text exact); accept the result whose normalized number matches
     // and whose date matches when we have one. Archive the raw /search response either way.
@@ -129,9 +144,25 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         ("operator", "exact"),
         ("page_size", "10"),
     ]);
-    archive_exchange(db, &search_exchange, api_environment, Some(document_id), Some(source_uid), None, None)?;
+    archive_exchange(
+        db,
+        &search_exchange,
+        api_environment,
+        Some(document_id),
+        Some(source_uid),
+        None,
+        None,
+    )?;
     if search_exchange.outcome != OfficialApiOutcome::Ok {
-        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", search_exchange.error.as_deref())?;
+        cache_zone_status_with_client(
+            db,
+            document_id,
+            source_uid,
+            ecli,
+            decision_date,
+            "upstream_error",
+            search_exchange.error.as_deref(),
+        )?;
         return Ok(None);
     }
     let provider_id = search_exchange
@@ -139,19 +170,51 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         .as_ref()
         .and_then(|search| find_matching_judilibre_id(search, &normalized_pourvoi, decision_date));
     let Some(provider_id) = provider_id else {
-        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "not_found", None)?;
+        cache_zone_status_with_client(
+            db,
+            document_id,
+            source_uid,
+            ecli,
+            decision_date,
+            "not_found",
+            None,
+        )?;
         return Ok(None);
     };
 
     // Fetch the full decision; archive the raw /decision response either way.
     let decision_exchange = piste.judilibre_decision_exchange(&provider_id, None);
-    archive_exchange(db, &decision_exchange, api_environment, Some(document_id), Some(source_uid), Some(provider_id.as_str()), None)?;
+    archive_exchange(
+        db,
+        &decision_exchange,
+        api_environment,
+        Some(document_id),
+        Some(source_uid),
+        Some(provider_id.as_str()),
+        None,
+    )?;
     if decision_exchange.outcome != OfficialApiOutcome::Ok {
-        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", decision_exchange.error.as_deref())?;
+        cache_zone_status_with_client(
+            db,
+            document_id,
+            source_uid,
+            ecli,
+            decision_date,
+            "upstream_error",
+            decision_exchange.error.as_deref(),
+        )?;
         return Ok(None);
     }
     let Some(decision) = decision_exchange.response_json.as_ref() else {
-        cache_zone_status_with_client(db, document_id, source_uid, ecli, decision_date, "upstream_error", Some("decision response missing JSON body"))?;
+        cache_zone_status_with_client(
+            db,
+            document_id,
+            source_uid,
+            ecli,
+            decision_date,
+            "upstream_error",
+            Some("decision response missing JSON body"),
+        )?;
         return Ok(None);
     };
 
@@ -200,7 +263,8 @@ pub(crate) fn find_matching_judilibre_id(
     decision_date: Option<&str>,
 ) -> Option<String> {
     let results = search["results"].as_array()?;
-    let normalize = |value: &str| -> String { value.chars().filter(|c| !matches!(c, '.' | ' ')).collect() };
+    let normalize =
+        |value: &str| -> String { value.chars().filter(|c| !matches!(c, '.' | ' ')).collect() };
     let mut date_agnostic: Option<String> = None;
     for result in results {
         let numbers_match = result["numbers"]
@@ -213,7 +277,9 @@ pub(crate) fn find_matching_judilibre_id(
         if !numbers_match {
             continue;
         }
-        let Some(id) = result["id"].as_str() else { continue };
+        let Some(id) = result["id"].as_str() else {
+            continue;
+        };
         match (decision_date, result["decision_date"].as_str()) {
             // Local date known: require an exact remote-date match — never resolve by number alone
             // (guards pourvoi collisions across years even if a result is missing its date).
@@ -232,15 +298,18 @@ pub(crate) fn find_matching_judilibre_id(
 /// `{motivations:[{start,end,text}], moyens:[…], dispositif:[…]}`. Returns `(zones_json, any_valid)`.
 /// Offsets are CHARACTER indices (verified against the live API), so slicing is char-safe.
 pub(crate) fn normalize_judilibre_zones(decision: &Value) -> (Value, bool) {
-    let text_chars: Vec<char> = decision["text"].as_str().unwrap_or_default().chars().collect();
+    let text_chars: Vec<char> = decision["text"]
+        .as_str()
+        .unwrap_or_default()
+        .chars()
+        .collect();
     let mut zones = serde_json::Map::new();
     let mut any_valid = false;
     for key in ["motivations", "moyens", "dispositif"] {
         let mut fragments = Vec::new();
         if let Some(offsets) = decision["zones"][key].as_array() {
             for offset in offsets {
-                let (Some(start), Some(end)) =
-                    (offset["start"].as_u64(), offset["end"].as_u64())
+                let (Some(start), Some(end)) = (offset["start"].as_u64(), offset["end"].as_u64())
                 else {
                     continue;
                 };
@@ -300,7 +369,9 @@ pub(crate) fn cache_zone_status_with_client<C: postgres::GenericClient>(
     let ttl_seconds = match status {
         // Transient failures get a SHORT explicit TTL so they suppress hammering but retry soon (never
         // a permanent NULL-expiry row).
-        "upstream_error" => Some(env_i64("JURISEARCH_JUDILIBRE_ZONE_ERROR_TTL_SECONDS", 3600).max(0)),
+        "upstream_error" => {
+            Some(env_i64("JURISEARCH_JUDILIBRE_ZONE_ERROR_TTL_SECONDS", 3600).max(0))
+        }
         _ => Some(env_i64("JURISEARCH_JUDILIBRE_ZONE_NEGATIVE_TTL_DAYS", 7).max(0) * 86_400),
     };
     let empty = json!({});

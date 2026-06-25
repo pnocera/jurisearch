@@ -74,7 +74,12 @@ pub(crate) fn eval_france_legi_payload(
         };
         let gold_uids: Vec<String> = gold_ids
             .iter()
-            .filter_map(|value| value.as_str().and_then(legi_source_uid_of).map(str::to_owned))
+            .filter_map(|value| {
+                value
+                    .as_str()
+                    .and_then(legi_source_uid_of)
+                    .map(str::to_owned)
+            })
             .collect();
         if gold_uids.is_empty() {
             continue;

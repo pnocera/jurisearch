@@ -7,8 +7,8 @@ use crate::archive::ArchiveMember;
 
 use super::{
     CanonicalDocument, CanonicalValidationError, LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS,
-    LegiParseError, ParsedLegiXml, SourceProvenance, extract_known_source_uid,
-    parse_legi_member, parse_legi_xml, source_payload_hash,
+    LegiParseError, ParsedLegiXml, SourceProvenance, extract_known_source_uid, parse_legi_member,
+    parse_legi_xml, source_payload_hash,
 };
 
 #[test]
@@ -741,8 +741,8 @@ fn rejects_missing_required_fields() {
 
 #[test]
 fn rejects_invalid_dates() {
-    let error = parse_article_fixture(&article_fixture().replace("1804-02-21", "1804-99-21"))
-        .unwrap_err();
+    let error =
+        parse_article_fixture(&article_fixture().replace("1804-02-21", "1804-99-21")).unwrap_err();
 
     assert!(matches!(
         error,
@@ -755,9 +755,8 @@ fn rejects_invalid_dates() {
 
 #[test]
 fn rejects_invalid_article_ids() {
-    let error =
-        parse_article_fixture(&article_fixture().replace("LEGIARTI000006419320", "BAD"))
-            .unwrap_err();
+    let error = parse_article_fixture(&article_fixture().replace("LEGIARTI000006419320", "BAD"))
+        .unwrap_err();
 
     assert!(matches!(
         error,

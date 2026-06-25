@@ -219,8 +219,13 @@ pub(crate) fn ingest_juri_archives_payload(
     } else {
         IngestRunStatus::Failed
     };
-    let final_manifest =
-        juri_archive_manifest(source, &plan, latest_processed, &counters, manifest_run_status.as_str());
+    let final_manifest = juri_archive_manifest(
+        source,
+        &plan,
+        latest_processed,
+        &counters,
+        manifest_run_status.as_str(),
+    );
     let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest_with_client(
         &mut ingest_client,
@@ -236,8 +241,13 @@ pub(crate) fn ingest_juri_archives_payload(
         IngestRunStatus::Failed
     };
     let error_message = fatal_error.as_ref().map(|error| error.message.as_str());
-    finish_ingest_run_with_client(&mut ingest_client, run_id.as_str(), run_status, error_message)
-        .map_err(storage_error_object)?;
+    finish_ingest_run_with_client(
+        &mut ingest_client,
+        run_id.as_str(),
+        run_status,
+        error_message,
+    )
+    .map_err(storage_error_object)?;
     if let Some(error) = fatal_error {
         return Err(error);
     }
@@ -420,8 +430,12 @@ pub(crate) fn process_juri_archive_member<C: postgres::GenericClient>(
                     compatibility,
                 },
             )?;
-            let report =
-                insert_decision_documents_with_statements(client, projection_statements, &[decision], None)?;
+            let report = insert_decision_documents_with_statements(
+                client,
+                projection_statements,
+                &[decision],
+                None,
+            )?;
             update_ingest_member_status_with_client(
                 client,
                 record.member_id,

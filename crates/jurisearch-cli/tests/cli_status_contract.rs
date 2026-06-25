@@ -42,7 +42,10 @@ fn status_returns_json_without_index() {
     // Phase 2 full-juridic gate is fail-closed without a jurisprudence corpus or eval benchmark.
     assert_eq!(json["phase2_gate"]["state"], "not_ready");
     assert_eq!(json["phase2_gate"]["claim_allowed"], false);
-    assert_eq!(json["phase2_gate"]["scope"], "phase2_full_french_juridic_search");
+    assert_eq!(
+        json["phase2_gate"]["scope"],
+        "phase2_full_french_juridic_search"
+    );
     assert_eq!(json["phase2_gate"]["benchmark"]["state"], "pending");
     assert_eq!(json["phase1_gate"]["eval_fixtures"]["total"], 6);
     assert_eq!(json["phase1_gate"]["eval_fixtures"]["source_verified"], 6);

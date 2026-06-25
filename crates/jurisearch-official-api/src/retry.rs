@@ -58,7 +58,10 @@ impl RetryPolicy {
 /// Send a request, retrying transient upstream failures (HTTP 429 and 5xx) per `policy`.
 /// The `send` closure rebuilds and issues the request on each attempt (ureq builders are
 /// single-use). Transport errors and non-retryable statuses (e.g. 4xx) are returned immediately.
-pub(super) fn send_with_retry<F>(policy: RetryPolicy, mut send: F) -> Result<ureq::Response, ureq::Error>
+pub(super) fn send_with_retry<F>(
+    policy: RetryPolicy,
+    mut send: F,
+) -> Result<ureq::Response, ureq::Error>
 where
     F: FnMut() -> Result<ureq::Response, ureq::Error>,
 {
@@ -98,7 +101,11 @@ pub(super) fn retry_after_from_error(error: &ureq::Error) -> Option<Duration> {
 
 /// Backoff for a given attempt (0-based): a `Retry-After` value wins (capped by `max_delay`),
 /// otherwise exponential `base_delay * 2^attempt`, capped by `max_delay`.
-pub(super) fn retry_delay(retry_after: Option<Duration>, attempt: u32, policy: RetryPolicy) -> Duration {
+pub(super) fn retry_delay(
+    retry_after: Option<Duration>,
+    attempt: u32,
+    policy: RetryPolicy,
+) -> Duration {
     if let Some(after) = retry_after {
         return after.min(policy.max_delay);
     }

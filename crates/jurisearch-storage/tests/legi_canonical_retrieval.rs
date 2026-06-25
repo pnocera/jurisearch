@@ -20,8 +20,8 @@ use jurisearch_ingest::{
 use jurisearch_storage::{
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings, insert_legi_documents},
     retrieval::{
-        FetchDocumentsQuery, GroupBy, DecisionFilters, HybridCandidateQuery, RetrievalOptions, RetrievalMode, fetch_documents_json,
-        hybrid_candidates_json,
+        DecisionFilters, FetchDocumentsQuery, GroupBy, HybridCandidateQuery, RetrievalMode,
+        RetrievalOptions, fetch_documents_json, hybrid_candidates_json,
     },
     runtime::ManagedPostgres,
 };

@@ -8,8 +8,8 @@ use jurisearch_storage::{
         ingest_resume_decision, invalidate_cached_query_readiness, load_cached_query_readiness,
         load_ingest_embedding_coverage, load_ingest_health,
         load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness,
-        load_or_compute_query_readiness, record_ingest_error, record_ingest_member, start_ingest_run,
-        store_query_readiness, update_ingest_member_status,
+        load_or_compute_query_readiness, record_ingest_error, record_ingest_member,
+        start_ingest_run, store_query_readiness, update_ingest_member_status,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -407,7 +407,10 @@ fn query_readiness_cache_is_trusted_until_invalidated() -> Result<(), StorageErr
     postgres.execute_sql("DELETE FROM chunk_embeddings;")?;
     let (stale, from_cache) = load_or_compute_query_readiness(&postgres)?;
     assert!(from_cache);
-    assert_eq!(stale.embedding_coverage.covered, 1, "stale cache still reports complete");
+    assert_eq!(
+        stale.embedding_coverage.covered, 1,
+        "stale cache still reports complete"
+    );
 
     // After invalidation the next check recomputes and sees the now-incomplete embedding coverage.
     invalidate_cached_query_readiness(&postgres)?;

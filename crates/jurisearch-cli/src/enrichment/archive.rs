@@ -11,7 +11,11 @@ pub(crate) fn sha256_hex(data: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
-    let hex: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("sha256:{hex}")
 }
 

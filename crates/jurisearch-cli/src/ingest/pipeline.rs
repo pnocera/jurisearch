@@ -98,9 +98,10 @@ pub(crate) fn enrich_zones_payload(
         }
     }
 
-    let coverage: Value =
-        serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "command": "ingest enrich-zones",
@@ -140,18 +141,19 @@ pub(crate) fn enrich_zone_page_concurrently(
             .map(|group| {
                 let group_len = group.len();
                 let handle = scope.spawn(move || {
-                    let mut db =
-                        match postgres::Client::connect(connection_string, postgres::NoTls) {
-                            Ok(db) => db,
-                            // Whole slice fails to connect -> count as errors, don't abort the run.
-                            Err(_) => return vec![ZoneEnrichOutcome::Error; group.len()],
-                        };
+                    let mut db = match postgres::Client::connect(connection_string, postgres::NoTls)
+                    {
+                        Ok(db) => db,
+                        // Whole slice fails to connect -> count as errors, don't abort the run.
+                        Err(_) => return vec![ZoneEnrichOutcome::Error; group.len()],
+                    };
                     let piste = PisteClient::new(OfficialApiConfig::from_env());
                     group
                         .into_iter()
                         .map(|doc_id| {
-                            match enrich_decision_from_judilibre_with_client(&mut db, &piste, doc_id)
-                            {
+                            match enrich_decision_from_judilibre_with_client(
+                                &mut db, &piste, doc_id,
+                            ) {
                                 Ok(Some(_)) => ZoneEnrichOutcome::Official,
                                 Ok(None) => ZoneEnrichOutcome::Fallback,
                                 Err(_) => ZoneEnrichOutcome::Error,
@@ -281,9 +283,10 @@ pub(crate) fn build_zone_units_payload(
         }
     }
 
-    let coverage: Value =
-        serde_json::from_str(&zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "command": "ingest build-zone-units",

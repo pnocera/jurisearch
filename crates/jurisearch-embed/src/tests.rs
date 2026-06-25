@@ -78,8 +78,7 @@ fn request_model_alias_does_not_change_stored_fingerprint() {
             *request_log_clone.lock().unwrap() = Some(request.to_owned());
         },
     );
-    let mut config =
-        EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
+    let mut config = EmbeddingConfig::openai_compatible(base_url, None, "bge-m3", 3, true, "cls");
     config.request_model = Some("baai/bge-m3".to_owned());
     let expected = config.fingerprint();
     let client = OpenAiCompatibleClient::new(config).unwrap();
@@ -133,14 +132,8 @@ fn unnormalized_vector_is_rejected_when_fingerprint_requires_normalized() {
 
 #[test]
 fn oversized_input_is_rejected_before_endpoint_call() {
-    let mut config = EmbeddingConfig::openai_compatible(
-        "http://127.0.0.1:9/v1",
-        None,
-        "bge-m3",
-        3,
-        true,
-        "cls",
-    );
+    let mut config =
+        EmbeddingConfig::openai_compatible("http://127.0.0.1:9/v1", None, "bge-m3", 3, true, "cls");
     config.max_input_chars = Some(4);
     config.max_estimated_tokens = None;
     let expected = config.fingerprint();
@@ -159,14 +152,8 @@ fn oversized_input_is_rejected_before_endpoint_call() {
 
 #[test]
 fn estimated_token_budget_is_enforced() {
-    let mut config = EmbeddingConfig::openai_compatible(
-        "http://127.0.0.1:9/v1",
-        None,
-        "bge-m3",
-        3,
-        true,
-        "cls",
-    );
+    let mut config =
+        EmbeddingConfig::openai_compatible("http://127.0.0.1:9/v1", None, "bge-m3", 3, true, "cls");
     config.max_input_chars = None;
     config.max_estimated_tokens = Some(2);
     config.estimated_chars_per_token = 2;
@@ -192,14 +179,8 @@ fn tokenizer_budget_is_enforced_when_configured() {
     let tokenizer_path = tempdir.path().join("tokenizer.json");
     write_test_tokenizer(&tokenizer_path);
 
-    let mut config = EmbeddingConfig::openai_compatible(
-        "http://127.0.0.1:9/v1",
-        None,
-        "bge-m3",
-        3,
-        true,
-        "cls",
-    );
+    let mut config =
+        EmbeddingConfig::openai_compatible("http://127.0.0.1:9/v1", None, "bge-m3", 3, true, "cls");
     config.max_input_chars = None;
     config.max_estimated_tokens = Some(2);
     config.estimated_chars_per_token = 100;
@@ -230,14 +211,8 @@ fn tokenizer_preflight_ignores_embedded_truncation() {
     let tokenizer_path = tempdir.path().join("tokenizer.json");
     write_truncating_test_tokenizer(&tokenizer_path, 2);
 
-    let mut config = EmbeddingConfig::openai_compatible(
-        "http://127.0.0.1:9/v1",
-        None,
-        "bge-m3",
-        3,
-        true,
-        "cls",
-    );
+    let mut config =
+        EmbeddingConfig::openai_compatible("http://127.0.0.1:9/v1", None, "bge-m3", 3, true, "cls");
     config.max_input_chars = None;
     config.max_estimated_tokens = Some(2);
     config.estimated_chars_per_token = 100;
@@ -262,14 +237,8 @@ fn tokenizer_preflight_ignores_embedded_truncation() {
 
 #[test]
 fn tokenizer_load_error_names_path() {
-    let mut config = EmbeddingConfig::openai_compatible(
-        "http://127.0.0.1:9/v1",
-        None,
-        "bge-m3",
-        3,
-        true,
-        "cls",
-    );
+    let mut config =
+        EmbeddingConfig::openai_compatible("http://127.0.0.1:9/v1", None, "bge-m3", 3, true, "cls");
     config.tokenizer_path = Some(Path::new("/tmp/jurisearch-missing-tokenizer.json").into());
 
     let error = OpenAiCompatibleClient::new(config).unwrap_err();
@@ -338,10 +307,7 @@ fn spawn_embedding_server(response_body: &'static str) -> String {
     spawn_embedding_server_with_status("200 OK", response_body)
 }
 
-fn spawn_embedding_server_with_status(
-    status: &'static str,
-    response_body: &'static str,
-) -> String {
+fn spawn_embedding_server_with_status(status: &'static str, response_body: &'static str) -> String {
     spawn_embedding_server_with_request_check(status, response_body, |_| {})
 }
 

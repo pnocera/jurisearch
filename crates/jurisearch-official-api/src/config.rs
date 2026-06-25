@@ -172,7 +172,9 @@ pub(super) fn judilibre_credential_names(environment: PisteEnvironment) -> &'sta
     }
 }
 
-pub(super) fn legifrance_client_id_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
+pub(super) fn legifrance_client_id_credential_names(
+    environment: PisteEnvironment,
+) -> &'static [&'static str] {
     match environment {
         PisteEnvironment::Production => PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS,
         PisteEnvironment::Sandbox => SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS,

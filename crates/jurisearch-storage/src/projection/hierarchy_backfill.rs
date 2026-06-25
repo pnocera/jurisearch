@@ -458,7 +458,10 @@ pub(super) fn text_struct_hierarchy_from_links(
     Ok(Some(merge_hierarchy_with_overlap(base, stack)))
 }
 
-pub(super) fn merge_hierarchy_with_overlap(mut base: Vec<String>, suffix: Vec<String>) -> Vec<String> {
+pub(super) fn merge_hierarchy_with_overlap(
+    mut base: Vec<String>,
+    suffix: Vec<String>,
+) -> Vec<String> {
     let max_overlap = base.len().min(suffix.len());
     let overlap = (0..=max_overlap)
         .rev()

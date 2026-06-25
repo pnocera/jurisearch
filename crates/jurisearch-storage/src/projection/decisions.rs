@@ -26,8 +26,11 @@ pub fn insert_decision_documents(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
-    let report =
-        insert_decision_documents_with_client(&mut transaction, decisions, chunk_embedding_fingerprint)?;
+    let report = insert_decision_documents_with_client(
+        &mut transaction,
+        decisions,
+        chunk_embedding_fingerprint,
+    )?;
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(report)
 }

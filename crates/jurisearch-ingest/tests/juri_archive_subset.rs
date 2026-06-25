@@ -71,50 +71,57 @@ fn parses_real_jurisprudence_subsets() {
             .and_then(|name| name.to_str())
             .map(str::to_owned);
 
-        for_each_xml_member_until(archive_path.as_path(), DEFAULT_MEMBER_BYTE_LIMIT, |member| {
-            visited += 1;
-            let member_path = member.member_path.clone();
-            match parse_juri_member(source, &member) {
-                Ok(ParsedJuriXml::Decision(decision)) => {
-                    parsed_decisions += 1;
-                    assert_eq!(decision.source, source.as_str());
-                    assert_eq!(decision.source_archive, archive_name);
-                    assert_eq!(decision.source_member_path.as_deref(), Some(member_path.as_str()));
-                    assert_eq!(
-                        decision.source_payload_hash,
-                        source_payload_hash(&member.bytes)
-                    );
-                    decision.validate().unwrap_or_else(|error| {
-                        panic!("{member_path} produced an invalid canonical decision: {error}")
-                    });
-                    assert!(!decision.chunks.is_empty());
-                    for chunk in &decision.chunks {
-                        assert_eq!(chunk.chunking, "heuristic");
+        for_each_xml_member_until(
+            archive_path.as_path(),
+            DEFAULT_MEMBER_BYTE_LIMIT,
+            |member| {
+                visited += 1;
+                let member_path = member.member_path.clone();
+                match parse_juri_member(source, &member) {
+                    Ok(ParsedJuriXml::Decision(decision)) => {
+                        parsed_decisions += 1;
+                        assert_eq!(decision.source, source.as_str());
+                        assert_eq!(decision.source_archive, archive_name);
+                        assert_eq!(
+                            decision.source_member_path.as_deref(),
+                            Some(member_path.as_str())
+                        );
+                        assert_eq!(
+                            decision.source_payload_hash,
+                            source_payload_hash(&member.bytes)
+                        );
+                        decision.validate().unwrap_or_else(|error| {
+                            panic!("{member_path} produced an invalid canonical decision: {error}")
+                        });
+                        assert!(!decision.chunks.is_empty());
+                        for chunk in &decision.chunks {
+                            assert_eq!(chunk.chunking, "heuristic");
+                        }
+                        if let Some(nature) = &decision.nature {
+                            natures.insert(nature.clone());
+                        }
+                        if !decision.summaries.is_empty() {
+                            decisions_with_summary += 1;
+                        }
+                        publisher_edges += decision.publisher_edges.len();
                     }
-                    if let Some(nature) = &decision.nature {
-                        natures.insert(nature.clone());
+                    Ok(ParsedJuriXml::UnsupportedRoot { root }) => {
+                        unsupported_roots.insert(root);
                     }
-                    if !decision.summaries.is_empty() {
-                        decisions_with_summary += 1;
+                    // Empty-body (metadata-only) decisions are a legitimate skip in real data.
+                    Err(jurisearch_ingest::juri::JuriParseError::EmptyBody { .. }) => {
+                        empty_body += 1;
                     }
-                    publisher_edges += decision.publisher_edges.len();
+                    Err(error) => panic!("{member_path} failed to parse: {error}"),
                 }
-                Ok(ParsedJuriXml::UnsupportedRoot { root }) => {
-                    unsupported_roots.insert(root);
-                }
-                // Empty-body (metadata-only) decisions are a legitimate skip in real data.
-                Err(jurisearch_ingest::juri::JuriParseError::EmptyBody { .. }) => {
-                    empty_body += 1;
-                }
-                Err(error) => panic!("{member_path} failed to parse: {error}"),
-            }
 
-            if parsed_decisions >= DECISION_SAMPLE_TARGET || visited >= MAX_VISITED_MEMBERS {
-                Ok(ArchiveVisit::Stop)
-            } else {
-                Ok(ArchiveVisit::Continue)
-            }
-        })
+                if parsed_decisions >= DECISION_SAMPLE_TARGET || visited >= MAX_VISITED_MEMBERS {
+                    Ok(ArchiveVisit::Stop)
+                } else {
+                    Ok(ArchiveVisit::Continue)
+                }
+            },
+        )
         .unwrap_or_else(|error| panic!("failed to stream {}: {error}", archive_path.display()));
 
         eprintln!(

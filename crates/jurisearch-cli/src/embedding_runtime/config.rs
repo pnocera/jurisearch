@@ -439,7 +439,11 @@ pub(crate) fn clear_unused_in_process_secret_fields(config: &mut EmbeddingConfig
     }
 }
 
-pub(crate) fn toml_parse_error_message(path: &Path, contents: &str, error: &toml::de::Error) -> String {
+pub(crate) fn toml_parse_error_message(
+    path: &Path,
+    contents: &str,
+    error: &toml::de::Error,
+) -> String {
     if let Some(span) = error.span() {
         let (line, column) = line_column_for_offset(contents, span.start);
         format!(

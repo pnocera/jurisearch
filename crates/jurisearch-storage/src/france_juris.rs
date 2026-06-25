@@ -51,8 +51,10 @@ pub fn france_juris_gold_json(
     postgres: &ManagedPostgres,
     limits: FranceJurisGoldLimits,
 ) -> Result<String, StorageError> {
-    let judicial =
-        postgres.execute_sql(&retrieval_sql("'cass','capp','inca'", limits.judicial_retrieval))?;
+    let judicial = postgres.execute_sql(&retrieval_sql(
+        "'cass','capp','inca'",
+        limits.judicial_retrieval,
+    ))?;
     let administrative =
         postgres.execute_sql(&retrieval_sql("'jade'", limits.administrative_retrieval))?;
     let ecli = postgres.execute_sql(&ecli_sql(limits.ecli))?;
@@ -201,7 +203,8 @@ pub fn france_juris_zone_gold_json(
     postgres: &ManagedPostgres,
     limits: FranceJurisZoneGoldLimits,
 ) -> Result<String, StorageError> {
-    let motivations = postgres.execute_sql(&zone_retrieval_sql("motivations", limits.motivations))?;
+    let motivations =
+        postgres.execute_sql(&zone_retrieval_sql("motivations", limits.motivations))?;
     let moyens = postgres.execute_sql(&zone_retrieval_sql("moyens", limits.moyens))?;
     let dispositif = postgres.execute_sql(&zone_retrieval_sql("dispositif", limits.dispositif))?;
     Ok(format!(

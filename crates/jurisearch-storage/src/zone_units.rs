@@ -58,7 +58,12 @@ pub fn enrich_zone_candidates_json(
     };
     let source_literal = sql_string_literal(source);
     let cursor_predicate = after_cursor
-        .map(|cursor| format!("AND d.document_id {cursor_cmp} {}", sql_string_literal(cursor)))
+        .map(|cursor| {
+            format!(
+                "AND d.document_id {cursor_cmp} {}",
+                sql_string_literal(cursor)
+            )
+        })
         .unwrap_or_default();
     let since_predicate = since
         .map(|since| {

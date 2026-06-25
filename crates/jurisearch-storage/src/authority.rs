@@ -76,9 +76,7 @@ pub fn effective_authority_weight(options: &RetrievalOptions) -> Option<f64> {
 /// - judicial `publication` is the `PUBLI_BULL@publie` flag (`oui`/`non`/absent);
 /// - administrative (`jade`) `publication` is the `PUBLI_RECUEIL` Lebon class letter (e.g. `C`/absent).
 pub fn authority_tier(source: &str, publication: Option<&str>) -> Option<AuthorityTier> {
-    let marker = publication
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let marker = publication.map(str::trim).filter(|value| !value.is_empty());
     match source {
         "cass" => {
             let (tier, marker_absent) = match marker {
@@ -108,13 +106,15 @@ pub fn authority_tier(source: &str, publication: Option<&str>) -> Option<Authori
             marker_absent: true,
         }),
         "jade" => {
-            let (tier, marker_absent) =
-                match marker.and_then(|value| value.chars().next()).map(|c| c.to_ascii_uppercase()) {
-                    Some('A') => (2, false),
-                    Some('B') => (1, false),
-                    Some(_) => (0, false),
-                    None => (0, true),
-                };
+            let (tier, marker_absent) = match marker
+                .and_then(|value| value.chars().next())
+                .map(|c| c.to_ascii_uppercase())
+            {
+                Some('A') => (2, false),
+                Some('B') => (1, false),
+                Some(_) => (0, false),
+                None => (0, true),
+            };
             Some(AuthorityTier {
                 order: AuthorityOrder::Administrative,
                 tier,
@@ -177,7 +177,9 @@ fn rerank_cluster(cluster: &mut [Value], weight: f64) {
         let slots: Vec<usize> = cluster
             .iter()
             .enumerate()
-            .filter(|(_, candidate)| candidate_tier(candidate).map(|tier| tier.order) == Some(order))
+            .filter(|(_, candidate)| {
+                candidate_tier(candidate).map(|tier| tier.order) == Some(order)
+            })
             .map(|(index, _)| index)
             .collect();
         if slots.len() < 2 {
@@ -264,7 +266,12 @@ mod tests {
     fn judicial_tiers_cover_published_unpublished_absent_inca_capp() {
         let published = authority_tier("cass", Some("oui")).unwrap();
         assert_eq!(
-            (published.order, published.tier, published.tier_max, published.marker_absent),
+            (
+                published.order,
+                published.tier,
+                published.tier_max,
+                published.marker_absent
+            ),
             (AuthorityOrder::Judicial, 3, 3, false)
         );
 
@@ -278,10 +285,16 @@ mod tests {
         let absent = authority_tier("cass", None).unwrap();
         assert_eq!((absent.tier, absent.marker_absent), (2, true));
         // Blank is treated as absent.
-        assert_eq!(authority_tier("cass", Some("   ")).unwrap().marker_absent, true);
+        assert_eq!(
+            authority_tier("cass", Some("   ")).unwrap().marker_absent,
+            true
+        );
 
         let inca = authority_tier("inca", None).unwrap();
-        assert_eq!((inca.tier, inca.tier_max, inca.marker_absent), (1, 3, false));
+        assert_eq!(
+            (inca.tier, inca.tier_max, inca.marker_absent),
+            (1, 3, false)
+        );
 
         let capp = authority_tier("capp", Some("oui")).unwrap();
         // capp is tier 0 regardless of any flag, and always marker_absent.
@@ -302,7 +315,10 @@ mod tests {
         // Absent letter: tier 0 AND marker_absent.
         let absent = authority_tier("jade", None).unwrap();
         assert_eq!((absent.tier, absent.marker_absent), (0, true));
-        assert_eq!(authority_tier("jade", Some("")).unwrap().marker_absent, true);
+        assert_eq!(
+            authority_tier("jade", Some("")).unwrap().marker_absent,
+            true
+        );
     }
 
     #[test]

@@ -54,7 +54,10 @@ pub(crate) fn annotate_fetched_parts(
         .filter(|document| document["kind"].as_str() == Some("decision"))
         .map(|document| {
             (
-                document["document_id"].as_str().unwrap_or_default().to_owned(),
+                document["document_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
                 document["source"].as_str().unwrap_or_default().to_owned(),
             )
         })
@@ -166,7 +169,11 @@ pub(crate) fn collect_decision_summary(document: &Value) -> Option<String> {
     (!summary.trim().is_empty()).then_some(summary)
 }
 
-pub(crate) fn extract_decision_part(part: DecisionPart, body: &str, summary: Option<&str>) -> ExtractedPart {
+pub(crate) fn extract_decision_part(
+    part: DecisionPart,
+    body: &str,
+    summary: Option<&str>,
+) -> ExtractedPart {
     match part {
         // SOMMAIRE is a real (if not zone-offset) structural element of the source record.
         DecisionPart::Summary => ExtractedPart {
@@ -207,7 +214,11 @@ pub(crate) fn heuristic_dispositif(body: &str) -> Option<String> {
     let start = ASCII_MARKERS
         .iter()
         .filter_map(|marker| rfind_ascii_ci(body, marker))
-        .chain(ACCENTED_MARKERS.iter().filter_map(|marker| body.rfind(marker)))
+        .chain(
+            ACCENTED_MARKERS
+                .iter()
+                .filter_map(|marker| body.rfind(marker)),
+        )
         .max()?;
     let tail = body[start..].trim();
     (!tail.is_empty()).then(|| tail.to_owned())

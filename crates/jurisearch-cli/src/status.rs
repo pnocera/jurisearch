@@ -4,7 +4,10 @@
 
 use crate::*;
 
-pub(crate) fn model_fetch_payload(model: Option<String>, allow_download: bool) -> Result<Value, ErrorObject> {
+pub(crate) fn model_fetch_payload(
+    model: Option<String>,
+    allow_download: bool,
+) -> Result<Value, ErrorObject> {
     let mut embedding_config = embedding_config_from_env();
     if let Some(model) = nonempty_string(model) {
         embedding_config.model = model;
@@ -97,7 +100,10 @@ pub(crate) fn replay_snapshot_mode(deep: bool) -> ReplaySnapshotMode {
     }
 }
 
-pub(crate) fn status_payload(index_dir: Option<&Path>, replay_snapshot_mode: ReplaySnapshotMode) -> Value {
+pub(crate) fn status_payload(
+    index_dir: Option<&Path>,
+    replay_snapshot_mode: ReplaySnapshotMode,
+) -> Value {
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
     let model_cache = model_cache_status(&embedding_config);
@@ -180,12 +186,20 @@ pub(crate) fn doctor_payload(index_dir: Option<&Path>) -> Value {
     if endpoint_status == "fail" {
         ready = false;
     }
-    checks.push(doctor_check("embedding_endpoint", endpoint_status, endpoint));
+    checks.push(doctor_check(
+        "embedding_endpoint",
+        endpoint_status,
+        endpoint,
+    ));
 
     // 3. Model cache present when an in-process model is required.
     let model_cache = model_cache_status(&loaded.config);
     if !model_cache.required {
-        checks.push(doctor_check("model_cache", "not_required", json!("in-process model not required")));
+        checks.push(doctor_check(
+            "model_cache",
+            "not_required",
+            json!("in-process model not required"),
+        ));
     } else if model_cache.model_present() {
         checks.push(doctor_check("model_cache", "pass", json!("model present")));
     } else {
@@ -200,7 +214,11 @@ pub(crate) fn doctor_payload(index_dir: Option<&Path>) -> Value {
     // 4. Postgres runtime + required extension assets (filesystem only — no server start).
     match PgConfig::discover() {
         Ok(pg_config) => {
-            checks.push(doctor_check("pg_config", "pass", json!(pg_config.version.trim())));
+            checks.push(doctor_check(
+                "pg_config",
+                "pass",
+                json!(pg_config.version.trim()),
+            ));
             for extension in ["pg_search", "vector"] {
                 if pg_config.has_extension_assets(extension) {
                     checks.push(doctor_check(
@@ -226,9 +244,11 @@ pub(crate) fn doctor_payload(index_dir: Option<&Path>) -> Value {
 
     // 5. Index directory presence (does not open it).
     match index_dir {
-        Some(path) if path.exists() => {
-            checks.push(doctor_check("index_dir", "pass", json!(path.display().to_string())))
-        }
+        Some(path) if path.exists() => checks.push(doctor_check(
+            "index_dir",
+            "pass",
+            json!(path.display().to_string()),
+        )),
         Some(path) => {
             ready = false;
             checks.push(doctor_check(
@@ -327,8 +347,8 @@ pub(crate) fn diff_payload(req: DiffRequest) -> Result<Value, ErrorObject> {
         ));
     }
     let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
-    let response = document_diff_json(&postgres, &req.id, &req.from, &req.to)
-        .map_err(storage_error_object)?;
+    let response =
+        document_diff_json(&postgres, &req.id, &req.from, &req.to).map_err(storage_error_object)?;
     let mut value: Value = parse_storage_json(&response)?;
     if value["family_count"].as_u64() == Some(0) {
         return Err(no_results(format!(

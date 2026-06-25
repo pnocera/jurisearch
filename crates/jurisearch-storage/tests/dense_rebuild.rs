@@ -172,15 +172,20 @@ fn insert_chunk_embeddings_upserts_batch_and_guards_fingerprint() -> Result<(), 
 
     // Idempotent: re-running the same batch upserts cleanly.
     assert_eq!(
-        insert_chunk_embeddings(&postgres, &[row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT)])?,
+        insert_chunk_embeddings(
+            &postgres,
+            &[row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT)]
+        )?,
         1
     );
 
     // Guard: a missing chunk fails the whole batch (batch-granular equivalent of the old per-row
     // `updated != 1` check).
-    let missing =
-        insert_chunk_embeddings(&postgres, &[row("chunk:missing", &vector_a, EMBEDDING_FINGERPRINT)])
-            .unwrap_err();
+    let missing = insert_chunk_embeddings(
+        &postgres,
+        &[row("chunk:missing", &vector_a, EMBEDDING_FINGERPRINT)],
+    )
+    .unwrap_err();
     assert!(matches!(missing, StorageError::Projection { .. }));
 
     // Guard: a conflicting fingerprint on an already-fingerprinted chunk fails.

@@ -10,7 +10,11 @@ pub(super) struct RawPublisherLink {
 }
 
 impl RawPublisherLink {
-    pub(super) fn into_edge(self, index: usize, document: &CanonicalDocument) -> CanonicalGraphEdge {
+    pub(super) fn into_edge(
+        self,
+        index: usize,
+        document: &CanonicalDocument,
+    ) -> CanonicalGraphEdge {
         let to_source_uid = self.target_source_uid();
         let source_text = optional_non_empty(Some(self.text));
         let edge_id = publisher_edge_id(
@@ -106,7 +110,11 @@ fn text_struct_link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Opti
     })
 }
 
-pub(super) fn assign_text_struct_link_text(raw: &mut RawTextStruct, link_stack: &[usize], value: &str) {
+pub(super) fn assign_text_struct_link_text(
+    raw: &mut RawTextStruct,
+    link_stack: &[usize],
+    value: &str,
+) {
     let Some(link) = link_stack
         .last()
         .and_then(|index| raw.structure_links.get_mut(*index))

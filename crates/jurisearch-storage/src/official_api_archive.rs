@@ -41,17 +41,18 @@ pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
     row: &InsertOfficialApiResponse<'_>,
 ) -> Result<i64, StorageError> {
     // jsonb columns are passed as text + cast in SQL (mirrors the other parameterized writers).
-    let request_json = serde_json::to_string(row.request_json).map_err(|error| {
-        StorageError::Projection {
+    let request_json =
+        serde_json::to_string(row.request_json).map_err(|error| StorageError::Projection {
             message: format!("serialize official_api_responses.request_json: {error}"),
-        }
-    })?;
+        })?;
     let response_json = match row.response_json {
-        Some(value) => Some(serde_json::to_string(value).map_err(|error| {
-            StorageError::Projection {
-                message: format!("serialize official_api_responses.response_json: {error}"),
-            }
-        })?),
+        Some(value) => {
+            Some(
+                serde_json::to_string(value).map_err(|error| StorageError::Projection {
+                    message: format!("serialize official_api_responses.response_json: {error}"),
+                })?,
+            )
+        }
         None => None,
     };
     let inserted = client

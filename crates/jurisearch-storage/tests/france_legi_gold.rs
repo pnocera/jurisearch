@@ -74,10 +74,11 @@ fn france_legi_gold_extracts_three_categories() -> Result<(), Box<dyn Error>> {
         "expected >=4 known-item qrels, got {}",
         known.len()
     );
-    assert!(known.iter().any(|q| q["gold_document_id"]
-        == "legi:LEGIARTI000000000A01@2020-01-01"
-        && q["query"] == "Code test Article A"
-        && q["as_of"] == "2020-01-01"));
+    assert!(known.iter().any(
+        |q| q["gold_document_id"] == "legi:LEGIARTI000000000A01@2020-01-01"
+            && q["query"] == "Code test Article A"
+            && q["as_of"] == "2020-01-01"
+    ));
 
     // temporal: the R242-40 family has two versions resolved from its VERSIONS (LIEN_ART) edges.
     let temporal = gold["temporal"].as_array().expect("temporal array");
@@ -93,7 +94,10 @@ fn france_legi_gold_extracts_three_categories() -> Result<(), Box<dyn Error>> {
     assert!(temporal_golds.contains(&"legi:LEGIARTI000000000V01@1990-01-01"));
     assert!(temporal_golds.contains(&"legi:LEGIARTI000000000V02@2003-01-01"));
     for q in temporal {
-        assert!(q["as_of"].is_string(), "temporal as_of must be a date string");
+        assert!(
+            q["as_of"].is_string(),
+            "temporal as_of must be a date string"
+        );
         assert!(
             q["query"].as_str().unwrap().contains("en vigueur au"),
             "temporal query phrasing: {}",
@@ -109,7 +113,9 @@ fn france_legi_gold_extracts_three_categories() -> Result<(), Box<dyn Error>> {
     );
 
     // cross-reference: A cites B via a CITATION/cible edge; B is in the corpus.
-    let xref = gold["cross_reference"].as_array().expect("cross_reference array");
+    let xref = gold["cross_reference"]
+        .as_array()
+        .expect("cross_reference array");
     assert_eq!(xref.len(), 1, "expected exactly one citing article (A)");
     assert_eq!(
         xref[0]["query_document_id"],
@@ -119,7 +125,10 @@ fn france_legi_gold_extracts_three_categories() -> Result<(), Box<dyn Error>> {
     assert_eq!(xref_golds.len(), 1);
     assert_eq!(xref_golds[0], "legi:LEGIARTI000000000B01@2020-01-01");
     assert!(
-        xref[0]["query"].as_str().unwrap().contains("article A body"),
+        xref[0]["query"]
+            .as_str()
+            .unwrap()
+            .contains("article A body"),
         "cross-ref query should be the citing article text: {}",
         xref[0]["query"]
     );

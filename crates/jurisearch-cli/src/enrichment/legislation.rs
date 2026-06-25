@@ -57,7 +57,10 @@ pub(crate) fn split_article_code(query: &str) -> Option<(String, String)> {
     }
     let mut article = query[..idx].trim().trim_end_matches([',', ' ']).to_owned();
     // Strip a leading "Article" label and trailing connectors ("du", "de la", "de l'", "des", "de").
-    if let Some(rest) = article.strip_prefix("Article").or_else(|| article.strip_prefix("article")) {
+    if let Some(rest) = article
+        .strip_prefix("Article")
+        .or_else(|| article.strip_prefix("article"))
+    {
         article = rest.trim().to_owned();
     }
     let lower = article.to_lowercase();
@@ -68,7 +71,10 @@ pub(crate) fn split_article_code(query: &str) -> Option<(String, String)> {
             break;
         }
     }
-    let code = query[idx..].trim().trim_end_matches(['.', ',', ' ']).to_owned();
+    let code = query[idx..]
+        .trim()
+        .trim_end_matches(['.', ',', ' '])
+        .to_owned();
     if article.is_empty() || code.chars().count() < 4 {
         return None;
     }
@@ -77,7 +83,10 @@ pub(crate) fn split_article_code(query: &str) -> Option<(String, String)> {
 
 /// Normalize an article number for dedup: uppercase, whitespace removed ("L. 121-1" -> "L.121-1").
 pub(crate) fn normalize_article_number(raw: &str) -> String {
-    raw.chars().filter(|ch| !ch.is_whitespace()).collect::<String>().to_uppercase()
+    raw.chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// Normalize a code name for dedup: lowercase, single-spaced, trailing punctuation stripped.
@@ -99,7 +108,11 @@ pub(crate) fn legislation_citation_key(article_norm: &str, code_norm: &str) -> S
     hasher.update(article_norm.as_bytes());
     hasher.update([0u8]);
     hasher.update(code_norm.as_bytes());
-    let hex: String = hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("legi-cite:{hex}")
 }
 
@@ -155,7 +168,9 @@ pub(crate) fn legifrance_response_has_results(response: &Value) -> bool {
     if let Some(total) = response["totalResultNumber"].as_i64() {
         return total > 0;
     }
-    response["results"].as_array().is_some_and(|results| !results.is_empty())
+    response["results"]
+        .as_array()
+        .is_some_and(|results| !results.is_empty())
 }
 
 /// `ingest collect-legislation-citations`: extract citations from the archived Judilibre `/decision`
@@ -201,7 +216,12 @@ pub(crate) fn collect_legislation_citations_payload(
             ) else {
                 continue;
             };
-            for (visa_index, item) in decision["visa"].as_array().into_iter().flatten().enumerate() {
+            for (visa_index, item) in decision["visa"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
                 let Some(title) = item["title"].as_str() else {
                     continue;
                 };
@@ -247,9 +267,10 @@ pub(crate) fn collect_legislation_citations_payload(
         }
     }
     finalize_citation_occurrence_counts(&postgres).map_err(storage_error_object)?;
-    let coverage: Value =
-        serde_json::from_str(&legislation_citations_coverage_json(&postgres).map_err(storage_error_object)?)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &legislation_citations_coverage_json(&postgres).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "command": "ingest collect-legislation-citations",
@@ -297,9 +318,13 @@ pub(crate) fn enrich_legislation_citations_payload(
             }
             None => ENRICH_CITATIONS_PAGE_SIZE,
         };
-        let page_json =
-            load_pending_citation_resolutions_json(&postgres, cursor.as_deref(), retry_errors, page_limit)
-                .map_err(storage_error_object)?;
+        let page_json = load_pending_citation_resolutions_json(
+            &postgres,
+            cursor.as_deref(),
+            retry_errors,
+            page_limit,
+        )
+        .map_err(storage_error_object)?;
         let page: Value = serde_json::from_str(&page_json)
             .map_err(|error| dependency_unavailable(error.to_string()))?;
         let Some(citations) = page["citations"].as_array().filter(|c| !c.is_empty()) else {
@@ -362,9 +387,10 @@ pub(crate) fn enrich_legislation_citations_payload(
             break;
         }
     }
-    let coverage: Value =
-        serde_json::from_str(&legislation_citations_coverage_json(&postgres).map_err(storage_error_object)?)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &legislation_citations_coverage_json(&postgres).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     // Operator hint when every attempt failed (commonly missing/invalid Legifrance OAuth creds) — the
     // failures are still archived as upstream_error rows; this just points at the likely cause.
     let note = (considered > 0 && resolved_ok == 0 && not_found == 0 && errors == considered).then(|| {
