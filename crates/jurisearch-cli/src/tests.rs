@@ -22,6 +22,7 @@ fn phase2_corpus_both_families() -> Value {
 }
 fn phase2_valid_benchmark_json() -> String {
     json!({
+        "kind": "phase2_france_juris_benchmark",
         "state": "passed",
         "jurisdiction": "france",
         "fingerprint": "bge-m3:1024:normalize:true",
@@ -363,6 +364,38 @@ fn phase2_benchmark_re_derives_pass_and_rejects_bad_artifacts() {
     assert!(payload["artifact"].is_object()); // the artifact itself IS an object
     assert!(payload["categories"].is_null());
     assert!(payload["provenance"].is_null());
+}
+
+#[test]
+fn phase2_gate_rejects_a_separate_authority_benchmark_artifact() {
+    // Isolation by KIND: the A6 authority benchmark is a SEPARATE measured-only artifact kind and must
+    // never satisfy the Phase 2 full-juridic gate, even if it copies the france-juris field shape and is
+    // mis-pointed at JURISEARCH_PHASE2_BENCHMARK. Start from an OTHERWISE-PASSING france-juris artifact
+    // and flip ONLY `kind` — the gate must still re-derive `failed` (proving the rejection is the kind,
+    // not some other missing field).
+    let dir = tempfile::tempdir().unwrap();
+    let mut artifact: Value = serde_json::from_str(&phase2_valid_benchmark_json()).unwrap();
+    assert_eq!(
+        phase2_benchmark_artifact_errors(&artifact),
+        Vec::<String>::new(),
+        "fixture must be a passing france-juris artifact before the kind flip"
+    );
+    artifact["kind"] = json!("phase2_authority_benchmark");
+    artifact["gate_input"] = json!(false);
+    let path = dir.path().join("authority.json");
+    std::fs::write(&path, artifact.to_string()).unwrap();
+    let payload = phase2_benchmark_payload_with_path(Some(&path));
+    assert_eq!(
+        payload["state"], "failed",
+        "an authority-kind artifact must never re-derive to passed for the Phase 2 gate"
+    );
+    assert!(
+        payload["artifact_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("kind must be `phase2_france_juris_benchmark`")),
+        "rejection must cite the kind mismatch; got {}",
+        payload["artifact_error"]
+    );
 }
 
 #[test]

@@ -437,6 +437,32 @@ fn zone_candidates_json_scopes_to_zone_with_official_provenance() -> Result<(), 
     assert_eq!(candidates[0]["zone_accurate"], true);
     assert_eq!(candidates[0]["provider"], "judilibre");
     assert_eq!(hit["zone"], "motivations");
+    assert!(
+        candidates[0].get("publication").is_none(),
+        "OFF zone projection must not expose publication"
+    );
+
+    // A5 (zone projection gate): mirror the main-path A2 test. Even with a publication marker present in
+    // canonical_json, the OFF path (project_authority=false) must omit it; only the ON path exposes it.
+    postgres.execute_sql(
+        "UPDATE documents SET canonical_json = canonical_json || '{\"publication\": \"oui\"}'::jsonb \
+         WHERE document_id = 'cass:Q1';",
+    )?;
+    let off_again: serde_json::Value =
+        serde_json::from_str(&zone_candidates_json(&postgres, &base)?).expect("json");
+    assert!(
+        off_again["candidates"][0].get("publication").is_none(),
+        "OFF zone projection must omit publication even when present in canonical_json"
+    );
+    let projected: serde_json::Value = serde_json::from_str(&zone_candidates_json(
+        &postgres,
+        &ZoneCandidateQuery {
+            project_authority: true,
+            ..base
+        },
+    )?)
+    .expect("json");
+    assert_eq!(projected["candidates"][0]["publication"], "oui");
 
     // Z4-fix (as-of): the decision is dated 2024-01-01; an as_of BEFORE it excludes it.
     let historical = ZoneCandidateQuery {

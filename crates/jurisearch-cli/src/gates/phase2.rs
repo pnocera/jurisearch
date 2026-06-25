@@ -192,6 +192,17 @@ pub(crate) fn phase2_benchmark_default_payload() -> Value {
 /// BOTH jurisprudence families' retrieval, and ECLI/pourvoi/CETATEXT citation coverage.
 pub(crate) fn phase2_benchmark_artifact_errors(artifact: &Value) -> Vec<String> {
     let mut errors = Vec::new();
+    // Kind isolation: the gate consumes ONLY the france-juris benchmark. A separate-kind artifact (e.g.
+    // the measured-only `phase2_authority_benchmark` from `eval france-juris-authority`) must never
+    // satisfy the gate even if it copies the france-juris field shape and is mis-pointed at
+    // JURISEARCH_PHASE2_BENCHMARK. The producer (`france_juris_artifact`) stamps this kind.
+    if artifact["kind"].as_str() != Some("phase2_france_juris_benchmark") {
+        errors.push(
+            "kind must be `phase2_france_juris_benchmark` (the Phase 2 gate consumes only that \
+             benchmark; a separate-kind artifact is never a gate input)"
+                .to_owned(),
+        );
+    }
     if artifact["jurisdiction"].as_str() != Some("france") {
         errors.push("jurisdiction must be `france`".to_owned());
     }

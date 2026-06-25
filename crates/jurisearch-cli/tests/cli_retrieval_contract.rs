@@ -1270,6 +1270,83 @@ fn search_returns_results_from_existing_index_with_live_embeddings()
     Ok(())
 }
 
+#[test]
+fn zone_search_positive_authority_weight_disables_paging_and_carries_metadata()
+-> Result<(), StorageError> {
+    use jurisearch_storage::zone_units::{ZoneUnitRow, replace_zone_units_for_document};
+    let Some(pg_config) = discover_pg_config("CLI zone authority wiring")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-zone-authority.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let terms = "prescription quinquennale responsabilite";
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        // A published Cassation decision (judicial tier 3) with one official `motivations` zone unit.
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('cass:ZONEPUB', 'cass', 'decision', 'cass:ZONEPUB', 'Cass. ZONEPUB', 'Arret', \
+                 'corps', '2024-01-01', 'sha256:zonepub', '{\"publication\":\"oui\"}');",
+        )?;
+        replace_zone_units_for_document(
+            &postgres,
+            "cass:ZONEPUB",
+            &[ZoneUnitRow {
+                document_id: "cass:ZONEPUB",
+                zone: "motivations",
+                fragment_index: 0,
+                body: terms,
+                search_body: terms,
+                source: "cass",
+                text_hash: "h",
+                builder_version: "zone-units:v1",
+            }],
+        )?;
+    }
+    let on: Value = serde_json::from_slice(
+        &Command::cargo_bin("jurisearch")
+            .unwrap()
+            .env("JURISEARCH_INDEX_DIR", root.path())
+            .args([
+                "search",
+                terms,
+                "--zone",
+                "motivations",
+                "--mode",
+                "bm25",
+                "--top-k",
+                "5",
+                "--authority-weight",
+                "0.5",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    )
+    .unwrap();
+    // The zone path mirrors the main path's A4 wiring: response authority metadata, first-page-only
+    // pagination, and per-candidate projection/authority — over the official-zone scope.
+    assert_eq!(on["authority"]["enabled"], true);
+    assert_eq!(on["authority"]["weight"], 0.5);
+    assert_eq!(on["authority"]["paging"], "first_page_only");
+    assert_eq!(on["pagination"]["cursor_supported"], false);
+    assert!(on["pagination"]["next_cursor"].is_null());
+    assert_eq!(on["scope"]["mode"], "official_zone_retrieval");
+    let candidate = &on["candidates"][0];
+    assert_eq!(candidate["document_id"], "cass:ZONEPUB");
+    assert_eq!(candidate["zone_accurate"], true);
+    assert_eq!(candidate["publication"], "oui");
+    assert_eq!(candidate["authority"]["order"], "judicial");
+    assert_eq!(candidate["authority"]["tier"], 3);
+    Ok(())
+}
+
 /// Insert a `cass` decision + one matching chunk (bm25-searchable, no embeddings needed) with the
 /// given `publication` marker, so an authority re-rank has real judicial candidates to project/order.
 fn insert_cass_decision(postgres: &ManagedPostgres, id: &str, publication: &str, terms: &str) {
@@ -1307,20 +1384,26 @@ fn search_authority_rerank_wires_projection_pagination_and_metadata() -> Result<
         insert_cass_decision(&postgres, "cass:DECUNP", "non", terms);
     }
 
-    // OFF (no --authority-weight): byte-identical legacy behaviour — no authority/publication, paging on.
-    let off: Value = serde_json::from_slice(
-        &Command::cargo_bin("jurisearch")
+    // Run the same query with no flag and with --authority-weight 0.0; capture RAW stdout bytes so the
+    // OFF invariant is checked at the exact byte level (key order/formatting/newlines), not just fields.
+    let run = |extra: &[&str]| -> Vec<u8> {
+        let mut args = vec![
+            "search", terms, "--kind", "decision", "--mode", "bm25", "--top-k", "5",
+        ];
+        args.extend_from_slice(extra);
+        Command::cargo_bin("jurisearch")
             .unwrap()
             .env("JURISEARCH_INDEX_DIR", root.path())
-            .args([
-                "search", terms, "--kind", "decision", "--mode", "bm25", "--top-k", "5",
-            ])
+            .args(&args)
             .assert()
             .success()
             .get_output()
-            .stdout,
-    )
-    .unwrap();
+            .stdout
+            .clone()
+    };
+    // OFF (no --authority-weight): legacy behaviour — no authority/publication, paging on.
+    let off_stdout = run(&[]);
+    let off: Value = serde_json::from_slice(&off_stdout).unwrap();
     assert!(
         off.get("authority").is_none(),
         "OFF must emit no authority block"
@@ -1331,6 +1414,13 @@ fn search_authority_rerank_wires_projection_pagination_and_metadata() -> Result<
     );
     assert!(off["candidates"][0].get("authority").is_none());
     assert_eq!(off["pagination"]["cursor_supported"], true);
+
+    // INERT (--authority-weight 0.0): byte-for-byte identical to unset on a real successful search.
+    let zero_stdout = run(&["--authority-weight", "0.0"]);
+    assert_eq!(
+        zero_stdout, off_stdout,
+        "--authority-weight 0.0 must be byte-identical to unset"
+    );
 
     // ON (--authority-weight 0.5): decision-only re-rank wired end to end.
     let on: Value = serde_json::from_slice(
@@ -1386,6 +1476,60 @@ fn search_authority_rerank_wires_projection_pagination_and_metadata() -> Result<
         pub_pos < unp_pos,
         "published cass (tier 3) should outrank unpublished (tier 2): {ranked:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn session_search_authority_weight_zero_matches_unset_on_a_real_search() -> Result<(), StorageError>
+{
+    // Session parity for the OFF invariant on a SUCCESSFUL indexed search: a JSONL `search` with omitted
+    // `authority_weight` and one with `authority_weight: 0.0` must produce identical results — no
+    // publication, no authority metadata, legacy paging. The session resolves the index via the
+    // JURISEARCH_INDEX_DIR env (configured_index_dir fallback).
+    let Some(pg_config) = discover_pg_config("CLI session authority zero parity")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-session-authority.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let terms = "prescription quinquennale responsabilite delictuelle";
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        insert_cass_decision(&postgres, "cass:DECPUB", "oui", terms);
+        insert_cass_decision(&postgres, "cass:DECUNP", "non", terms);
+    }
+    let input = format!(
+        "{{\"id\":\"unset\",\"command\":\"search\",\"args\":{{\"query\":\"{terms}\",\"kind\":\"decision\",\"mode\":\"bm25\",\"top_k\":5}}}}\n\
+         {{\"id\":\"zero\",\"command\":\"search\",\"args\":{{\"query\":\"{terms}\",\"kind\":\"decision\",\"mode\":\"bm25\",\"top_k\":5,\"authority_weight\":0.0}}}}\n\
+         {{\"id\":\"done\",\"command\":\"exit\"}}\n"
+    );
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["session", "--jsonl"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let values: Vec<Value> = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(values[0]["id"], "unset");
+    assert_eq!(values[1]["id"], "zero");
+    let unset_result = &values[0]["result"];
+    assert_eq!(
+        &values[1]["result"], unset_result,
+        "session authority_weight 0.0 must match unset"
+    );
+    assert!(unset_result.get("authority").is_none());
+    assert!(unset_result["candidates"][0].get("publication").is_none());
+    assert!(unset_result["candidates"][0].get("authority").is_none());
+    assert_eq!(unset_result["pagination"]["cursor_supported"], true);
     Ok(())
 }
 

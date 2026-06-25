@@ -182,6 +182,29 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
     assert_eq!(projected_top["document_id"], "cass:JURITEXT000051824029");
     assert_eq!(projected_top["publication"], "oui");
 
+    // A2 gate (chunk grouping): the `limited` SELECT branch projects publication the same way. OFF omits
+    // the key; ON exposes it — proving both grouping paths gate the projection identically.
+    let chunk_off = HybridCandidateQuery {
+        group_by: GroupBy::Chunk,
+        ..decision_query
+    };
+    let chunk_off_response: serde_json::Value =
+        serde_json::from_str(&hybrid_candidates_json(&postgres, &chunk_off)?)?;
+    assert!(
+        chunk_off_response["candidates"][0]
+            .get("publication")
+            .is_none(),
+        "OFF chunk projection must not expose publication"
+    );
+    let chunk_on_response: serde_json::Value = serde_json::from_str(&hybrid_candidates_json(
+        &postgres,
+        &HybridCandidateQuery {
+            project_authority: true,
+            ..chunk_off
+        },
+    )?)?;
+    assert_eq!(chunk_on_response["candidates"][0]["publication"], "oui");
+
     // Temporal correctness: a decision is not "valid" before it was rendered.
     let before = hybrid_candidates_json(
         &postgres,

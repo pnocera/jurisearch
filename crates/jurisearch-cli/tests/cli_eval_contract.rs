@@ -75,3 +75,19 @@ fn eval_phase1_without_index_is_json_and_uses_exit_code_3() {
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["code"], "index_unavailable");
 }
+
+#[test]
+fn eval_france_juris_stays_knob_free_and_rejects_authority_weight() {
+    // Phase 2 gate invariant: the authority re-rank is a SEPARATE measured-only benchmark (A6) and must
+    // never be wired into the gating `eval france-juris` command. clap rejects the unknown flag, so the
+    // gate's recall is always measured on the production OFF path.
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .args(["eval", "france-juris", "--authority-weight", "0.5"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--authority-weight")
+                .or(predicate::str::contains("unexpected argument")),
+        );
+}
