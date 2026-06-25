@@ -456,6 +456,13 @@ pub(crate) enum EvalSubcommand {
     /// text → the source decision. Measured-only (NOT a Phase 2 gate input): the artifact records the
     /// measured recall against a PROPOSED floor, and never inflates the full-juridic corpus claim.
     FranceJurisZones(EvalFranceJurisZonesArgs),
+    /// Run the MEASURED-ONLY authority-ordering benchmark and emit a SEPARATE
+    /// phase2_authority_benchmark artifact (NOT a Phase 2 gate input).
+    ///
+    /// Measures pairwise authority-lift (does the higher-authority of two near-tied same-order decisions
+    /// rank above the lower one) ON vs OFF, plus recall@10 OFF vs ON, swept over --authority-weights.
+    /// Gold = the same official decision-headnote recipe as `eval france-juris` (no LLM, no human).
+    FranceJurisAuthority(EvalFranceJurisAuthorityArgs),
     /// Run a custom retrieval eval over your own questions with qrels or an external judge.
     ///
     /// Retrieves each question through the chosen modes (document grouping), pools candidates,
@@ -594,6 +601,32 @@ pub(crate) struct EvalFranceJurisZonesArgs {
     #[arg(long)]
     pub(crate) source_revision: Option<String>,
     /// Write the phase2_zone_benchmark artifact JSON to this path (also printed to stdout).
+    #[arg(long)]
+    pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub(crate) struct EvalFranceJurisAuthorityArgs {
+    /// Max judicial (cass/capp/inca) retrieval qrels to extract from the index.
+    #[arg(long, default_value_t = 60)]
+    pub(crate) judicial_retrieval: u32,
+    /// Max administrative (jade) retrieval qrels to extract from the index.
+    #[arg(long, default_value_t = 60)]
+    pub(crate) administrative_retrieval: u32,
+    /// Comma-separated authority weights to sweep; each must be in [0.0, 1.0]. `0.0` is the OFF baseline.
+    #[arg(long, default_value = "0.0,0.1,0.25,0.5")]
+    pub(crate) authority_weights: String,
+    /// Also measure official-zone (Cassation) recall@10 OFF vs ON over `zone_units` as part of the
+    /// recall regression guard (requires zone readiness; uses the same authority sweep).
+    #[arg(long)]
+    pub(crate) include_zones: bool,
+    /// Retrieval mode for the optional `--include-zones` recall pass.
+    #[arg(long, default_value = "hybrid")]
+    pub(crate) zone_mode: CliSearchMode,
+    /// Pinned official source revision (e.g. archive timestamp) recorded in artifact provenance.
+    #[arg(long)]
+    pub(crate) source_revision: Option<String>,
+    /// Write the phase2_authority_benchmark artifact JSON to this path (also printed to stdout).
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
 }

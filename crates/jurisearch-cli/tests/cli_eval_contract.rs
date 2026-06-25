@@ -91,3 +91,40 @@ fn eval_france_juris_stays_knob_free_and_rejects_authority_weight() {
                 .or(predicate::str::contains("unexpected argument")),
         );
 }
+
+#[test]
+fn eval_france_juris_authority_validates_weights_before_index_and_is_measured_only() {
+    // Bad sweep weights are rejected as bad_input BEFORE any index access (parse runs first).
+    Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "eval",
+            "france-juris-authority",
+            "--authority-weights",
+            "0.1,1.5",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::is_empty())
+        .get_output();
+
+    // Valid weights but no index → index_unavailable (the benchmark is a real indexed run).
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env_remove("JURISEARCH_INDEX_DIR")
+        .args([
+            "eval",
+            "france-juris-authority",
+            "--authority-weights",
+            "0.0,0.5",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["error"]["code"], "index_unavailable");
+}

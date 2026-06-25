@@ -5,6 +5,7 @@
 use crate::*;
 
 pub(crate) mod artifact;
+pub(crate) mod authority;
 pub(crate) mod france_juris;
 pub(crate) mod france_legi;
 pub(crate) mod generic;
@@ -12,6 +13,7 @@ pub(crate) mod scoring;
 pub(crate) mod zones;
 
 pub(crate) use artifact::*;
+pub(crate) use authority::*;
 pub(crate) use france_juris::*;
 pub(crate) use france_legi::*;
 pub(crate) use generic::*;
@@ -43,6 +45,13 @@ pub(crate) fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::
         Some(EvalSubcommand::FranceJurisZones(args)) => {
             let out_path = args.out.clone();
             match eval_france_juris_zones_payload(args, index_dir) {
+                Ok(response) => emit_artifact(response, out_path),
+                Err(error) => emit_error(error),
+            }
+        }
+        Some(EvalSubcommand::FranceJurisAuthority(args)) => {
+            let out_path = args.out.clone();
+            match eval_france_juris_authority_payload(args, index_dir) {
                 Ok(response) => emit_artifact(response, out_path),
                 Err(error) => emit_error(error),
             }
