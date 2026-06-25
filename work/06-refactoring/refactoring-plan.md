@@ -1,14 +1,17 @@
 # Jurisearch Refactoring Plan
 
 Date: 2026-06-24
+Revised: 2026-06-25 (resynced to working tree after zone/enrichment landings)
 
 ## Executive Summary
 
-The immediate refactoring target should be `crates/jurisearch-cli/src/main.rs`. It is 11,716 lines and 462 KB in the current working tree, which is larger than the next production file by roughly 4.6x. It currently owns command parsing, command dispatch, retrieval payloads, ingest payloads, eval runners, release-gate validation, embedding/runtime setup, JSONL serving, output formatting, and a large private unit-test module.
+The immediate refactoring target should be `crates/jurisearch-cli/src/main.rs`. It is now 13,747 lines and ~553 KB in the current working tree, which is larger than the next production file (`jurisearch-ingest/src/legi/mod.rs`, 2,535 lines) by roughly 5.4x. It currently owns command parsing, command dispatch, retrieval payloads, zone retrieval, decision-part/zone/legislation-citation enrichment, ingest payloads, eval runners, release-gate validation, embedding/runtime setup, JSONL serving, output formatting, and a large private unit-test module.
+
+> **Resync note (2026-06-25):** No refactoring from this plan has started yet — `main.rs` is still a single module. Since the plan was first written (2026-06-24) the file grew by ~2,000 lines because a new **zone / decision-part / legislation-citation enrichment** domain landed: `zone_search_payload` and `ensure_zone_retrieval_readiness`; decision-part fetch (`DecisionPart`, `annotate_fetched_parts`, Judilibre zone helpers); the `eval france-juris-zones` benchmark; and five new `ingest` subcommands (`enrich-zones`, `build-zone-units`, `embed-zone-units`, `collect-legislation-citations`, `enrich-legislation-citations`). The phases below now account for that domain. All line-band references were re-measured against the current tree.
 
 The recommended strategy is a behavior-preserving module split inside the existing `jurisearch-cli` binary crate. Do not introduce a new library crate yet. The current code uses many CLI-private argument types and helper functions; keeping the first split within the binary crate avoids public API churn while still reducing review and merge risk.
 
-After the CLI split, address the medium-large parser/projection/retrieval files with narrower internal module splits. Those files are not as urgent as `main.rs`; their public surfaces are already more coherent.
+After the CLI split, address the medium-large parser/projection/retrieval files with narrower internal module splits. Those files are not as urgent as `main.rs`; their public surfaces are already more coherent. Note that `jurisearch-official-api/src/lib.rs` has since grown to 1,418 lines (PISTE + Legifrance citation enrichment surface) and is now the most urgent of the secondary targets.
 
 ## Current Size Profile
 
@@ -16,33 +19,37 @@ Measured with `.venv` and `target` pruned:
 
 | File | Lines | Notes |
 | --- | ---: | --- |
-| `crates/jurisearch-cli/src/main.rs` | 11,716 | Primary refactor target. One binary module contains almost every CLI concern. |
-| `crates/jurisearch-cli/tests/cli_contract.rs` | 4,954 | Large integration-contract suite; worth splitting after the CLI module split. |
+| `crates/jurisearch-cli/src/main.rs` | 13,747 | Primary refactor target. One binary module contains almost every CLI concern (+2,031 since 2026-06-24). |
+| `crates/jurisearch-cli/tests/cli_contract.rs` | 5,049 | Large integration-contract suite; worth splitting after the CLI module split. |
 | `crates/jurisearch-ingest/src/legi/mod.rs` | 2,535 | LEGI domain types, XML parsing, canonicalization, links, chunks, date validation. |
-| `crates/jurisearch-storage/src/retrieval.rs` | 1,330 | Retrieval query types and multiple JSON SQL emitters. |
+| `crates/jurisearch-official-api/src/lib.rs` | 1,418 | PISTE + Legifrance config/client/retry/token/error helpers in one lib file (+317 since 2026-06-24; now the top secondary target). |
+| `crates/jurisearch-storage/src/retrieval.rs` | 1,392 | Retrieval query types and multiple JSON SQL emitters. |
 | `crates/jurisearch-ingest/src/juri/mod.rs` | 1,326 | Jurisprudence parsing, chunks, inferred citations, publisher links. |
 | `crates/jurisearch-storage/src/projection.rs` | 1,308 | LEGI/decision projection, metadata roots, hierarchy backfill, chunk embeddings. |
 | `crates/jurisearch-storage/src/ingest_accounting.rs` | 1,128 | Ingest run accounting, resume, health, replay snapshots, readiness cache. |
-| `crates/jurisearch-official-api/src/lib.rs` | 1,101 | PISTE config/client/retry/token/error helpers in one lib file. |
-| `crates/jurisearch-core/src/schema.rs` | 1,063 | Mostly compiled schema payload generation. |
+| `crates/jurisearch-core/src/schema.rs` | 1,077 | Mostly compiled schema payload generation. |
 | `crates/jurisearch-embed/src/lib.rs` | 1,057 | Config, fingerprinting, OpenAI-compatible client, tokenizer/truncation, errors. |
+| `crates/jurisearch-storage/src/runtime.rs` | 836 | Managed-Postgres runtime/lifecycle (added 2026-06-21; below the original top-10 cutoff). Below the urgency bar; listed for awareness. |
+| `crates/jurisearch-storage/src/zone_units.rs` | 652 | Zone-unit derivation/storage (added 2026-06-24). Supports the new zone retrieval index. |
 
-Working tree note: `crates/jurisearch-cli/src/main.rs` and `crates/jurisearch-storage/src/migrations.rs` already had local modifications when this plan was written. Treat this plan as based on the current working tree, not pristine `HEAD`.
+Working tree note: apart from this plan document itself (currently an uncommitted edit), the source tree is clean as of 2026-06-25. The local `main.rs` and `migrations.rs` modifications noted in the original draft have since been committed, so once this plan edit is committed the refactor can start from a clean `HEAD`. Zone-related storage files (`zone_units.rs`, `zone_retrieval.rs`, `france_juris.rs` all added 2026-06-24; `runtime.rs` from 2026-06-21) are all under the ~2,000-line urgency bar.
 
 ## Observed CLI Structure
 
-High-signal symbols and line bands in `main.rs`:
+High-signal symbols and line bands in `main.rs` (re-measured 2026-06-25):
 
-- `Cli`, `Command`, and most `Args`/session arg structs are concentrated near lines 141-930.
-- `run` is the top-level dispatcher at lines 1041-1151 and matches 22 top-level commands.
-- `emit_eval` is at lines 1227-1291 and delegates to eval payload builders; it has a small artifact-writing duplication for `FranceLegi` while other eval commands use `emit_artifact`.
-- Retrieval payloads include `search_payload`, `search_with_postgres`, `compare_payload`, `fetch_payload`, `cite_payload`, `context_payload`, and `related_payload`.
-- Ingest dispatch is `emit_ingest` at lines 4209-4334, with `ingest_legi_archives_payload`, `ingest_juri_archives_payload`, `embed_chunks_payload`, and backfill helpers later in the file.
-- JSONL serving/session dispatch lives around lines 7446-7624.
-- Setup/status/doctor/inspection/gates are concentrated from about line 7626 onward, including `status_payload`, `phase1_gate_payload`, `phase2_gate_payload`, benchmark artifact validators, ingest-health JSON shaping, and helper functions.
-- Private unit tests start at line 10123 and cover phase gates, Judilibre zones, run IDs, archive date normalization, citation parsing, help coverage, session contract parity, and benchmark artifact validators.
+- `Cli`, `Command`, and most `Args`/session arg structs are concentrated near lines 178-1208. This band now also holds the zone-retrieval enums (`CliZone` ~355, `CliEnrichZoneOrder` ~375), the `EvalFranceJurisZonesArgs` struct (~884), and the expanded `IngestSubcommand` (~943-1079) with its five new enrichment variants.
+- `run` is the top-level dispatcher at lines 1224-1340 and matches the same set of ~22 top-level commands.
+- `emit_eval` is at lines 1410-1483 and delegates to eval payload builders; it has a small artifact-writing duplication for `FranceLegi` while other eval commands use `emit_artifact`. The eval block now also contains the zone benchmark path (`eval_france_juris_zones_payload` ~2834, `france_juris_zone_retrieval_category` ~2900, `zone_benchmark_category` ~2995, `zone_benchmark_artifact` ~3019).
+- Retrieval payloads include `search_payload` (~3282), `search_with_postgres` (~3659), `compare_payload` (~3899), `fetch_payload` (~4056), `cite_payload` (~5180), `context_payload` (~5266), and `related_payload` (~3857). The new zone retrieval path lives alongside them: `ensure_zone_retrieval_readiness` (~3331) and `zone_search_payload` (~3373).
+- A new **decision-part / zone / legislation-citation enrichment** band sits between fetch and the session wrappers (~4089-5178): `DecisionPart`/`annotate_fetched_parts`/`official_decision_part`/`zone_cache_action` (decision-part fetch), `parse_visa_citation`/`collect_legislation_citations_payload`/`enrich_legislation_citations_payload`/`legifrance_code_search_body` (legislation citations), and `enrich_decision_from_judilibre*`/`normalize_judilibre_zones`/`zone_text_hash`/`cache_zone_status_with_client` (Judilibre zone enrichment). This band is the bulk of the +2,000 line growth and is a strong candidate for its own module(s).
+- Ingest dispatch is `emit_ingest` at lines 5455-5676, with `ingest_legi_archives_payload` (~5843), `ingest_juri_archives_payload` (~6209), `embed_chunks_payload` (~7718), and the new zone-unit pipeline: `enrich_zones_payload` (~7297), `build_zone_units_payload` (~7500), `embed_zone_units_payload` (~7578), plus `backfill_legi_hierarchy_payload` (~7207).
+- Embedding pool/runtime config lives ~7886-9180 (`embedding_endpoint_pool_configs`, `embed_and_insert_*_with_pool`, `loaded_embedding_config`, `model_cache_status`, endpoint status helpers).
+- JSONL serving/session dispatch lives around lines 9232-9460 (`serve_jsonl`, `run_serve`, `run_jsonl`, `dispatch_session_request`, and the `session_*_payload` wrappers, several of which are interleaved earlier near ~5299-5440 and ~9435-9460).
+- Setup/status/doctor/inspection/gates are concentrated from about line 9461 onward, including `status_payload` (~9564), `doctor_payload` (~9621), `phase1_gate_payload` (~9896), `phase2_gate_payload` (~10612), benchmark artifact validators, `zone_retrieval_status_block` (~10996), `status_index_and_ingest_health` (~11011), `ingest_health_payload` (~11112), and helper functions.
+- Private unit tests start at line 11986 and cover phase gates, Judilibre zones, run IDs, archive date normalization, citation parsing, help coverage, session contract parity, and benchmark artifact validators.
 
-The current shape is not just "large"; it also makes unrelated changes conflict. For example, adding a CLI flag, changing an eval gate, and touching ingest archive behavior all edit the same `main.rs`.
+The current shape is not just "large"; it also makes unrelated changes conflict. For example, adding a CLI flag, changing an eval gate, touching ingest archive behavior, and enriching Judilibre zones all edit the same `main.rs`. The new enrichment domain has made this worse: zone retrieval, decision-part fetch, and legislation-citation collection are now interleaved with the pre-existing retrieval and ingest code.
 
 ## Primary Goal
 
@@ -54,9 +61,21 @@ crates/jurisearch-cli/src/
   args.rs
   dispatch.rs
   output.rs
-  retrieval.rs
-  eval.rs
-  ingest.rs
+  retrieval.rs          # search/fetch/cite/context/related/compare + zone_search
+  citation.rs           # shared pure citation parser (parse_citation_target etc.) used by retrieval AND eval
+  ascii.rs              # shared case-insensitive ascii find helpers (find_ascii_ci, rfind_ascii_ci) used by retrieval AND enrichment
+  date.rs               # shared date/calendar helpers (is_valid_iso_date, days_in_month, is_leap_year, today_utc, unix_seconds) used by retrieval/status/eval
+  errors.rs             # shared ErrorObject constructors + storage/embed error mapping used by ALL command modules
+  query_support.rs      # shared retrieval-query helpers (parade_query_text, validate_retrieval_options) used by retrieval AND eval
+  legifrance_search.rs  # shared Legifrance request-body builder (sanitize_legifrance_query, legifrance_code_search_body) used by retrieval (cite --online) AND enrichment/legislation
+  enrichment/           # NEW domain (decision-part / zone / legislation citations)
+    mod.rs
+    archive.rs          # shared official_api_responses archive: archive_exchange, sha256_hex (+ archive_local_unsupported)
+    decision_part.rs    # DecisionPart, annotate_fetched_parts, official_decision_part
+    judilibre_zones.rs  # enrich_decision_from_judilibre*, normalize_judilibre_zones, cache helpers
+    legislation.rs      # parse_visa_citation, collect/enrich_legislation_citations_payload
+  eval.rs               # includes the france-juris-zones zone benchmark
+  ingest.rs             # archives + embed-chunks + enrich-zones/build-zone-units/embed-zone-units
   session.rs
   serve.rs
   status.rs
@@ -73,10 +92,33 @@ The exact names can change during implementation, but the dependency direction s
 ```text
 main -> dispatch
 dispatch -> args + command modules + output
-command modules -> shared runtime/config/output helpers
+command modules -> shared leaf helpers (citation/ascii/date/errors/query_support) + runtime/config/output
+enrichment -> enrichment/archive + official-api client + storage (decision_zones / legislation tables) + index_runtime
 status/gates -> embedding_runtime + index_runtime + storage/core
 session -> command payload functions, not shell-style emitters
 ```
+
+### Shared leaf-helper modules (cross-cutting)
+
+**Principle (the recurring failure mode this plan must avoid):** any pure or low-level helper used by **two or more** command modules goes into its own small leaf module that all callers import — it is never left behind in `main.rs`, and sibling command modules never import each other just to reach it. The command modules (`retrieval`, `eval`, `status`, `ingest`, `enrichment/*`) depend on these leaves; the leaves depend on nothing in the CLI but `args`/std/crates. The following leaves are required because the move otherwise breaks compilation or forces an avoidable sibling dependency (all verified against source 2026-06-25):
+
+- `citation.rs` — `parse_citation_target` + `ParsedCitationTarget` + their private parser closure (see Phase 3a). Callers: `cite_payload` (retrieval) and `france_juris_cite_documents` (eval).
+- `ascii.rs` — `find_ascii_ci` (`main.rs:3622`), `rfind_ascii_ci` (`main.rs:3636`). Callers: `legi_citation_routing` (retrieval) and `heuristic_dispositif` (`enrichment/decision_part`).
+- `date.rs` — the **calendar** validators `is_valid_iso_date` (`main.rs:11814`), `days_in_month` (`main.rs:11832`), `is_leap_year` (`main.rs:11842`) (distinct from the cheap `is_iso_date` at `main.rs:3608` that stays in `retrieval.rs` with `legi_citation_routing`); plus the current-date helpers `today_utc` (`main.rs:11925`) and its dependency `unix_seconds` (`main.rs:11918`). Callers: calendar validators via `validate_as_of` → `cite_payload`/`context_payload` (retrieval) and `diff_payload` (status, `main.rs:9828`); `today_utc` is passed as `unwrap_or_else(today_utc)` across eval (`main.rs:1843`, `2264`, `2962`) and retrieval (`main.rs:3414`, `3682`, `3910`, `5183`). `validate_as_of` itself (`main.rs:11269`) stays in `retrieval.rs` and imports `date.rs`.
+- `query_support.rs` — `parade_query_text` (`main.rs:11879`) and `validate_retrieval_options` (`main.rs:420`). Callers span eval (`eval_run_payload`, France-LEGI/juris/zones search) and retrieval (`search_payload`, `zone_search_payload`, `compare_payload`). (Alternatively make these `pub(crate)` in `retrieval.rs` and let `eval.rs` import them; a dedicated leaf is cleaner and avoids eval→retrieval coupling.)
+- `legifrance_search.rs` — the Legifrance **request-body** builder `legifrance_code_search_body` (`main.rs:4591`) + its dependency `sanitize_legifrance_query` (`main.rs:4569`) and the `LEGIFRANCE_QUERY_MAX_CHARS` const (`main.rs:4561`), with their tests. Cross-command: `enrich_legislation_citations_payload` (`main.rs:4776`, enrichment) **and** `cite_payload`'s `--online` path via `apply_online_citation_confirmation` → `legifrance_code_search_body` (`main.rs:11716`, retrieval). This is the CLI-side JSON shaping; it stays distinct from the official-api crate's generic `legifrance_search_exchange`. (`legifrance_response_has_results` is currently used only by `enrich_legislation_citations_payload` — `main.rs:4792`, passed as `.is_some_and(legifrance_response_has_results)` — so it stays with `enrichment/legislation.rs`.)
+- `errors.rs` — the `ErrorObject` constructors and error mapping used everywhere: `index_unavailable` (`main.rs:11232`), `dependency_unavailable` (`main.rs:11243`), `no_results` (`main.rs:11253`), `upstream_unavailable` (`main.rs:11261`), `index_not_query_ready`, `storage_error_object` (`main.rs:11846`), `embedding_error_object`/`embedding_error_object_with_context` (`main.rs:11856`). These appear across eval, retrieval, status, ingest, enrichment, and embedding paths, so they need a single shared home rather than living in any one command module. (`output.rs` would also be an acceptable host since it already owns `emit_error`; pick one and import it everywhere.)
+- `embedding_runtime.rs` — `PreparedQueryEmbedder` (`main.rs:3528`) moves here (not `retrieval.rs`): it is built by both eval search paths (`france_legi_search_documents`, `france_juris*` categories) and retrieval (`search_with_postgres`, `compare_payload`), so it belongs with the other embedding runtime that both import.
+- `enrichment/archive.rs` — `archive_exchange`, `sha256_hex`, `archive_local_unsupported` (see Phase 3b). Callers: `enrichment/legislation.rs` and `enrichment/judilibre_zones.rs`.
+
+These leaves should be extracted in (or before) the first phase that moves one of their callers, so no command-module move ever has to reach back into `main.rs`. In practice: pull the leaves out as a small early step in Phase 3a, since retrieval is the first command module to move and it touches most of them.
+
+The `enrichment/` subtree is new relative to the original plan. It collects the decision-part fetch path, Judilibre zone caching, and Legifrance legislation-citation resolution that landed since 2026-06-24. The unifying rationale is **official-API enrichment orchestration**, not one shared table:
+
+- `decision_part.rs` + `judilibre_zones.rs` share the `decision_zones` overlay — `official_decision_part` reads `decision_zones_json`; `enrich_decision_from_judilibre_with_client` writes via `upsert_decision_zones_with_client`.
+- `legislation.rs` does **not** touch `decision_zones`. `collect_legislation_citations_payload` reads archived Judilibre `/decision` responses and writes `decision_legislation_citations` / `legislation_citation_resolutions`; `enrich_legislation_citations_payload` archives Legifrance responses in `official_api_responses` and updates `legislation_citation_resolutions`. It shares the official-API client and the response archive, not the zone cache.
+
+Grouping them keeps the official-API enrichment coupling local instead of smeared across `retrieval` and `ingest`. **Resolved (codex, 2026-06-25):** keep `fetch_payload`/`emit_fetch` in `retrieval.rs` and the decision-part/zone helpers under `enrichment/`. `fetch_payload` is generic fetch until the optional `--part` branch (it parses `DecisionPart`, opens the index, checks `QueryReadinessGate::Fetch`, calls `fetch_documents_json`, handles no-results, and only then calls `annotate_fetched_parts`); the part path is a small separable overlay, so moving the whole fetch path under `enrichment/` would drag generic fetch logic along for no benefit. One caveat: `fetch_payload` calls `DecisionPart::parse` directly (`main.rs:4057`), so `enrichment/decision_part.rs` must expose a small public parsing surface (`DecisionPart` + its parse) for `retrieval.rs` to use.
 
 Do not make `jurisearch-cli` a library crate just to satisfy tests in the first pass. Keep private unit tests next to the moved code with `#[cfg(test)]` modules. A public CLI library can be considered later if downstream reuse appears.
 
@@ -103,12 +145,12 @@ Proposed changes:
 1. Move parser and enum definitions from the top of `main.rs` into `args.rs`:
    - `Cli`
    - `Command`
-   - `SearchArgs`, `FetchArgs`, `CiteArgs`, `RelatedArgs`, `ContextArgs`, `CompareArgs`
+   - `SearchArgs`, `FetchArgs`, `CiteArgs`, `RelatedArgs`, `ContextArgs`, `CompareArgs`, `QueryArgs`
    - `StatusArgs`, `InspectArgs`, `VersionsArgs`, `DiffArgs`
    - `JsonlArgs`, `ServeArgs`, `SyncArgs`
-   - `ModelCommand`, `EvalCommand`, `EvalSubcommand`, `IngestCommand`, `IngestSubcommand`
-   - CLI value enums such as `CliKind`, `CliSearchMode`, `CliOutputFormat`, `CliGroupBy`, archive/source enums
-   - session arg structs only if they remain tightly coupled to clap defaults; otherwise move them with `session.rs` in Phase 2.
+   - `ModelCommand`/`ModelSubcommand`, `EvalCommand`, `EvalSubcommand` (incl. `EvalFranceJurisZonesArgs`, `EvalTuneArgs`, `EvalRunArgs`, `EvalFranceLegiArgs`, `EvalFranceJurisArgs`, `EvalPhase1Args`), `IngestCommand`, `IngestSubcommand` (now 10 variants incl. the five new `EnrichZones`, `BuildZoneUnits`, `EmbedZoneUnits`, `CollectLegislationCitations`, `EnrichLegislationCitations`), `HelpCommand`/`HelpSubcommand`
+   - CLI value enums such as `CliKind`, `CliSearchMode`, `CliOutputFormat`, `CliGroupBy`, `CliZone`, `CliEnrichZoneOrder`, archive/source enums (`CliArchiveSource`, `CliJuriSource`), and their `From`/`impl` conversions, plus the shared `default_*` functions (`default_top_k`, `default_group_by`, `default_related_*`, `default_compare_kind`, `default_cli_kind`, `default_search_mode`, `default_output_format`)
+   - **Do NOT** move the `Session*Args` structs here. **Resolved (codex, 2026-06-25):** they are serde request DTOs (derive `Deserialize`, use `#[serde(default = ...)]`, no `Args`/`#[arg(...)]`; `main.rs:474`) consumed only by the session wrappers (e.g. `session_search_payload` `from_value::<SessionSearchArgs>` → builds `SearchArgs`, `main.rs:5299`), not clap parsers — so they move with `session.rs` in Phase 2. Keep the shared enums/`default_*` fns above in `args.rs` and import them into `session.rs`; don't relocate the DTOs just to avoid the import.
 2. Move output helpers into `output.rs`:
    - `write_json`
    - `write_session_response`
@@ -116,7 +158,7 @@ Proposed changes:
    - `emit_artifact`
 3. Move `run` into `dispatch.rs`.
 4. Leave payload functions in `main.rs` during this phase if needed; import them from `dispatch.rs` as `crate::search_payload`, etc. This creates a compilable intermediate step before deeper extraction.
-5. Replace the special-case artifact write in `emit_eval` for France-LEGI with `emit_artifact(response, out_path)` if tests confirm byte-identical behavior.
+5. Replace the special-case artifact write in `emit_eval` for France-LEGI with `emit_artifact(response, out_path)`. **Confirmed safe (codex, 2026-06-25):** both paths pretty-serialize the same `serde_json::Value`, create the parent dir, write `format!("{rendered}\n")`, then `write_json(&response)` to stdout — byte-identical for newline, pretty-print, file-vs-stdout, and object ordering (`emit_eval` France-LEGI branch `main.rs:1416`; `emit_artifact` `main.rs:1484`; `write_json` uses `to_writer_pretty` + one newline `main.rs:11968`). No test currently pins this writer branch. First add a small unit test on a factored file-render helper (given a `Value` + `out`, file == `to_string_pretty(value) + "\n"` and stdout == the same), then do the swap — an end-to-end `eval france-legi --out` test would need a ready index and is more brittle.
 
 Expected result:
 
@@ -135,9 +177,10 @@ Target: isolate the JSONL protocol from one-shot command dispatch.
 Move to `session.rs`:
 
 - `run_jsonl`
+- `SessionRequest` / `SessionResponse`
 - `dispatch_session_request`
-- session-specific deserialization structs
-- `session_*_payload` wrappers
+- the session DTO structs (deferred from Phase 1): `SessionSearchArgs`, `SessionFetchArgs`, `SessionCiteArgs`, `SessionContextArgs`, `SessionRelatedArgs`, `SessionCompareArgs`, `SessionStatusArgs`, `SessionEvalPhase1Args`, `SessionModelFetchArgs`, `SessionDoctorArgs`, `SessionStatsArgs`, `SessionInspectArgs`, `SessionVersionsArgs`, `SessionDiffArgs` — they import the shared enums/`default_*` fns from `args.rs`
+- `session_*_payload` wrappers (`session_search_payload`, `session_fetch_payload`, … `session_diff_payload`)
 
 Move to `serve.rs`:
 
@@ -154,24 +197,33 @@ Validation:
 - `cargo test -p jurisearch-cli every_command_and_arg_has_help`
 - Full `cargo test -p jurisearch-cli`
 
-## Phase 3: Retrieval Command Split
+## Phase 3a: Retrieval Command Split (fetch excluded)
 
-Target: move high-frequency query commands out of the CLI monolith.
+Target: move the high-frequency query commands that do **not** depend on the enrichment band out of the CLI monolith. `fetch_payload` is deliberately deferred to Phase 3c because it calls into the decision-part/Judilibre-zone helpers extracted in Phase 3b — moving `fetch` first would drag that whole band into `retrieval.rs` or force a second large move right after.
 
 Move to `retrieval.rs`:
 
 - `search_payload`
 - `search_with_postgres`
+- `zone_search_payload` and `ensure_zone_retrieval_readiness` (the parallel zone retrieval index path)
 - `compare_payload`
-- `fetch_payload`
 - `cite_payload`
 - `context_payload`
 - `related_payload`
 - `expand_payload`
-- command emitters: `emit_search`, `emit_fetch`, `emit_cite`, `emit_context`, `emit_related`, `emit_compare`, `emit_expand`
-- retrieval-specific validation helpers such as cursor/date/candidate helpers if only used here
+- command emitters: `emit_search`, `emit_cite`, `emit_context`, `emit_related`, `emit_compare`, `emit_expand`
+- the citation-routing helpers used by `search_with_postgres`: `legi_citation_routing` + `LegiCitationRouting` (`main.rs:3578`/`3564`) and `is_iso_date` (`main.rs:3608`)
+- retrieval-specific validation helpers such as cursor/date/candidate helpers if only used here (`parse_search_cursor`, `search_pagination_value`, `validate_cursor_score`)
+- cite-only state helpers (`classify_citation_state`, `annotate_valid_matches`) — both have `cite_payload` as their only caller
 
-Keep shared index-opening and query-readiness helpers in `index_runtime.rs` rather than letting retrieval own them.
+First extract the shared leaf-helper modules (see "Shared leaf-helper modules" above) as a small mechanical step, because `retrieval` is the first command module to move and it touches most of them. Concretely, before moving the payloads create: `ascii.rs`, `date.rs`, `query_support.rs`, `errors.rs`, `citation.rs`, and `legifrance_search.rs`; and move `PreparedQueryEmbedder` into `embedding_runtime.rs`. Notes on the trickier ones:
+
+- `ascii.rs`: `find_ascii_ci` (`main.rs:3622`) + `rfind_ascii_ci` (`main.rs:3636`). `rfind_ascii_ci` is cross-module — called by `legi_citation_routing` (`main.rs:3594`, retrieval) **and** `heuristic_dispositif` (`main.rs:5150`, `enrichment/decision_part`). Move the pair together (`rfind_ascii_ci`'s doc references `find_ascii_ci`).
+- `citation.rs`: do **not** move `parse_citation_target` / `ParsedCitationTarget` into `retrieval.rs` — it is shared by the eval path too (`france_juris_cite_documents`, `main.rs:2709`, as well as `cite_payload`, `main.rs:5180`). Move the full pure-parser closure with it (each helper *with its private dependencies*): `parse_citation_target` → `looks_like_nor`; `parse_article_number` → `article_number_token`; `detect_code_hint` → `contains_normalized_phrase`; plus `normalize_citation_text`, `parse_pourvoi`, `extract_known_source_uid`.
+- `date.rs`: the calendar validators `is_valid_iso_date` + `days_in_month` + `is_leap_year` (shared retrieval+status); `validate_as_of` stays in `retrieval.rs` and imports them. The cheap `is_iso_date` (`main.rs:3608`) stays in `retrieval.rs` with `legi_citation_routing`.
+- `query_support.rs`: `parade_query_text` + `validate_retrieval_options` (shared retrieval+eval).
+
+Keep shared index-opening and query-readiness helpers in `index_runtime.rs` rather than letting retrieval own them. `parse_visa_citation` belongs with the legislation enrichment band (Phase 3b), not here.
 
 Possible follow-up after the move:
 
@@ -180,7 +232,57 @@ Possible follow-up after the move:
 Validation:
 
 - `cargo test -p jurisearch-cli`
-- Any available focused CLI contract tests for search/fetch/cite/context/related/compare.
+- Any available focused CLI contract tests for search/cite/context/related/compare and the zone search path.
+
+## Phase 3b: Enrichment Domain Split (new)
+
+Target: extract the decision-part / Judilibre-zone / legislation-citation enrichment band (~4089-5178 plus the ingest-side payloads in Phase 5) into a cohesive `enrichment/` subtree, because it is shared by both the read path (`fetch --part --online`, Phase 3c) and the ingest path (`enrich-zones`, `collect/enrich-legislation-citations`, Phase 5). This phase runs **before** Phase 3c so `fetch_payload` and the ingest commands both move onto one shared copy of the zone-cache/citation logic.
+
+Move to `enrichment/archive.rs` (shared `official_api_responses` archive helpers — assign these explicitly so submodules don't call back into `main.rs` or grow a sibling dependency):
+
+- `archive_exchange` (`main.rs:4332`) — used by **both** `enrich_legislation_citations_payload` (`main.rs:4778`) and `enrich_decision_from_judilibre_with_client` (Judilibre `/search` + `/decision`, `main.rs:4892`, `main.rs:4908`)
+- `sha256_hex` (`main.rs:4321`) — used by `archive_exchange` (`main.rs:4341`) and `archive_local_unsupported` (`main.rs:4398`)
+- `archive_local_unsupported` (`main.rs:4372`) — Judilibre-only (called at `main.rs:4878`); keep it here next to the other archive helpers (or in `judilibre_zones.rs`), but it depends on `sha256_hex` so do not separate the two
+
+Move to `enrichment/decision_part.rs`:
+
+- `DecisionPart`, `ExtractedPart`, `annotate_fetched_parts`, `official_decision_part`, `extract_decision_part`, `heuristic_dispositif`, `heuristic_visa`, `collect_decision_summary`
+- (depends on `ascii::rfind_ascii_ci` from Phase 3a via `heuristic_dispositif` — import it, do not re-copy)
+
+Move to `enrichment/judilibre_zones.rs`:
+
+- `is_judilibre_cassation_source`, `judilibre_zone_key`, `ZoneCacheAction`, `zone_cache_action`, `part_block_from_cached_zones`
+- `enrich_decision_from_judilibre`, `enrich_decision_from_judilibre_with_client`, `find_matching_judilibre_id`, `normalize_judilibre_zones`, `zone_text_hash`, `cache_zone_status_with_client`
+- `env_i64` (`main.rs:5086`) — single-module helper, used only by the zone-cache TTL handling here
+
+Move to `enrichment/legislation.rs`:
+
+- `ParsedVisaCitation`, `parse_visa_citation`, `legislation_citation_key`, `normalize_article_number`, `normalize_code_name`, `split_article_code`
+- `legifrance_response_has_results`, `extract_first_href`, `strip_html_tags`
+- `find_ci` (`main.rs:4422`) — single-module helper, used only by `extract_first_href` and `split_article_code` here
+- `collect_legislation_citations_payload`, `enrich_legislation_citations_payload`
+- **Not here:** `legifrance_code_search_body` / `sanitize_legifrance_query` / `LEGIFRANCE_QUERY_MAX_CHARS` move to the shared `legifrance_search.rs` leaf (Phase 3a) because `cite_payload`'s `--online` path also uses them; this module imports that leaf rather than owning the request-body builder.
+
+Storage coupling differs by submodule and the split should respect it: `decision_part.rs` + `judilibre_zones.rs` read/write the `decision_zones` overlay (`decision_zones_json`, `upsert_decision_zones_with_client`); `legislation.rs` does not touch `decision_zones` at all — it reads archived Judilibre `/decision` responses and writes `decision_legislation_citations` / `legislation_citation_resolutions`. What `legislation.rs` and `judilibre_zones.rs` **do** share is the durable `official_api_responses` archive — both persist their raw upstream exchanges through `archive_exchange` — which is exactly why it (with `sha256_hex`) is factored into `enrichment/archive.rs` rather than duplicated. Keep the official-API client construction and the storage calls behind the existing storage/`jurisearch-official-api` APIs; this module is orchestration only. Do not move it into a library crate.
+
+Validation:
+
+- `cargo test -p jurisearch-cli`
+- Focused contract tests for `ingest enrich-zones` and `ingest collect/enrich-legislation-citations` if fixtures are available.
+
+## Phase 3c: Fetch Command Split
+
+Target: move `fetch_payload` and `emit_fetch` into `retrieval.rs` now that the enrichment helpers they reach live in `enrichment/` (Phase 3b). `fetch_payload` directly uses `annotate_fetched_parts`, which in turn uses `official_decision_part`, `zone_cache_action`, and `part_block_from_cached_zones`. `fetch_payload` calls across to the enrichment module instead of owning the decision-part/zone-cache logic, so the read path and the ingest-side enrichment share one implementation.
+
+Move to `retrieval.rs`:
+
+- `fetch_payload`
+- `emit_fetch`
+
+Validation:
+
+- `cargo test -p jurisearch-cli`
+- Focused CLI contract tests for `fetch`, including `fetch --part`/`--online`.
 
 ## Phase 4: Status, Runtime, and Gate Split
 
@@ -193,6 +295,8 @@ Move to `embedding_runtime.rs`:
 - model-cache helpers
 - endpoint status/probe helpers
 - embedding pool config/worker helpers
+- the embedding-pool driver and its thin per-table wrappers: `embed_and_insert_with_pool` (generic driver), `embed_and_insert_chunks_with_pool`, and `embed_and_insert_zone_units_with_pool` (the zone-unit twin), plus the associated pool structs (`EmbeddingEndpointPoolConfig`, `EmbeddingPoolRun`, `EmbeddingBatchWork`, etc.). These are identical embedding concerns; keep them together here, not split across ingest. The `embed_*_payload` orchestrators stay in `ingest.rs` and call these.
+- `PreparedQueryEmbedder` (`main.rs:3528`) — the query-time embedder built by both retrieval (`search_with_postgres`, `compare_payload`) and eval search paths; extract it here in Phase 3a (not `retrieval.rs`) since both command modules import it. (Listed under Phase 4's module but pulled early as a shared leaf per Phase 3a.)
 - `ensure_embedding_runtime_ready`
 
 Move to `index_runtime.rs`:
@@ -202,8 +306,8 @@ Move to `index_runtime.rs`:
 - `require_existing_index_dir`
 - `require_configured_index_dir`
 - `configured_index_dir`
-- `ensure_query_readiness`
-- storage/embedding error mapping if it is shared across command modules
+- `ensure_query_readiness` (and `QueryReadinessGate` / `index_not_query_ready`)
+- storage/embedding error mapping (`storage_error_object`, `embedding_error_object*`) is **not** owned here — it lives in the shared `errors.rs` leaf; `index_runtime.rs` imports it like every other command module
 
 Move to `status.rs`:
 
@@ -217,6 +321,7 @@ Move to `status.rs`:
 - `diff_payload`
 - `status_index_and_ingest_health`
 - `ingest_health_payload`
+- `zone_retrieval_status_block` (new; reports the parallel zone-unit index health inside `status`)
 
 Move to `gates/phase1.rs` and `gates/phase2.rs`:
 
@@ -255,25 +360,35 @@ Move to `ingest.rs`:
   - `select_archives_to_process`
 - `ingest_legi_archives_payload`
 - `ingest_juri_archives_payload`
-- quarantine helpers
+- per-member processing helpers (`process_legi_archive_member*`, `process_juri_archive_member`, `record_*_member*`, batch flush helpers)
+- quarantine helpers (`maybe_quarantine_payload`, `sanitize_quarantine_component`, parse-error classifiers)
 - `embed_chunks_payload`
 - `backfill_legi_hierarchy_payload`
-- ingest run-id/date/source filter helpers
+- ingest run-id/date/source filter helpers (`default_legi_run_id`, `default_juri_run_id`, `unique_run_suffix`, `normalize_since`)
+
+Move the new zone-unit pipeline to `ingest.rs` as well (it is ingest-side orchestration, even though it consumes the `enrichment/` helpers):
+
+- `enrich_zones_payload`, `enrich_zone_page_concurrently`, `worker_outcomes_or_errors`, `ZoneEnrichOutcome` (`main.rs:7283`, local to these `enrich-zones` helpers) (the `enrich-zones` Judilibre backfill)
+- `derive_zone_unit_rows`, `build_zone_units_payload` (the `build-zone-units` derivation)
+- `embed_zone_units_payload` (the `embed-zone-units` orchestrator). It calls `embed_and_insert_zone_units_with_pool`, which moves to `embedding_runtime.rs` in Phase 4 alongside its `embed_and_insert_chunks_with_pool` twin and the shared pool driver — do **not** move the `*_with_pool` wrapper into ingest, or embedding runtime would gain a backward dependency on ingest.
+
+The legislation-citation collection/enrichment commands (`collect-legislation-citations`, `enrich-legislation-citations`) dispatch from `emit_ingest`, but their payload bodies should live in `enrichment/legislation.rs` (Phase 3b). Keep `emit_ingest` thin: match the subcommand, call across to the enrichment module.
 
 Dependency caution:
 
-This module will need both parser crates and storage projection/accounting imports. Keep it in the CLI crate first because it is orchestration: it converts CLI flags to parser/storage calls and JSON artifacts. Do not move it into `jurisearch-ingest` unless a non-CLI caller needs the same orchestration API.
+This module will need both parser crates and storage projection/accounting imports, plus (for the zone pipeline) the `enrichment/` helpers and the official-API client. Keep it in the CLI crate first because it is orchestration: it converts CLI flags to parser/storage/enrichment calls and JSON artifacts. Do not move it into `jurisearch-ingest` unless a non-CLI caller needs the same orchestration API.
 
 Validation:
 
 - `cargo test -p jurisearch-cli`
 - `cargo test -p jurisearch-ingest`
 - `cargo test -p jurisearch-storage ingest_accounting`
+- `cargo test -p jurisearch-storage zone_units`
 - Archive subset tests if local fixtures are available.
 
 ## Phase 6: Split CLI Contract Tests
 
-Target: reduce `crates/jurisearch-cli/tests/cli_contract.rs` from 4,954 lines into domain-focused integration suites.
+Target: reduce `crates/jurisearch-cli/tests/cli_contract.rs` from 5,049 lines into domain-focused integration suites.
 
 Suggested layout:
 
@@ -398,17 +513,20 @@ This is lower urgency because the existing file is linear and cohesive, but repl
 
 ### `crates/jurisearch-official-api/src/lib.rs`
 
+Priority: this is now the **highest-priority secondary target** (1,418 lines, up from 1,101 on 2026-06-24) because the legislation-citation enrichment work added Legifrance request/response surface on top of the existing PISTE/Judilibre client. Consider doing it right after the CLI phases rather than last.
+
 Natural split:
 
 ```text
 config.rs
-client.rs
+client.rs        # PISTE/Judilibre
+legifrance.rs    # Legifrance OAuth/search EXCHANGE client (generic HTTP/token), e.g. PisteClient::legifrance_search_exchange
 auth.rs
 retry.rs
 error.rs
 ```
 
-This should be straightforward because the public API is already centered on `OfficialApiConfig`, `PisteClient`, `RetryPolicy`, and `OfficialApiError`.
+This should be straightforward because the public API is already centered on `OfficialApiConfig`, `PisteClient`, `RetryPolicy`, and `OfficialApiError`. Scope `legifrance.rs` in this crate to the **generic** exchange surface only: the crate currently owns `PisteClient::legifrance_search_exchange` (token + HTTP). The citation-specific request body and response interpretation — `legifrance_code_search_body`, `sanitize_legifrance_query`, `legifrance_response_has_results` — currently live in the CLI (`crates/jurisearch-cli/src/main.rs`) and should stay there in `enrichment/legislation.rs` unless a non-CLI caller needs them. Do not duplicate the request body in both crates.
 
 ### `crates/jurisearch-embed/src/lib.rs`
 
@@ -426,7 +544,22 @@ Do this after CLI extraction because `main.rs` currently has substantial embeddi
 
 ### `crates/jurisearch-core/src/schema.rs`
 
-This file is large but likely generated/compiled-contract style. Prefer splitting only if it is hand-maintained and frequently edited. A better long-term move may be schema fragments plus a deterministic assembly test.
+**Resolved (codex, 2026-06-25): split it — after the CLI move, not before.** The original draft guessed this was generated/compiled-contract style; it is not. `compiled_schema()` is a hand-maintained literal `json!({ ... })` tree (`schema.rs:5`), and it is high-churn — 36 commits touched it since 2026-06-20 (CLI milestones, gates, eval artifacts, zone retrieval). High churn + hand-maintained is exactly the profile worth splitting. It is still secondary to the 13k-line CLI module, so sequence it after the CLI extraction.
+
+Suggested file-level fragmentation (keep `compiled_schema()` assembling one `serde_json::Map` in an explicit order):
+
+```text
+schema/
+  mod.rs       # compiled_schema(), root assembly, exit_codes, error_object, session_envelope, common_enums
+  search.rs    # search/compare/fetch/cite/context/related/expand
+  admin.rs     # status/model/setup/doctor/stats/inspect/versions/diff/sync/help/serve/ingest
+  eval.rs      # phase/eval/tune/France-LEGI/France-juris benchmark schemas
+  gates.rs     # Phase 1/Phase 2 gate + benchmark gate support schemas
+```
+
+Two hard constraints from codex:
+- **Golden equality test first.** Before splitting, capture the current `serde_json::to_string_pretty(&compiled_schema())` as a golden fixture and add a test asserting the split output is byte-identical. Keep the existing `every_command_schema_name_resolves` invariant (`schema.rs:1042`) too.
+- **`$ref` paths are global** (`#/schemas/...`). Split at the file level only — do **not** nest domain schemas under separate sub-objects, or every `$ref` would have to be rewritten. The emitted JSON shape must stay unchanged.
 
 ## Visibility and API Policy
 
@@ -441,25 +574,32 @@ This file is large but likely generated/compiled-contract style. Prefer splittin
 1. `cli: split args and output helpers from main`
 2. `cli: move dispatcher into dispatch module`
 3. `cli: move jsonl session and serve protocol modules`
-4. `cli: move retrieval command payloads`
-5. `cli: move status/runtime helpers`
-6. `cli: move phase gates and artifact validators`
-7. `cli: move ingest command orchestration`
-8. `cli: split integration contract tests`
-9. `ingest: split legi parser internals`
-10. `ingest: split juri parser internals`
-11. `storage: split retrieval SQL emitters`
-12. `storage: split projection write paths`
+4. `cli: extract shared leaf helpers (citation/ascii/date/errors/query_support + PreparedQueryEmbedder)` (Phase 3a prerequisite)
+5. `cli: move retrieval command payloads except fetch (incl. zone_search)` (Phase 3a)
+6. `cli: extract enrichment domain (decision-part / judilibre-zones / legislation)` (Phase 3b)
+7. `cli: move fetch command onto enrichment helpers` (Phase 3c)
+8. `cli: move status/runtime helpers (incl. zone_retrieval_status_block)`
+9. `cli: move phase gates and artifact validators`
+10. `cli: move ingest command orchestration (incl. zone-unit pipeline)`
+11. `cli: split integration contract tests`
+12. `official-api: split piste/legifrance/auth/retry/error` (bumped earlier; highest secondary)
+13. `ingest: split legi parser internals`
+14. `ingest: split juri parser internals`
+15. `storage: split retrieval SQL emitters`
+16. `storage: split projection write paths`
+17. `core: split schema.rs into schema/ fragments (golden byte-identical test)`
 
-Each source-split commit should compile independently and should avoid semantic changes except the small `emit_artifact` duplication cleanup if done with a focused test.
+Each source-split commit should compile independently and should avoid semantic changes except the small `emit_artifact` duplication cleanup if done with a focused test. Ordering notes: the shared leaf helpers (commit 4) come out **first** so no later command-module move has to reach back into `main.rs` for a cross-cutting helper; the enrichment extraction (commit 6 / Phase 3b) lands **before** the `fetch` move (commit 7 / Phase 3c) and the ingest move (commit 10), so both the read path (`fetch --part`) and the ingest path (`enrich-zones`, legislation citations) call into one shared module instead of duplicating the zone-cache logic. The non-fetch retrieval commands (commit 5 / Phase 3a) have no enrichment dependency and can move once the leaves exist.
 
 ## Risk Areas
 
 - Gate truthfulness: Phase 1/2 status gates validate artifacts, floors, evidence, and routing claims. Move tests with the exact gate functions.
 - Session parity: session commands are intended to match one-shot command payloads where supported. Keep session wrappers close to payload builders or add explicit tests when moving.
-- Artifact output: `eval france-legi`, `eval france-juris`, `eval run`, and `eval tune` all print and optionally write JSON artifacts. Any output-helper consolidation must preserve newline and pretty-print behavior.
+- Artifact output: `eval france-legi`, `eval france-juris`, `eval france-juris-zones`, `eval run`, and `eval tune` all print and optionally write JSON artifacts. Any output-helper consolidation must preserve newline and pretty-print behavior. The zone benchmark (`zone_benchmark_artifact`) is a newer addition — keep its artifact validator next to it.
+- Enrichment coupling (new): the decision-part fetch path and Judilibre zone caching share the `decision_zones` storage overlay and the official-API client; the Legifrance legislation resolution shares the official-API client and response archive (`official_api_responses` + `legislation_citation*` tables) but **not** `decision_zones`. The decision-part/zone helpers straddle read (`fetch`) and ingest (`enrich-zones`) paths, so extract the shared band into `enrichment/` (Phase 3b) **before** moving `fetch` (Phase 3c) and the ingest commands (Phase 5), or the zone-cache logic will be split or duplicated across modules. Preserve the cached `decision_zones` overlay semantics — see the standing rule to keep that cache on promotion.
+- Network/idempotency: `enrich-zones` and `enrich-legislation-citations` make rate-limited PISTE/Legifrance calls and are resumable; moving them must not change run-id derivation, since-filter handling, concurrency bounds, or the archived-response read path (`official_api_responses`).
 - Ingest accounting: ingest commands coordinate storage run lifecycle, manifest updates, member status, quarantine, and query-readiness invalidation. Avoid moving storage transaction ownership across crate boundaries in the first refactor.
-- Dirty working tree: rebase or commit existing local edits before a large move, otherwise mechanical moves will be harder to review.
+- Working tree (2026-06-25): apart from this plan document, the source tree is clean, so once this plan edit is committed the large moves can start from `HEAD`. Re-confirm cleanliness before each phase so mechanical moves stay reviewable.
 
 ## Definition of Done
 
