@@ -1,0 +1,2822 @@
+{
+  "commands": [
+    {
+      "name": "search",
+      "request_schema": "SearchRequest",
+      "response_schema": "SearchResponse",
+      "status": "implemented",
+      "summary": "Return compact ranked candidates for a legal research query."
+    },
+    {
+      "name": "compare",
+      "request_schema": "CompareRequest",
+      "response_schema": "CompareResponse",
+      "status": "implemented",
+      "summary": "Compare bm25/dense/hybrid retrievers for one query: aligned top-k, pooled union, and overlap."
+    },
+    {
+      "name": "fetch",
+      "request_schema": "FetchRequest",
+      "response_schema": "FetchResponse",
+      "status": "implemented",
+      "summary": "Return full source text for selected stable IDs."
+    },
+    {
+      "name": "cite",
+      "request_schema": "CiteRequest",
+      "response_schema": "CiteResponse",
+      "status": "implemented",
+      "summary": "Verify citations and identifiers with explicit citation states."
+    },
+    {
+      "name": "related",
+      "request_schema": "RelatedRequest",
+      "response_schema": "RelatedResponse",
+      "status": "implemented",
+      "summary": "Return depth-1 graph neighbours (cites / cited_by / temporal) with authority signals."
+    },
+    {
+      "name": "context",
+      "request_schema": "ContextRequest",
+      "response_schema": "ContextResponse",
+      "status": "implemented",
+      "summary": "Return structural neighbourhood: ancestry, siblings, or decision zones."
+    },
+    {
+      "name": "expand",
+      "request_schema": "ExpandRequest",
+      "response_schema": "ExpandResponse",
+      "status": "implemented",
+      "summary": "Return curated legal-vocabulary expansions for a query."
+    },
+    {
+      "name": "status",
+      "request_schema": "StatusRequest",
+      "response_schema": "StatusResponse",
+      "status": "implemented",
+      "summary": "Report corpus coverage, freshness, model fingerprints, and index health."
+    },
+    {
+      "name": "model fetch",
+      "request_schema": "ModelFetchRequest",
+      "response_schema": "ModelFetchResponse",
+      "status": "implemented",
+      "summary": "Explicitly fetch local in-process models; never implicit during search."
+    },
+    {
+      "name": "setup",
+      "request_schema": "SetupRequest",
+      "response_schema": "SetupResponse",
+      "status": "implemented",
+      "summary": "Check or prepare local configuration and optional model caches."
+    },
+    {
+      "name": "doctor",
+      "request_schema": "DoctorRequest",
+      "response_schema": "DoctorResponse",
+      "status": "implemented",
+      "summary": "Non-owning dependency preflight (embedding, models, PG runtime, extensions, index dir); does not start Postgres."
+    },
+    {
+      "name": "stats",
+      "request_schema": "StatsRequest",
+      "response_schema": "StatsResponse",
+      "status": "implemented",
+      "summary": "Report corpus/graph/embedding counts (replaces ad-hoc psql for introspection)."
+    },
+    {
+      "name": "inspect",
+      "request_schema": "InspectRequest",
+      "response_schema": "InspectResponse",
+      "status": "implemented",
+      "summary": "Return the raw canonical record for one document id (full row, chunk count, edge count)."
+    },
+    {
+      "name": "versions",
+      "request_schema": "VersionsRequest",
+      "response_schema": "VersionsResponse",
+      "status": "implemented",
+      "summary": "List an article's version timeline (every member of its version family by validity start)."
+    },
+    {
+      "name": "diff",
+      "request_schema": "DiffRequest",
+      "response_schema": "DiffResponse",
+      "status": "implemented",
+      "summary": "Compare the article versions in force on two dates (which version, and whether it changed)."
+    },
+    {
+      "name": "session --jsonl",
+      "request_schema": "SessionRequest",
+      "response_schema": "SessionResponse",
+      "status": "implemented",
+      "summary": "Warm JSONL subprocess protocol for order-preserving agent workflows."
+    },
+    {
+      "name": "batch --jsonl",
+      "request_schema": "SessionRequest",
+      "response_schema": "SessionResponse",
+      "status": "implemented",
+      "summary": "Finite JSONL protocol for eval and bulk verification runs."
+    },
+    {
+      "name": "serve",
+      "request_schema": "ServeRequest",
+      "response_schema": "ServeResponse",
+      "status": "implemented",
+      "summary": "Serve the JSONL session protocol over a TCP or Unix socket (single-client, sequential)."
+    },
+    {
+      "name": "ingest",
+      "request_schema": "IngestRequest",
+      "response_schema": "IngestResponse",
+      "status": "implemented",
+      "summary": "Build or inspect official-source ingestion plans and canonical records."
+    },
+    {
+      "name": "eval phase1",
+      "request_schema": "EvalPhase1Request",
+      "response_schema": "EvalPhase1Response",
+      "status": "implemented",
+      "summary": "List or execute built-in Phase 1 LEGI retrieval evaluation fixtures."
+    },
+    {
+      "name": "eval france-legi",
+      "request_schema": "EvalFranceLegiRequest",
+      "response_schema": "EvalFranceLegiResponse",
+      "status": "implemented",
+      "summary": "Run the France-LEGI official-evidence benchmark and emit a phase1_france_legi_benchmark artifact (one-shot CLI only)."
+    },
+    {
+      "name": "eval run",
+      "request_schema": "EvalRunRequest",
+      "response_schema": "EvalRunResponse",
+      "status": "implemented",
+      "summary": "Run a custom retrieval eval (your questions + qrels or external judge) and emit an eval_run artifact (one-shot CLI only)."
+    },
+    {
+      "name": "eval tune",
+      "request_schema": "EvalTuneRequest",
+      "response_schema": "EvalTuneResponse",
+      "status": "implemented",
+      "summary": "Sweep a hybrid retrieval parameter (rrf weights / probes) against a fixture and report the metric-maximizing value (one-shot CLI only)."
+    },
+    {
+      "name": "sync",
+      "request_schema": "SyncRequest",
+      "response_schema": "SyncResponse",
+      "status": "stub",
+      "summary": "Synchronize official sources through deltas or transactional histories."
+    },
+    {
+      "name": "help agent",
+      "request_schema": "HelpAgentRequest",
+      "response_schema": "HelpAgentResponse",
+      "status": "implemented",
+      "summary": "Print the compiled agent-facing contract."
+    },
+    {
+      "name": "help schema --json",
+      "request_schema": "HelpSchemaRequest",
+      "response_schema": "HelpSchemaResponse",
+      "status": "implemented",
+      "summary": "Print machine-readable schemas for command requests, responses, and errors."
+    }
+  ],
+  "common_enums": {
+    "citation_state": [
+      "exact",
+      "normalized",
+      "ambiguous",
+      "stale_version",
+      "not_found",
+      "source_unavailable"
+    ],
+    "kind": {
+      "description": "CLI kind `code` maps to result kind `article`.",
+      "values": [
+        "code",
+        "decision",
+        "all"
+      ]
+    },
+    "response_format": [
+      "concise",
+      "detailed"
+    ],
+    "search_mode": {
+      "description": "Retrieval ablation mode. `hybrid` fuses BM25 and dense candidates.",
+      "values": [
+        "hybrid",
+        "bm25",
+        "dense"
+      ]
+    }
+  },
+  "error_object": {
+    "properties": {
+      "code": {
+        "enum": [
+          "bad_input",
+          "no_results",
+          "index_unavailable",
+          "dependency_unavailable",
+          "upstream",
+          "not_implemented",
+          "internal"
+        ],
+        "type": "string"
+      },
+      "message": {
+        "type": "string"
+      },
+      "suggestions": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "code",
+      "message"
+    ],
+    "type": "object"
+  },
+  "exit_codes": {
+    "0": "success",
+    "2": "user input, no-results, strict citation, or validation failure",
+    "3": "local index/configuration unavailable",
+    "4": "local dependency or implementation unavailable",
+    "5": "upstream official API or provider failure"
+  },
+  "schema_version": "1",
+  "schemas": {
+    "CiteRequest": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "cite": {
+          "type": "string"
+        },
+        "online": {
+          "default": false,
+          "type": "boolean"
+        },
+        "strict": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "cite"
+      ]
+    },
+    "CiteResponse": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "input_class": {
+          "enum": [
+            "document_id",
+            "legiarti",
+            "legitext",
+            "legiscta",
+            "nor",
+            "free_text_article",
+            "malformed"
+          ]
+        },
+        "local_state": {
+          "enum": [
+            "exact",
+            "normalized",
+            "ambiguous",
+            "stale_version",
+            "not_found",
+            "source_unavailable"
+          ]
+        },
+        "match_count": {
+          "type": "integer"
+        },
+        "matches": {
+          "items": {
+            "properties": {
+              "citation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "document_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "exact_identifier_match": {
+                "type": "boolean"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "metadata_key": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "nor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "parent_source_uid": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "root_kind": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source": {
+                "type": "string"
+              },
+              "source_payload_hash": {
+                "type": "string"
+              },
+              "source_uid": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "source_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "target_type": {
+                "enum": [
+                  "document",
+                  "metadata_root"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "valid_on_as_of": {
+                "type": "boolean"
+              },
+              "validity": {
+                "type": "object"
+              },
+              "version_group": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "normalized": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "online": {
+          "type": "object"
+        },
+        "query": {
+          "type": "string"
+        },
+        "requested_as_of": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "exact",
+            "normalized",
+            "ambiguous",
+            "stale_version",
+            "not_found",
+            "source_unavailable"
+          ]
+        },
+        "strict": {
+          "type": "boolean"
+        },
+        "valid_match_count": {
+          "type": "integer"
+        }
+      }
+    },
+    "CompareRequest": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "kind": {
+          "default": "code",
+          "enum": [
+            "code",
+            "all"
+          ]
+        },
+        "query": {
+          "type": "string"
+        },
+        "top_k": {
+          "default": 10,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "CompareResponse": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "group_by": {
+          "const": "document"
+        },
+        "kind": {
+          "enum": [
+            "code",
+            "all"
+          ]
+        },
+        "modes": {
+          "additionalProperties": {
+            "properties": {
+              "candidates": {
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "description": "Per-retriever results keyed by mode (bm25/dense/hybrid).",
+          "type": "object"
+        },
+        "overlap": {
+          "properties": {
+            "bm25_dense": {
+              "type": "integer"
+            },
+            "bm25_hybrid": {
+              "type": "integer"
+            },
+            "dense_hybrid": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "pagination": {
+          "type": "object"
+        },
+        "pool": {
+          "items": {
+            "properties": {
+              "best_chunk_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "by_mode": {
+                "description": "Per-mode rank+score for this document; null if a mode did not return it.",
+                "type": "object"
+              },
+              "citation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "document_id": {
+                "type": "string"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "query": {
+          "type": "string"
+        },
+        "top_k": {
+          "type": "integer"
+        }
+      }
+    },
+    "ContextRequest": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "siblings": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "ContextResponse": {
+      "properties": {
+        "ancestry": {
+          "items": {
+            "properties": {
+              "depth": {
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "as_of": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "requested_as_of": {
+          "format": "date",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sibling_count": {
+          "type": "integer"
+        },
+        "sibling_limit": {
+          "type": "integer"
+        },
+        "sibling_truncated": {
+          "type": "boolean"
+        },
+        "siblings": {
+          "type": "array"
+        },
+        "target": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "DiffRequest": {
+      "properties": {
+        "from": {
+          "format": "date",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "format": "date",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "from",
+        "to"
+      ]
+    },
+    "DiffResponse": {
+      "properties": {
+        "changed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "family_count": {
+          "type": "integer"
+        },
+        "from": {
+          "format": "date",
+          "type": "string"
+        },
+        "from_version": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "missing_from": {
+          "description": "No version in force on `from`.",
+          "type": "boolean"
+        },
+        "missing_to": {
+          "description": "No version in force on `to`.",
+          "type": "boolean"
+        },
+        "to": {
+          "format": "date",
+          "type": "string"
+        },
+        "to_version": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "DoctorRequest": {
+      "properties": {
+        "index_dir": {
+          "type": "string"
+        }
+      }
+    },
+    "DoctorResponse": {
+      "properties": {
+        "checks": {
+          "items": {
+            "properties": {
+              "detail": {},
+              "name": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "warn",
+                  "fail",
+                  "not_required"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "note": {
+          "type": "string"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      }
+    },
+    "EmbeddingEndpointStatus": {
+      "properties": {
+        "checked": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "reachable": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "not_applicable",
+            "not_checked",
+            "reachable",
+            "unreachable",
+            "invalid"
+          ]
+        }
+      }
+    },
+    "EvalFixtureSummary": {
+      "properties": {
+        "categories": {
+          "type": "object"
+        },
+        "hierarchy_sensitive": {
+          "type": "integer"
+        },
+        "release_candidates": {
+          "type": "integer"
+        },
+        "release_gating": {
+          "type": "integer"
+        },
+        "source_verified": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      }
+    },
+    "EvalFranceLegiRequest": {
+      "properties": {
+        "cross_reference": {
+          "default": 120,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "known_item": {
+          "default": 60,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "out": {
+          "description": "Path to write the phase1_france_legi_benchmark artifact (also printed to stdout).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "temporal": {
+          "default": 12,
+          "minimum": 0,
+          "type": "integer"
+        }
+      }
+    },
+    "EvalFranceLegiResponse": {
+      "description": "phase1_france_legi_benchmark artifact (also written to --out when given).",
+      "properties": {
+        "categories": {
+          "description": "Per-category results; each is a FranceLegiCategory.",
+          "properties": {
+            "semantic_retrieval": {
+              "$ref": "#/schemas/FranceLegiCategory"
+            },
+            "structured_citation_resolution": {
+              "$ref": "#/schemas/FranceLegiCategory"
+            },
+            "temporal_version_pinning": {
+              "$ref": "#/schemas/FranceLegiCategory"
+            }
+          },
+          "type": "object"
+        },
+        "claim_scope": {
+          "type": "string"
+        },
+        "embedding": {
+          "properties": {
+            "dimension": {
+              "type": "integer"
+            },
+            "fingerprint_model": {
+              "type": "string"
+            },
+            "normalize": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "jurisdiction": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "phase1_france_legi_benchmark"
+        },
+        "provenance": {
+          "type": "object"
+        },
+        "retriever": {
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "source": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "passed",
+            "failed"
+          ]
+        },
+        "thresholds": {
+          "type": "object"
+        }
+      }
+    },
+    "EvalPhase1Request": {
+      "properties": {
+        "include_dev": {
+          "default": false,
+          "type": "boolean"
+        },
+        "list": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "hybrid",
+          "enum": [
+            "hybrid",
+            "bm25",
+            "dense"
+          ]
+        },
+        "top_k": {
+          "default": 10,
+          "minimum": 1,
+          "type": "integer"
+        }
+      }
+    },
+    "EvalPhase1Response": {
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "run"
+          ]
+        },
+        "command": {
+          "const": "eval phase1"
+        },
+        "eval_fixtures": {
+          "$ref": "#/schemas/EvalFixtureSummary"
+        },
+        "fixture_count": {
+          "type": "integer"
+        },
+        "fixtures": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "include_dev": {
+          "type": "boolean"
+        },
+        "results": {
+          "items": {
+            "properties": {
+              "allowed_alternates": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "as_of": {
+                "format": "date",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "best_allowed_alternate_rank": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "best_expected_rank": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "candidate_count": {
+                "type": "integer"
+              },
+              "category": {
+                "type": "string"
+              },
+              "error": {
+                "$ref": "#/error_object"
+              },
+              "expected_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "id": {
+                "type": "string"
+              },
+              "matched_document_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "query": {
+                "type": "string"
+              },
+              "search": {
+                "type": "object"
+              },
+              "status": {
+                "enum": [
+                  "pass",
+                  "pass_allowed_alternate",
+                  "fail"
+                ]
+              },
+              "tier": {
+                "enum": [
+                  "dev",
+                  "release_gating"
+                ]
+              },
+              "top_document_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "retrieval_mode": {
+          "enum": [
+            "hybrid",
+            "bm25",
+            "dense"
+          ]
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "summary": {
+          "properties": {
+            "all_passed": {
+              "type": "boolean"
+            },
+            "failed": {
+              "type": "integer"
+            },
+            "fixture_count": {
+              "type": "integer"
+            },
+            "passed": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "top_k": {
+          "type": "integer"
+        }
+      }
+    },
+    "EvalRunRequest": {
+      "properties": {
+        "bootstrap": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "judge_cmd": {
+          "description": "External judge: reads a blind JSON task on stdin, writes {question_id:{key:label}} on stdout.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metrics": {
+          "default": "ndcg@10,recall@10,p@10,mrr@10",
+          "type": "string"
+        },
+        "modes": {
+          "default": "bm25,dense,hybrid",
+          "type": "string"
+        },
+        "out": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "qrels": {
+          "description": "Path to JSON [{query_id, document_id, label}] (XOR judge_cmd).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "questions": {
+          "description": "Path to a JSON array of {id, query, as_of?}.",
+          "type": "string"
+        },
+        "rel_min": {
+          "default": 1,
+          "type": "integer"
+        },
+        "top_k": {
+          "default": 10,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "questions"
+      ]
+    },
+    "EvalRunResponse": {
+      "description": "eval_run artifact (also written to --out when given).",
+      "properties": {
+        "bootstrap": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "group_by": {
+          "const": "document"
+        },
+        "judge": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "eval_run_benchmark"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "description": "Per-mode metric means; recall is null when no question has a relevant pooled doc.",
+          "type": "object"
+        },
+        "modes": {
+          "items": {
+            "enum": [
+              "bm25",
+              "dense",
+              "hybrid"
+            ]
+          },
+          "type": "array"
+        },
+        "pool": {
+          "type": "object"
+        },
+        "questions": {
+          "type": "integer"
+        },
+        "rel_min": {
+          "type": "integer"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "top_k": {
+          "type": "integer"
+        }
+      }
+    },
+    "EvalTuneRequest": {
+      "properties": {
+        "judge_cmd": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metric": {
+          "default": "ndcg@10",
+          "type": "string"
+        },
+        "out": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "qrels": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "questions": {
+          "type": "string"
+        },
+        "rel_min": {
+          "default": 1,
+          "type": "integer"
+        },
+        "sweep": {
+          "description": "PARAM=start:stop:step; PARAM in {rrf-dense, rrf-lexical, probes}.",
+          "type": "string"
+        },
+        "top_k": {
+          "default": 10,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "questions",
+        "sweep"
+      ]
+    },
+    "EvalTuneResponse": {
+      "description": "eval_tune artifact (also written to --out when given).",
+      "properties": {
+        "best": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "kind": {
+          "const": "eval_tune"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "mode": {
+          "const": "hybrid"
+        },
+        "points": {
+          "items": {
+            "properties": {
+              "metric": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "value": {
+                "type": "number"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "sweep": {
+          "type": "object"
+        }
+      }
+    },
+    "ExpandRequest": {
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "ExpandResponse": {
+      "properties": {
+        "expanded_terms": {
+          "items": {
+            "properties": {
+              "matched_terms": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "rationale": {
+                "type": "string"
+              },
+              "review_status": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              },
+              "source_citation": {
+                "type": "string"
+              },
+              "source_label": {
+                "type": "string"
+              },
+              "source_seed_id": {
+                "type": "string"
+              },
+              "term": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "query": {
+          "type": "string"
+        },
+        "seed_version": {
+          "type": "string"
+        }
+      }
+    },
+    "ExternalBenchmarkGate": {
+      "properties": {
+        "artifact": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "artifact_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "candidate_datasets": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "claim_scope": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "decision_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "jurisdiction": {
+          "type": "string"
+        },
+        "metrics": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "non_gating_inputs": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "primary_candidate": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "required_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "passed",
+            "failed"
+          ]
+        },
+        "thresholds": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "usage_scope": {
+          "type": "string"
+        }
+      }
+    },
+    "FetchRequest": {
+      "properties": {
+        "ids": {
+          "description": "Exact, version-pinned stable IDs (e.g. legi:LEGIARTI...@YYYY-MM-DD).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ]
+    },
+    "FetchResponse": {
+      "properties": {
+        "documents": {
+          "items": {
+            "properties": {
+              "body": {
+                "type": "string"
+              },
+              "chunks": {
+                "type": "array"
+              },
+              "citation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "document_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "source_payload_hash": {
+                "type": "string"
+              },
+              "source_uid": {
+                "type": "string"
+              },
+              "source_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "validity": {
+                "type": "object"
+              },
+              "version_group": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }
+      }
+    },
+    "FranceLegiCategory": {
+      "properties": {
+        "advisory": {
+          "type": "boolean"
+        },
+        "gating": {
+          "type": "boolean"
+        },
+        "metric_value": {
+          "type": "number"
+        },
+        "queries": {
+          "type": "integer"
+        },
+        "routing_backends": {
+          "type": "object"
+        }
+      }
+    },
+    "FranceLegiGate": {
+      "properties": {
+        "artifact": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "artifact_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "categories": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "claim_scope": {
+          "type": "string"
+        },
+        "decision_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "jurisdiction": {
+          "type": "string"
+        },
+        "provenance": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "required_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "retriever": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "passed",
+            "failed"
+          ]
+        },
+        "thresholds": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      }
+    },
+    "HelpAgentRequest": {
+      "properties": {}
+    },
+    "HelpAgentResponse": {
+      "properties": {
+        "text": {
+          "description": "The compiled agent contract as Markdown.",
+          "type": "string"
+        }
+      }
+    },
+    "HelpSchemaRequest": {
+      "properties": {
+        "json": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "HelpSchemaResponse": {
+      "description": "This document — the compiled schema (commands, exit_codes, error_object, session_envelope, common_enums, schemas)."
+    },
+    "IngestRequest": {
+      "description": "Ingestion is one-shot CLI only (not available over the session protocol).",
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "subcommand": {
+          "enum": [
+            "plan-archives",
+            "legi-archives",
+            "embed-chunks",
+            "backfill-legi-hierarchy"
+          ]
+        }
+      }
+    },
+    "IngestResponse": {
+      "properties": {
+        "plan": {
+          "type": "object"
+        },
+        "skipped": {
+          "type": "array"
+        }
+      }
+    },
+    "InspectRequest": {
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "InspectResponse": {
+      "properties": {
+        "chunk_count": {
+          "type": "integer"
+        },
+        "document": {
+          "description": "Full documents row incl. canonical_json.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "outgoing_edges": {
+          "type": "integer"
+        }
+      }
+    },
+    "ModelCacheStatus": {
+      "properties": {
+        "missing_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "model_cache_key": {
+          "type": "string"
+        },
+        "model_dir": {
+          "type": "string"
+        },
+        "model_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model_present": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "required_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "not_required",
+            "ready",
+            "missing"
+          ]
+        }
+      }
+    },
+    "ModelFetchRequest": {
+      "properties": {
+        "allow_download": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "ModelFetchResponse": {
+      "properties": {
+        "action": {
+          "enum": [
+            "not_required",
+            "already_cached"
+          ]
+        },
+        "allow_download": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_cache": {
+          "$ref": "#/schemas/ModelCacheStatus"
+        },
+        "provider": {
+          "enum": [
+            "openai_compatible",
+            "in_process"
+          ]
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      }
+    },
+    "Phase1GateCheck": {
+      "properties": {
+        "gating": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pass",
+            "pending",
+            "fail"
+          ]
+        }
+      }
+    },
+    "Phase1GateResponse": {
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/schemas/Phase1GateCheck"
+          },
+          "type": "array"
+        },
+        "claim_allowed": {
+          "type": "boolean"
+        },
+        "eval_fixtures": {
+          "$ref": "#/schemas/EvalFixtureSummary"
+        },
+        "external_benchmark": {
+          "$ref": "#/schemas/ExternalBenchmarkGate"
+        },
+        "france_legi_benchmark": {
+          "$ref": "#/schemas/FranceLegiGate"
+        },
+        "reranker_decision": {
+          "$ref": "#/schemas/RerankerDecision"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "not_ready"
+          ]
+        }
+      }
+    },
+    "Phase2BenchmarkGate": {
+      "properties": {
+        "artifact": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "artifact_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_reported_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "categories": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "claim_scope": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "floors": {
+          "type": "object"
+        },
+        "jurisdiction": {
+          "type": "string"
+        },
+        "provenance": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "required_evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "pending",
+            "passed",
+            "failed"
+          ]
+        }
+      }
+    },
+    "Phase2GateResponse": {
+      "properties": {
+        "benchmark": {
+          "$ref": "#/schemas/Phase2BenchmarkGate"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/schemas/Phase1GateCheck"
+          },
+          "type": "array"
+        },
+        "claim_allowed": {
+          "type": "boolean"
+        },
+        "jurisprudence_corpus_sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "not_ready"
+          ]
+        }
+      }
+    },
+    "RelatedRequest": {
+      "properties": {
+        "depth": {
+          "default": 1,
+          "description": "Only depth 1 is supported.",
+          "enum": [
+            1
+          ],
+          "type": "integer"
+        },
+        "id": {
+          "description": "Exact, version-pinned document ID.",
+          "type": "string"
+        },
+        "limit": {
+          "default": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rel": {
+          "default": "cites",
+          "description": "cites=outgoing citations, cited_by=incoming citations, temporal=version family.",
+          "enum": [
+            "cites",
+            "cited_by",
+            "temporal"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "RelatedResponse": {
+      "properties": {
+        "depth": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "neighbours": {
+          "items": {
+            "properties": {
+              "authority": {
+                "properties": {
+                  "confidence": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "reasons": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "score": {
+                    "type": "number"
+                  }
+                },
+                "type": "object"
+              },
+              "depth": {
+                "type": "integer"
+              },
+              "direction": {
+                "enum": [
+                  "outgoing",
+                  "incoming"
+                ]
+              },
+              "document": {
+                "properties": {
+                  "citation": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "document_id": {
+                    "type": "string"
+                  },
+                  "source_uid": {
+                    "type": "string"
+                  },
+                  "source_url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "validity": {
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              },
+              "edge": {
+                "properties": {
+                  "attributes": {
+                    "type": [
+                      "array",
+                      "null"
+                    ]
+                  },
+                  "edge_id": {
+                    "type": "string"
+                  },
+                  "edge_kind": {
+                    "type": "string"
+                  },
+                  "edge_source": {
+                    "type": "string"
+                  },
+                  "source_tag": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "rel": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "pagination": {
+          "properties": {
+            "limit": {
+              "type": "integer"
+            },
+            "possibly_truncated": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "rel": {
+          "enum": [
+            "cites",
+            "cited_by",
+            "temporal"
+          ]
+        },
+        "returned": {
+          "type": "integer"
+        }
+      }
+    },
+    "RerankerDecision": {
+      "properties": {
+        "adopted": {
+          "type": "boolean"
+        },
+        "decision_date": {
+          "format": "date",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "future_adoption_gate": {
+          "type": "string"
+        },
+        "model_candidate": {
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "disabled",
+            "http",
+            "local_onnx"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "deferred",
+            "adopted"
+          ]
+        }
+      }
+    },
+    "SearchRequest": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "cursor": {
+          "description": "Chunk cursor <score>:<chunk_id> or document cursor doc:<score>:<document_id>; must match --group-by.",
+          "type": "string"
+        },
+        "format": {
+          "default": "concise",
+          "enum": [
+            "concise",
+            "detailed"
+          ]
+        },
+        "group_by": {
+          "default": "chunk",
+          "description": "Result granularity: one row per passage, or one row per article.",
+          "enum": [
+            "chunk",
+            "document"
+          ]
+        },
+        "kind": {
+          "default": "all",
+          "enum": [
+            "code",
+            "decision",
+            "all"
+          ]
+        },
+        "mode": {
+          "default": "hybrid",
+          "enum": [
+            "hybrid",
+            "bm25",
+            "dense"
+          ]
+        },
+        "probes": {
+          "description": "Per-request ivfflat.probes for dense ANN (default 4).",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        },
+        "rrf_dense_weight": {
+          "description": "Per-request hybrid RRF dense weight (default from env, else 0.3).",
+          "minimum": 0,
+          "type": "number"
+        },
+        "rrf_lexical_weight": {
+          "description": "Per-request hybrid RRF lexical weight (default from env, else 1.0).",
+          "minimum": 0,
+          "type": "number"
+        },
+        "top_k": {
+          "default": 10,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "zone": {
+          "description": "Official Cour de cassation zone scope (case-law only): restrict retrieval to a decision part — `motivations` (reasoning), `moyens` (grounds raised), or `dispositif` (holding). Routes to the coverage-bounded official-zone subsystem (cass+inca only); incompatible with kind=code.",
+          "enum": [
+            "motivations",
+            "moyens",
+            "dispositif"
+          ]
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "SearchResponse": {
+      "properties": {
+        "as_of": {
+          "format": "date",
+          "type": "string"
+        },
+        "candidates": {
+          "items": {
+            "properties": {
+              "best_chunk_id": {
+                "description": "Document grouping: the best-ranked chunk of the article.",
+                "type": "string"
+              },
+              "chunk_id": {
+                "type": "string"
+              },
+              "citation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "cursor": {
+                "type": "string"
+              },
+              "document_id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "scores": {
+                "type": "object"
+              },
+              "snippet": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "source_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "validity": {
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "diagnostics": {
+          "properties": {
+            "lexical_query_text": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "query_input": {
+              "type": "string"
+            },
+            "retrieval": {
+              "properties": {
+                "after_cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "dense_limit": {
+                  "type": "integer"
+                },
+                "embedding_fingerprint": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind_filter": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "lexical_limit": {
+                  "type": "integer"
+                },
+                "mode": {
+                  "enum": [
+                    "hybrid",
+                    "bm25",
+                    "dense"
+                  ]
+                },
+                "query_limit": {
+                  "type": "integer"
+                },
+                "uses_dense": {
+                  "type": "boolean"
+                },
+                "uses_lexical": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            }
+          },
+          "type": "object"
+        },
+        "expanded_terms": {
+          "items": {
+            "properties": {
+              "matched_terms": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "rationale": {
+                "type": "string"
+              },
+              "review_status": {
+                "type": "string"
+              },
+              "reviewer": {
+                "type": "string"
+              },
+              "source_citation": {
+                "type": "string"
+              },
+              "source_label": {
+                "type": "string"
+              },
+              "source_seed_id": {
+                "type": "string"
+              },
+              "term": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "expansion_seed_version": {
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "concise",
+            "detailed"
+          ]
+        },
+        "group_by": {
+          "enum": [
+            "chunk",
+            "document"
+          ]
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "pagination": {
+          "properties": {
+            "after_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cursor_note": {
+              "type": "string"
+            },
+            "cursor_supported": {
+              "type": "boolean"
+            },
+            "guidance": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "next_cursor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "possibly_truncated": {
+              "type": "boolean"
+            },
+            "requested_top_k": {
+              "type": "integer"
+            },
+            "returned": {
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "query": {
+          "type": "string"
+        },
+        "retrieval_mode": {
+          "enum": [
+            "hybrid",
+            "bm25",
+            "dense"
+          ]
+        },
+        "routing": {
+          "description": "Intent-routing audit: how the query was classified and which backend served it.",
+          "properties": {
+            "candidate_count": {
+              "type": "integer"
+            },
+            "chosen_backend": {
+              "enum": [
+                "hybrid",
+                "bm25",
+                "dense",
+                "structured_citation",
+                "official_zone_retrieval"
+              ]
+            },
+            "fallback_path": {
+              "enum": [
+                "none",
+                "hybrid_fallback"
+              ]
+            },
+            "query_type": {
+              "enum": [
+                "citation",
+                "semantic",
+                "zone"
+              ]
+            },
+            "zone": {
+              "description": "Present only on zone routes.",
+              "enum": [
+                "motivations",
+                "moyens",
+                "dispositif"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "scope": {
+          "description": "Present only for `zone` searches: the coverage-bounded official-zone scope (Cour de cassation only).",
+          "properties": {
+            "coverage": {
+              "type": "string"
+            },
+            "indexed_decisions": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "mode": {
+              "const": "official_zone_retrieval"
+            },
+            "note": {
+              "type": "string"
+            },
+            "zone": {
+              "enum": [
+                "motivations",
+                "moyens",
+                "dispositif"
+              ]
+            },
+            "zone_accurate": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    "ServeRequest": {
+      "description": "Bind one transport, then speak the session_envelope protocol over the socket.",
+      "properties": {
+        "socket": {
+          "description": "Unix socket path (XOR tcp).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tcp": {
+          "description": "host:port (XOR socket).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ServeResponse": {
+      "description": "serve does not return a JSON document; each socket connection speaks the JSONL session protocol (request = session_envelope.request, response = success/error). Capability discovery via {\"command\":\"help schema\"}."
+    },
+    "SessionRequest": {
+      "$ref": "#/session_envelope/request"
+    },
+    "SessionResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/session_envelope/success_response"
+        },
+        {
+          "$ref": "#/session_envelope/error_response"
+        }
+      ]
+    },
+    "SetupRequest": {
+      "properties": {}
+    },
+    "SetupResponse": {
+      "properties": {
+        "embedding": {
+          "properties": {
+            "config_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "config_loaded": {
+              "type": "boolean"
+            },
+            "config_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dimension": {
+              "type": "integer"
+            },
+            "endpoint": {
+              "$ref": "#/schemas/EmbeddingEndpointStatus"
+            },
+            "model": {
+              "type": "string"
+            },
+            "model_cache": {
+              "$ref": "#/schemas/ModelCacheStatus"
+            },
+            "provider": {
+              "enum": [
+                "openai_compatible",
+                "in_process"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      }
+    },
+    "StatsRequest": {
+      "properties": {
+        "index_dir": {
+          "type": "string"
+        }
+      }
+    },
+    "StatsResponse": {
+      "properties": {
+        "schema_version": {
+          "type": "string"
+        },
+        "stats": {
+          "properties": {
+            "chunk_embeddings": {
+              "type": "integer"
+            },
+            "chunks": {
+              "type": "integer"
+            },
+            "documents": {
+              "type": "integer"
+            },
+            "documents_by_kind": {
+              "type": "object"
+            },
+            "documents_by_source": {
+              "type": "object"
+            },
+            "graph_edges": {
+              "type": "integer"
+            },
+            "graph_edges_by_kind": {
+              "type": "object"
+            },
+            "graph_edges_by_source": {
+              "type": "object"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    "StatusRequest": {
+      "properties": {
+        "deep": {
+          "default": false,
+          "description": "When true, recompute and cache full replay snapshot signatures; default status reads cached signatures only.",
+          "type": "boolean"
+        },
+        "index_dir": {
+          "type": "string"
+        }
+      }
+    },
+    "StatusResponse": {
+      "properties": {
+        "corpus_sources": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "embedding": {
+          "properties": {
+            "base_url": {
+              "type": "string"
+            },
+            "base_url_class": {
+              "enum": [
+                "local_loopback",
+                "hosted",
+                "in_process"
+              ]
+            },
+            "config_error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "config_loaded": {
+              "type": "boolean"
+            },
+            "config_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dimension": {
+              "type": "integer"
+            },
+            "endpoint": {
+              "$ref": "#/schemas/EmbeddingEndpointStatus"
+            },
+            "model": {
+              "type": "string"
+            },
+            "model_cache": {
+              "$ref": "#/schemas/ModelCacheStatus"
+            },
+            "normalize": {
+              "type": "boolean"
+            },
+            "pooling": {
+              "type": "string"
+            },
+            "provider": {
+              "enum": [
+                "openai_compatible",
+                "in_process"
+              ]
+            },
+            "provisional": {
+              "type": "boolean"
+            },
+            "reembeddable": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "index": {
+          "type": "object"
+        },
+        "ingest_health": {
+          "type": "object"
+        },
+        "phase1_gate": {
+          "$ref": "#/schemas/Phase1GateResponse"
+        },
+        "phase2_gate": {
+          "$ref": "#/schemas/Phase2GateResponse"
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      }
+    },
+    "SyncRequest": {
+      "properties": {
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "SyncResponse": {
+      "description": "STUB — not yet implemented.",
+      "properties": {
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "VersionsRequest": {
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "VersionsResponse": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "versions": {
+          "items": {
+            "properties": {
+              "citation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "document_id": {
+                "type": "string"
+              },
+              "is_target": {
+                "type": "boolean"
+              },
+              "source_uid": {
+                "type": "string"
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "validity": {
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        }
+      }
+    }
+  },
+  "session_envelope": {
+    "error_response": {
+      "properties": {
+        "error": {
+          "$ref": "#/error_object"
+        },
+        "id": {
+          "type": [
+            "string",
+            "number",
+            "null"
+          ]
+        },
+        "ok": {
+          "const": false
+        }
+      },
+      "required": [
+        "ok",
+        "error"
+      ],
+      "type": "object"
+    },
+    "request": {
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "command": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "string",
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "success_response": {
+      "properties": {
+        "id": {
+          "type": [
+            "string",
+            "number",
+            "null"
+          ]
+        },
+        "ok": {
+          "const": true
+        },
+        "result": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "ok",
+        "result"
+      ],
+      "type": "object"
+    }
+  }
+}
