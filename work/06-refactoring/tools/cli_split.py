@@ -180,6 +180,27 @@ def main():
         pubify_file(src)
         return
 
+    if mode == 'names':
+        # Resolve a comma-separated list of item names to their 1-based anchor lines.
+        # Names match the `name` field from `spans` (impls: e.g. "impl Foo" / "impl A for B").
+        wanted = [n.strip() for n in sys.argv[-1].split(',') if n.strip()]
+        items = all_items(lines)
+        by_name = {}
+        for it in items:
+            by_name.setdefault(it['name'], []).append(it['anchor'] + 1)
+        out = []
+        for n in wanted:
+            hits = by_name.get(n, [])
+            if len(hits) == 0:
+                print(f"ERROR: name not found: {n!r}", file=sys.stderr)
+                sys.exit(5)
+            if len(hits) > 1:
+                print(f"ERROR: ambiguous name {n!r} -> anchors {hits}", file=sys.stderr)
+                sys.exit(6)
+            out.append(str(hits[0]))
+        print(','.join(out))
+        return
+
     anchors_arg = sys.argv[-1]
     want = [int(x) - 1 for x in anchors_arg.split(',') if x.strip()]
     items = all_items(lines)

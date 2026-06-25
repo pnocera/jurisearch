@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use jurisearch_core::error::{ErrorObject, ProcessExit};
 use jurisearch_core::session::SessionResponse;
 
-use crate::dependency_unavailable;
+use crate::errors::dependency_unavailable;
 
 /// Pretty-render a JSON value with a single trailing newline. These are the exact bytes
 /// written to an artifact file, and they match what [`write_json`] emits to stdout

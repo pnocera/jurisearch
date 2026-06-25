@@ -12,7 +12,6 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
 use jurisearch_core::contract::{LegalKind, OutputFormat};
-use jurisearch_core::error::ErrorObject;
 use jurisearch_ingest::archive::{ArchiveSource, DEFAULT_MEMBER_BYTE_LIMIT};
 use jurisearch_storage::retrieval::{DecisionFilters, GroupBy, RetrievalMode, RetrievalOptions};
 use jurisearch_storage::zone_units::EnrichZoneOrder;
@@ -264,29 +263,6 @@ impl SearchArgs {
             decided_to: self.decided_to.as_deref(),
         }
     }
-}
-
-/// Validate user-supplied tuning at the CLI/session boundary (before SQL): weights must be finite
-/// and >= 0; probes in [1, 4096]. Invalid input is a `bad_input` error, not a silent clamp.
-pub(crate) fn validate_retrieval_options(options: &RetrievalOptions) -> Result<(), ErrorObject> {
-    for (name, weight) in [
-        ("rrf-lexical-weight", options.rrf_lexical_weight),
-        ("rrf-dense-weight", options.rrf_dense_weight),
-    ] {
-        if let Some(weight) = weight
-            && (!weight.is_finite() || weight < 0.0)
-        {
-            return Err(ErrorObject::bad_input(format!(
-                "--{name} must be a finite value >= 0"
-            )));
-        }
-    }
-    if let Some(probes) = options.ivfflat_probes
-        && !(1..=4096).contains(&probes)
-    {
-        return Err(ErrorObject::bad_input("--probes must be between 1 and 4096"));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Args)]

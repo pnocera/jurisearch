@@ -43,7 +43,7 @@ use jurisearch_official_api::{
 };
 use jurisearch_storage::dense::ChunkEmbeddingInput;
 use jurisearch_storage::{
-    citation::{CitationLookup, CitationLookupQuery, citation_lookup_json},
+    citation::{CitationLookupQuery, citation_lookup_json},
     decision_zones::{
         UpsertDecisionZones, decision_resolution_metadata_with_client, decision_zones_json,
         upsert_decision_zones_with_client,
@@ -53,7 +53,7 @@ use jurisearch_storage::{
         load_chunk_embedding_inputs,
     },
     ingest_accounting::{
-        CoverageMetric, IngestCompatibility, IngestErrorInput, IngestHealthReport,
+        IngestCompatibility, IngestErrorInput, IngestHealthReport,
         IngestMemberInput, IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
         ReplaySnapshotMode, ReplaySnapshotReport, finish_ingest_run_with_client,
         ingest_resume_decision_with_client, invalidate_cached_query_readiness,
@@ -104,13 +104,27 @@ use serde_json::{Value, json};
 use url::Url;
 
 mod args;
+mod ascii;
+mod citation;
+mod date;
 mod dispatch;
+mod embedding_runtime;
+mod errors;
+mod legifrance_search;
 mod output;
+mod query_support;
 mod serve;
 mod session;
 
 use crate::args::*;
+use crate::ascii::*;
+use crate::citation::*;
+use crate::date::*;
+use crate::embedding_runtime::*;
+use crate::errors::*;
+use crate::legifrance_search::*;
 use crate::output::*;
+use crate::query_support::*;
 
 const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v4";
 const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v3";
@@ -2325,44 +2339,6 @@ fn zone_search_payload(
     }
 }
 
-/// A query-embedding client built once and reused across many searches. Building an
-/// `OpenAiCompatibleClient` loads a tokenizer and a fresh HTTP agent, and `ensure_embedding_runtime_ready`
-/// is a network probe — paying both per query in a batch sweep (the France-LEGI runner issues up to
-/// ~192 queries) is wasteful. The index is static during a run, so one prepared embedder serves all.
-struct PreparedQueryEmbedder {
-    client: OpenAiCompatibleClient,
-    expected_fingerprint: EmbeddingFingerprint,
-    storage_fingerprint: String,
-}
-
-impl PreparedQueryEmbedder {
-    fn from_env() -> Result<Self, ErrorObject> {
-        let embedding_config = embedding_config_from_env();
-        ensure_embedding_runtime_ready(&embedding_config, false)?;
-        let expected_fingerprint = embedding_config.fingerprint();
-        let storage_fingerprint = embedding_config.storage_embedding_fingerprint();
-        let client =
-            OpenAiCompatibleClient::new(embedding_config).map_err(embedding_error_object)?;
-        Ok(Self {
-            client,
-            expected_fingerprint,
-            storage_fingerprint,
-        })
-    }
-
-    /// Returns `(pgvector_literal, storage_fingerprint)` for the query.
-    fn embed(&self, query: &str) -> Result<(String, String), ErrorObject> {
-        let embedding = self
-            .client
-            .embed_query(query, &self.expected_fingerprint)
-            .map_err(embedding_error_object)?;
-        Ok((
-            pgvector_literal(&embedding.values),
-            self.storage_fingerprint.clone(),
-        ))
-    }
-}
-
 /// A citation-shaped query parsed for structured resolution: an `Article <n>` reference plus the
 /// as-of date that pins the version (from an `en vigueur au <date>` suffix, else the caller default).
 struct LegiCitationRouting {
@@ -2419,35 +2395,6 @@ fn is_iso_date(value: &str) -> bool {
                 byte.is_ascii_digit()
             }
         })
-}
-
-/// Case-insensitive (ASCII) first-occurrence search; the needle must be ASCII. Byte index into
-/// `haystack`, which is a valid char boundary because matched bytes are ASCII.
-fn find_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
-    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    (0..=haystack.len() - needle.len()).find(|&start| {
-        haystack[start..start + needle.len()]
-            .iter()
-            .zip(needle)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
-}
-
-/// Case-insensitive (ASCII) last-occurrence search; see [`find_ascii_ci`].
-fn rfind_ascii_ci(haystack: &str, needle: &str) -> Option<usize> {
-    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return None;
-    }
-    (0..=haystack.len() - needle.len()).rev().find(|&start| {
-        haystack[start..start + needle.len()]
-            .iter()
-            .zip(needle)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
-    })
 }
 
 /// Run one search against an already-open index. Split out from `search_payload` so an
@@ -3355,63 +3302,6 @@ fn parse_visa_citation(title: &str) -> Option<ParsedVisaCitation> {
         return build(article, code, None, "visa_title_regex");
     }
     None
-}
-
-/// Cap (in chars) on the Legifrance `/search` `valeur`. The engine returns HTTP 500 on very long values
-/// (empirically anything past ~450 chars — pathological multi-article visa concatenations like
-/// "S16DELADÉCLARATION…ET695-9-22"); any real "article X of code Y" query is well under 100 chars. We
-/// truncate rather than skip so every citation still gets a real, archived attempt (the over-long garbage
-/// simply resolves to `not_found` instead of a noisy `upstream_error` + wasted `--retry-errors` reruns).
-const LEGIFRANCE_QUERY_MAX_CHARS: usize = 200;
-
-/// Narrow input hygiene for a Legifrance `/search` value: replace control chars with spaces, collapse
-/// whitespace runs, trim, and cap the length (see [`LEGIFRANCE_QUERY_MAX_CHARS`]). Deliberately does NOT
-/// rewrite article prefixes (`511-8`→`R.511-8`), split multi-article citations, or strip prose tails —
-/// those are `parse_visa_citation` concerns (the dominant recall lever) handled in a separate pass, not
-/// here. The unsanitized `canonical_query` stays on the resolution row, and the sanitized body is what
-/// the archive records, so the transform is auditable by comparing the two.
-fn sanitize_legifrance_query(query: &str) -> String {
-    let cleaned: String = query
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    cleaned
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(LEGIFRANCE_QUERY_MAX_CHARS)
-        .collect()
-}
-
-/// Build the Legifrance `/search` request body for a code-article citation query. Uses the REAL
-/// Legifrance contract (`fond=CODE_DATE` + `recherche.champs` with `TOUS_LES_MOTS_DANS_UN_CHAMP` over
-/// all fields). The previous `{query, pageSize}` shape was rejected by the Legifrance engine with HTTP
-/// 500 ("Une exception non gérée"); `TOUS_LES_MOTS_DANS_UN_CHAMP` is also far more precise and ~1s vs
-/// ~10s for `UN_DES_MOTS`, and beat separate `NUM_ARTICLE`+`TITLE` champs on a live 120-citation recall
-/// sample (validated against the live API). Our citations are all "code …" (collect skips non-code
-/// legislation), so `CODE_DATE` is the right fond; no date filter ⇒ current version. The value is run
-/// through [`sanitize_legifrance_query`] first to avoid the engine's HTTP-500-on-very-long-input.
-fn legifrance_code_search_body(query: &str) -> Value {
-    json!({
-        "fond": "CODE_DATE",
-        "recherche": {
-            "operateur": "ET",
-            "sort": "PERTINENCE",
-            "typePagination": "DEFAUT",
-            "pageNumber": 1,
-            "pageSize": 5,
-            "champs": [{
-                "typeChamp": "ALL",
-                "operateur": "ET",
-                "criteres": [{
-                    "typeRecherche": "TOUS_LES_MOTS_DANS_UN_CHAMP",
-                    "valeur": sanitize_legifrance_query(query),
-                    "operateur": "ET"
-                }]
-            }]
-        }
-    })
 }
 
 /// Whether a Legifrance search response reports at least one hit.
@@ -7248,7 +7138,7 @@ impl ModelCacheStatus {
     }
 }
 
-fn embedding_config_from_env() -> EmbeddingConfig {
+pub(crate) fn embedding_config_from_env() -> EmbeddingConfig {
     loaded_embedding_config().config
 }
 
@@ -7924,7 +7814,7 @@ pub(crate) fn setup_payload() -> Value {
     })
 }
 
-fn ensure_embedding_runtime_ready(
+pub(crate) fn ensure_embedding_runtime_ready(
     embedding_config: &EmbeddingConfig,
     allow_download: bool,
 ) -> Result<(), ErrorObject> {
@@ -9447,7 +9337,7 @@ fn coverage_complete(covered: i64, total: i64) -> bool {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum QueryReadinessGate {
+pub(crate) enum QueryReadinessGate {
     Fetch,
     SearchLexical,
     Search,
@@ -9505,67 +9395,6 @@ fn ensure_query_readiness(
     Ok(())
 }
 
-fn index_not_query_ready(
-    gate: QueryReadinessGate,
-    reason: &str,
-    projection_coverage: &CoverageMetric,
-    embedding_coverage: Option<&CoverageMetric>,
-) -> ErrorObject {
-    let embedding_coverage = embedding_coverage
-        .map(|metric| format!("{}/{}", metric.covered, metric.total))
-        .unwrap_or_else(|| "not checked".to_owned());
-    ErrorObject {
-        code: ErrorCode::IndexUnavailable,
-        message: format!(
-            "index is not query-ready for `{}`: {reason}; projection coverage {}/{}, embedding coverage {embedding_coverage}",
-            gate.command(),
-            projection_coverage.covered,
-            projection_coverage.total,
-        ),
-        suggestions: vec![
-            "Run `jurisearch status` to inspect ingest health and coverage gates.".into(),
-            "Run `jurisearch ingest legi-archives` and `jurisearch ingest embed-chunks` before retrieval commands.".into(),
-        ],
-    }
-}
-
-fn index_unavailable(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::IndexUnavailable,
-        message: message.into(),
-        suggestions: vec![
-            "Build or select an index before running retrieval commands.".into(),
-            "Pass `--index-dir <path>` or set JURISEARCH_INDEX_DIR.".into(),
-        ],
-    }
-}
-
-pub(crate) fn dependency_unavailable(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::DependencyUnavailable,
-        message: message.into(),
-        suggestions: vec![
-            "Check PostgreSQL extension setup and embedding endpoint configuration.".into(),
-        ],
-    }
-}
-
-fn no_results(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::NoResults,
-        message: message.into(),
-        suggestions: vec!["Try a different query, ID, or --as-of date.".into()],
-    }
-}
-
-fn upstream_unavailable(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::Upstream,
-        message: message.into(),
-        suggestions: vec!["Check the configured OpenAI-compatible embeddings endpoint.".into()],
-    }
-}
-
 fn validate_as_of(as_of: Option<&str>) -> Result<(), ErrorObject> {
     if let Some(as_of) = as_of
         && !is_valid_iso_date(as_of)
@@ -9575,300 +9404,6 @@ fn validate_as_of(as_of: Option<&str>) -> Result<(), ErrorObject> {
         )));
     }
     Ok(())
-}
-
-#[derive(Debug)]
-enum ParsedCitationTarget {
-    DocumentId {
-        document_id: String,
-        source_uid: Option<String>,
-    },
-    ArticleSourceUid(String),
-    TextSourceUid(String),
-    SectionSourceUid(String),
-    Nor(String),
-    FreeTextArticle {
-        article_number: String,
-        code_hint: Option<String>,
-    },
-    /// A decision's internal document id (`cass:JURITEXT…` / `jade:CETATEXT…`). Existence-based,
-    /// NOT version-validity-based: decisions are dated, not versioned.
-    DecisionDocumentId {
-        document_id: String,
-        source_uid: Option<String>,
-    },
-    DecisionSourceUid(String),
-    DecisionEcli(String),
-    DecisionPourvoi(String),
-    Malformed {
-        normalized: String,
-    },
-}
-
-impl ParsedCitationTarget {
-    fn lookup(&self) -> Option<CitationLookup<'_>> {
-        match self {
-            Self::DocumentId {
-                document_id,
-                source_uid,
-            } => Some(CitationLookup::DocumentId {
-                document_id,
-                source_uid: source_uid.as_deref(),
-            }),
-            Self::ArticleSourceUid(source_uid) => {
-                Some(CitationLookup::ArticleSourceUid(source_uid))
-            }
-            Self::TextSourceUid(source_uid) => Some(CitationLookup::TextSourceUid(source_uid)),
-            Self::SectionSourceUid(source_uid) => {
-                Some(CitationLookup::SectionSourceUid(source_uid))
-            }
-            Self::Nor(nor) => Some(CitationLookup::Nor(nor)),
-            Self::FreeTextArticle {
-                article_number,
-                code_hint,
-            } => Some(CitationLookup::FreeTextArticle {
-                article_number,
-                code_hint: code_hint.as_deref(),
-            }),
-            Self::DecisionDocumentId {
-                document_id,
-                source_uid,
-            } => Some(CitationLookup::DocumentId {
-                document_id,
-                source_uid: source_uid.as_deref(),
-            }),
-            Self::DecisionSourceUid(source_uid) => {
-                Some(CitationLookup::DecisionSourceUid(source_uid))
-            }
-            Self::DecisionEcli(ecli) => Some(CitationLookup::DecisionEcli(ecli)),
-            Self::DecisionPourvoi(pourvoi) => Some(CitationLookup::DecisionPourvoi(pourvoi)),
-            Self::Malformed { .. } => None,
-        }
-    }
-
-    fn input_class(&self) -> &'static str {
-        match self {
-            Self::DocumentId { .. } => "document_id",
-            Self::ArticleSourceUid(_) => "legiarti",
-            Self::TextSourceUid(_) => "legitext",
-            Self::SectionSourceUid(_) => "legiscta",
-            Self::Nor(_) => "nor",
-            Self::FreeTextArticle { .. } => "free_text_article",
-            Self::DecisionDocumentId { .. } => "decision_document_id",
-            Self::DecisionSourceUid(_) => "decision_id",
-            Self::DecisionEcli(_) => "ecli",
-            Self::DecisionPourvoi(_) => "pourvoi",
-            Self::Malformed { .. } => "malformed",
-        }
-    }
-
-    /// Whether this target is a jurisprudence decision (existence-based, never version-validity).
-    fn is_decision(&self) -> bool {
-        matches!(
-            self,
-            Self::DecisionDocumentId { .. }
-                | Self::DecisionSourceUid(_)
-                | Self::DecisionEcli(_)
-                | Self::DecisionPourvoi(_)
-        )
-    }
-
-    fn normalized_value(&self) -> Option<&str> {
-        match self {
-            Self::DocumentId { document_id, .. }
-            | Self::DecisionDocumentId { document_id, .. } => Some(document_id),
-            Self::ArticleSourceUid(source_uid)
-            | Self::TextSourceUid(source_uid)
-            | Self::SectionSourceUid(source_uid)
-            | Self::Nor(source_uid)
-            | Self::DecisionSourceUid(source_uid)
-            | Self::DecisionEcli(source_uid)
-            | Self::DecisionPourvoi(source_uid) => Some(source_uid),
-            Self::FreeTextArticle { article_number, .. } => Some(article_number),
-            Self::Malformed { normalized } if !normalized.is_empty() => Some(normalized),
-            Self::Malformed { .. } => None,
-        }
-        .map(String::as_str)
-    }
-}
-
-fn parse_citation_target(input: &str) -> ParsedCitationTarget {
-    let trimmed = input.trim();
-    if trimmed.starts_with("legi:") {
-        return ParsedCitationTarget::DocumentId {
-            document_id: trimmed.to_owned(),
-            source_uid: extract_known_source_uid(trimmed, "LEGIARTI"),
-        };
-    }
-    // Decision document_id (e.g. `cass:JURITEXT…`, `jade:CETATEXT…`).
-    if let Some((prefix, _)) = trimmed.split_once(':')
-        && matches!(prefix, "cass" | "capp" | "inca" | "jade")
-    {
-        let source_uid = extract_known_source_uid(trimmed, "JURITEXT")
-            .or_else(|| extract_known_source_uid(trimmed, "CETATEXT"));
-        return ParsedCitationTarget::DecisionDocumentId {
-            document_id: trimmed.to_owned(),
-            source_uid,
-        };
-    }
-    if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGIARTI") {
-        return ParsedCitationTarget::ArticleSourceUid(source_uid);
-    }
-    if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGITEXT") {
-        return ParsedCitationTarget::TextSourceUid(source_uid);
-    }
-    if let Some(source_uid) = extract_known_source_uid(trimmed, "LEGISCTA") {
-        return ParsedCitationTarget::SectionSourceUid(source_uid);
-    }
-    // Bare decision source-native UID.
-    if let Some(source_uid) = extract_known_source_uid(trimmed, "JURITEXT")
-        .or_else(|| extract_known_source_uid(trimmed, "CETATEXT"))
-    {
-        return ParsedCitationTarget::DecisionSourceUid(source_uid);
-    }
-    // ECLI (e.g. `ECLI:FR:CCASS:2025:AP00683`).
-    if trimmed.to_ascii_uppercase().starts_with("ECLI:") {
-        return ParsedCitationTarget::DecisionEcli(trimmed.to_ascii_uppercase());
-    }
-    let normalized = normalize_citation_text(trimmed);
-    if let Some(article_number) = parse_article_number(&normalized) {
-        return ParsedCitationTarget::FreeTextArticle {
-            article_number,
-            code_hint: detect_code_hint(&normalized),
-        };
-    }
-    // Pourvoi / numéro d'affaire (e.g. `22-21.812` or `22-21812`).
-    if let Some(pourvoi) = parse_pourvoi(trimmed) {
-        return ParsedCitationTarget::DecisionPourvoi(pourvoi);
-    }
-    let compact_upper = trimmed
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .flat_map(|character| character.to_uppercase())
-        .collect::<String>();
-    if looks_like_nor(&compact_upper) {
-        return ParsedCitationTarget::Nor(compact_upper);
-    }
-    ParsedCitationTarget::Malformed { normalized }
-}
-
-fn extract_known_source_uid(value: &str, prefix: &str) -> Option<String> {
-    let upper = value.to_ascii_uppercase();
-    let start = upper.find(prefix)?;
-    let suffix = upper[start + prefix.len()..]
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .take(12)
-        .collect::<String>();
-    (suffix.len() == 12).then(|| format!("{prefix}{suffix}"))
-}
-
-fn parse_article_number(normalized: &str) -> Option<String> {
-    let tokens = normalized.split_whitespace().collect::<Vec<_>>();
-    let mut index = 0usize;
-    const ARTICLE_PREFIXES: &[&str] = &["l", "lo", "r", "d"];
-    while let Some(token) = tokens.get(index) {
-        if *token == "article"
-            && let Some(candidate) = tokens.get(index + 1)
-        {
-            if let Some(number) = article_number_token(candidate) {
-                return Some(number);
-            }
-            if ARTICLE_PREFIXES.contains(candidate)
-                && let Some(number) = tokens
-                    .get(index + 2)
-                    .and_then(|candidate| article_number_token(candidate))
-            {
-                return Some(format!("{candidate}{number}"));
-            }
-        }
-        index += 1;
-    }
-    None
-}
-
-fn article_number_token(candidate: &str) -> Option<String> {
-    (candidate
-        .chars()
-        .any(|character| character.is_ascii_digit())
-        && candidate
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-'))
-    .then(|| candidate.to_owned())
-}
-
-fn detect_code_hint(normalized: &str) -> Option<String> {
-    const CODE_HINTS: &[&str] = &[
-        "code civil",
-        "code penal",
-        "code de procedure civile",
-        "code de procedure penale",
-        "code du travail",
-        "code de la consommation",
-        "code des assurances",
-        "code de commerce",
-        "code de l environnement",
-        "code de la sante publique",
-        "code general des impots",
-    ];
-    CODE_HINTS
-        .iter()
-        .find(|hint| contains_normalized_phrase(normalized, hint))
-        .map(|hint| (*hint).to_owned())
-}
-
-fn contains_normalized_phrase(normalized: &str, phrase: &str) -> bool {
-    let normalized = format!(" {normalized} ");
-    let phrase = format!(" {phrase} ");
-    normalized.contains(&phrase)
-}
-
-fn looks_like_nor(value: &str) -> bool {
-    let chars = value.chars().collect::<Vec<_>>();
-    chars.len() == 12
-        && chars[0..4]
-            .iter()
-            .all(|character| character.is_ascii_alphabetic())
-        && chars[4..11]
-            .iter()
-            .all(|character| character.is_ascii_digit())
-        && chars[11].is_ascii_alphabetic()
-}
-
-fn normalize_citation_text(value: &str) -> String {
-    let mut normalized = String::with_capacity(value.len());
-    let mut previous_was_space = true;
-    for character in value.chars().flat_map(|character| character.to_lowercase()) {
-        let replacement = match character {
-            'à' | 'â' | 'ä' => "a",
-            'ç' => "c",
-            'é' | 'è' | 'ê' | 'ë' => "e",
-            'î' | 'ï' => "i",
-            'ô' | 'ö' => "o",
-            'ù' | 'û' | 'ü' => "u",
-            'œ' => "oe",
-            'æ' => "ae",
-            '-' => {
-                normalized.push('-');
-                previous_was_space = false;
-                continue;
-            }
-            ascii if ascii.is_ascii_alphanumeric() => {
-                normalized.push(ascii);
-                previous_was_space = false;
-                continue;
-            }
-            _ => "",
-        };
-        if !replacement.is_empty() {
-            normalized.push_str(replacement);
-            previous_was_space = false;
-        } else if !previous_was_space {
-            normalized.push(' ');
-            previous_was_space = true;
-        }
-    }
-    normalized.trim().to_owned()
 }
 
 fn classify_citation_state(
@@ -9931,26 +9466,6 @@ fn classify_citation_state(
             _ => CitationState::Ambiguous,
         },
         ParsedCitationTarget::Malformed { .. } => CitationState::NotFound,
-    }
-}
-
-/// Detect a pourvoi / `NUMERO_AFFAIRE` shape — two digits, a dash, then 4–6 digits (optionally
-/// dotted, e.g. `22-21.812`, `57-10.110`) — and return it normalized (dots/spaces removed).
-/// Conservative to avoid false positives (dates like `2024-01-01` and short forms are rejected).
-fn parse_pourvoi(input: &str) -> Option<String> {
-    let compact: String = input
-        .chars()
-        .filter(|character| !matches!(character, '.' | ' '))
-        .collect();
-    let (left, right) = compact.split_once('-')?;
-    if left.len() == 2
-        && left.bytes().all(|byte| byte.is_ascii_digit())
-        && (4..=6).contains(&right.len())
-        && right.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        Some(compact)
-    } else {
-        None
     }
 }
 
@@ -10111,85 +9626,7 @@ fn parse_search_cursor(cursor: &str, group_by: CliGroupBy) -> Result<ParsedSearc
     }
 }
 
-fn is_valid_iso_date(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let valid_shape = bytes.len() == 10
-        && bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[4] == b'-'
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[7] == b'-'
-        && bytes[8..10].iter().all(u8::is_ascii_digit);
-    if !valid_shape {
-        return false;
-    }
-
-    let year = value[0..4].parse::<u16>().unwrap_or_default();
-    let month = value[5..7].parse::<u8>().unwrap_or_default();
-    let day = value[8..10].parse::<u8>().unwrap_or_default();
-    day > 0 && day <= days_in_month(year, month).unwrap_or_default()
-}
-
-fn days_in_month(year: u16, month: u8) -> Option<u8> {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
-        4 | 6 | 9 | 11 => Some(30),
-        2 if is_leap_year(year) => Some(29),
-        2 => Some(28),
-        _ => None,
-    }
-}
-
-fn is_leap_year(year: u16) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
-}
-
-fn storage_error_object(error: StorageError) -> ErrorObject {
-    let message = error.to_string();
-    match &error {
-        StorageError::StorageLockBusy { .. } | StorageError::AdvisoryLockBusy { .. } => {
-            index_unavailable(message)
-        }
-        _ => dependency_unavailable(message),
-    }
-}
-
-fn embedding_error_object(error: jurisearch_embed::EmbeddingError) -> ErrorObject {
-    let message = error.to_string();
-    match &error {
-        jurisearch_embed::EmbeddingError::InputTooLong(_) => ErrorObject::bad_input(message),
-        jurisearch_embed::EmbeddingError::Endpoint(_)
-        | jurisearch_embed::EmbeddingError::InvalidResponse(_)
-        | jurisearch_embed::EmbeddingError::EmptyResponse
-        | jurisearch_embed::EmbeddingError::BatchSizeMismatch { .. } => {
-            upstream_unavailable(message)
-        }
-        _ => dependency_unavailable(message),
-    }
-}
-
-fn embedding_error_object_with_context(
-    error: jurisearch_embed::EmbeddingError,
-    chunk_id: &str,
-) -> ErrorObject {
-    let mut object = embedding_error_object(error);
-    object.message = format!("embedding chunk `{chunk_id}` failed: {}", object.message);
-    object
-}
-
-fn parade_query_text(query: &str) -> Option<String> {
-    let terms = query
-        .split(|character: char| !character.is_alphanumeric())
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" "))
-    }
-}
-
-fn pgvector_literal(values: &[f32]) -> String {
+pub(crate) fn pgvector_literal(values: &[f32]) -> String {
     let values = values
         .iter()
         .map(|value| format!("{value:.8}"))
@@ -10213,34 +9650,6 @@ fn parse_optional_path_buf(value: &str) -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(value))
     }
-}
-
-fn unix_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn today_utc() -> String {
-    let days_since_epoch = unix_seconds() / 86_400;
-    let (year, month, day) = civil_from_days(days_since_epoch as i64);
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
-    let z = days_since_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-    (year, month as u32, day as u32)
 }
 
 #[cfg(test)]
