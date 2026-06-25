@@ -118,6 +118,7 @@ mod ingest;
 mod legifrance_search;
 mod output;
 mod query_support;
+mod request;
 mod retrieval;
 mod serve;
 mod session;
@@ -137,6 +138,7 @@ use crate::ingest::*;
 use crate::legifrance_search::*;
 use crate::output::*;
 use crate::query_support::*;
+use crate::request::*;
 use crate::retrieval::*;
 use crate::status::*;
 

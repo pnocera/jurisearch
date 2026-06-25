@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use jurisearch_core::contract::{LegalKind, OutputFormat};
 use jurisearch_ingest::archive::{ArchiveSource, DEFAULT_MEMBER_BYTE_LIMIT};
-use jurisearch_storage::retrieval::{DecisionFilters, GroupBy, RetrievalMode, RetrievalOptions};
+use jurisearch_storage::retrieval::{GroupBy, RetrievalMode};
 use jurisearch_storage::zone_units::EnrichZoneOrder;
 
 use crate::{
@@ -241,26 +241,6 @@ impl From<CliEnrichZoneOrder> for EnrichZoneOrder {
         match order {
             CliEnrichZoneOrder::Oldest => EnrichZoneOrder::Oldest,
             CliEnrichZoneOrder::Recent => EnrichZoneOrder::Recent,
-        }
-    }
-}
-
-impl SearchArgs {
-    pub(crate) fn retrieval_options(&self) -> RetrievalOptions {
-        RetrievalOptions {
-            rrf_lexical_weight: self.rrf_lexical_weight,
-            rrf_dense_weight: self.rrf_dense_weight,
-            ivfflat_probes: self.probes,
-        }
-    }
-
-    pub(crate) fn decision_filters(&self) -> DecisionFilters<'_> {
-        DecisionFilters {
-            jurisdiction: self.court.as_deref(),
-            formation: self.formation.as_deref(),
-            publication: self.publication.as_deref(),
-            decided_from: self.decided_from.as_deref(),
-            decided_to: self.decided_to.as_deref(),
         }
     }
 }

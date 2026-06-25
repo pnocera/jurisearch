@@ -2,24 +2,30 @@
 
 use crate::*;
 
-pub(crate) fn emit_context(args: ContextArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
-    match context_payload(args, index_dir) {
+pub(crate) fn emit_context(req: ContextRequest) -> anyhow::Result<()> {
+    match context_payload(req) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-pub(crate) fn context_payload(args: ContextArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    validate_as_of(args.as_of.as_deref())?;
-    let index_dir = require_existing_index_dir(index_dir)?;
+pub(crate) fn context_payload(req: ContextRequest) -> Result<Value, ErrorObject> {
+    // Boundary validation shared by the one-shot and session paths.
+    if req.id.trim().is_empty() {
+        return Err(ErrorObject::bad_input(
+            "context requires a non-empty stable ID",
+        ));
+    }
+    validate_as_of(req.as_of.as_deref())?;
+    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
     let response = context_documents_json(
         &postgres,
         &ContextDocumentsQuery {
-            document_id: args.id.as_str(),
-            as_of: args.as_of.as_deref(),
-            include_siblings: args.siblings,
+            document_id: req.id.as_str(),
+            as_of: req.as_of.as_deref(),
+            include_siblings: req.siblings,
         },
     )
     .map_err(storage_error_object)?;

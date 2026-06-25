@@ -115,7 +115,7 @@ pub(crate) fn france_juris_search_documents(
     let Some(query_text) = parade_query_text(query) else {
         return Ok(Vec::new());
     };
-    let args = SearchArgs {
+    let request = SearchRequest {
         query: query.to_owned(),
         kind: CliKind::Decision,
         mode: CliSearchMode::Hybrid,
@@ -133,10 +133,11 @@ pub(crate) fn france_juris_search_documents(
         decided_from: None,
         decided_to: None,
         zone: None,
+        index_dir: None,
     };
     let response = match search_with_postgres(
         postgres,
-        &args,
+        &request,
         RetrievalMode::Hybrid,
         OutputFormat::Concise,
         None,

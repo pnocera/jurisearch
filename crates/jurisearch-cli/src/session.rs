@@ -19,106 +19,9 @@ use crate::args::*;
 use crate::output::write_session_response;
 use crate::*;
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionSearchArgs {
-    pub(crate) query: String,
-    #[serde(default = "default_cli_kind")]
-    pub(crate) kind: CliKind,
-    #[serde(default = "default_search_mode")]
-    pub(crate) mode: CliSearchMode,
-    #[serde(default = "default_output_format")]
-    pub(crate) format: CliOutputFormat,
-    #[serde(default = "default_group_by")]
-    pub(crate) group_by: CliGroupBy,
-    #[serde(default = "default_top_k")]
-    pub(crate) top_k: u32,
-    #[serde(default)]
-    pub(crate) cursor: Option<String>,
-    #[serde(default)]
-    pub(crate) as_of: Option<String>,
-    #[serde(default)]
-    pub(crate) rrf_lexical_weight: Option<f64>,
-    #[serde(default)]
-    pub(crate) rrf_dense_weight: Option<f64>,
-    #[serde(default)]
-    pub(crate) probes: Option<u32>,
-    #[serde(default)]
-    pub(crate) court: Option<String>,
-    #[serde(default)]
-    pub(crate) formation: Option<String>,
-    #[serde(default)]
-    pub(crate) publication: Option<String>,
-    #[serde(default)]
-    pub(crate) decided_from: Option<String>,
-    #[serde(default)]
-    pub(crate) decided_to: Option<String>,
-    #[serde(default)]
-    pub(crate) zone: Option<CliZone>,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionFetchArgs {
-    pub(crate) ids: Vec<String>,
-    #[serde(default)]
-    pub(crate) part: Option<String>,
-    #[serde(default)]
-    pub(crate) online: bool,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionCiteArgs {
-    pub(crate) cite: String,
-    #[serde(default)]
-    pub(crate) strict: bool,
-    #[serde(default)]
-    pub(crate) online: bool,
-    #[serde(default)]
-    pub(crate) as_of: Option<String>,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionContextArgs {
-    pub(crate) id: String,
-    #[serde(default)]
-    pub(crate) siblings: bool,
-    #[serde(default)]
-    pub(crate) as_of: Option<String>,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionRelatedArgs {
-    pub(crate) id: String,
-    #[serde(default = "default_related_rel")]
-    pub(crate) rel: String,
-    #[serde(default = "default_related_limit")]
-    pub(crate) limit: u32,
-    #[serde(default = "default_related_depth")]
-    pub(crate) depth: u32,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionCompareArgs {
-    pub(crate) query: String,
-    #[serde(default = "default_compare_kind")]
-    pub(crate) kind: CliKind,
-    #[serde(default = "default_top_k")]
-    pub(crate) top_k: u32,
-    #[serde(default)]
-    pub(crate) as_of: Option<String>,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
+/// `status` keeps its own small session DTO (option ii): unlike the retrieval/admin commands it has
+/// no field duplication to fold into a shared request — the one-shot path reads the global
+/// `--index-dir` directly and `status_payload` takes a plain `(index_dir, mode)`.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct SessionStatusArgs {
     #[serde(default)]
@@ -127,141 +30,40 @@ pub(crate) struct SessionStatusArgs {
     pub(crate) deep: bool,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionEvalPhase1Args {
-    #[serde(default)]
-    pub(crate) list: bool,
-    #[serde(default)]
-    pub(crate) include_dev: bool,
-    #[serde(default = "default_search_mode")]
-    pub(crate) mode: CliSearchMode,
-    #[serde(default = "default_top_k")]
-    pub(crate) top_k: u32,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
 pub(crate) fn session_search_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionSearchArgs>(args)
+    let req = serde_json::from_value::<SearchRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid search args: {error}")))?;
-    if args.query.trim().is_empty() {
-        return Err(ErrorObject::bad_input("search query must not be empty"));
-    }
-    if args.top_k == 0 {
-        return Err(ErrorObject::bad_input("search top_k must be at least 1"));
-    }
-    let index_dir = args.index_dir;
-    search_payload(
-        SearchArgs {
-            query: args.query,
-            kind: args.kind,
-            mode: args.mode,
-            format: args.format,
-            group_by: args.group_by,
-            top_k: args.top_k,
-            cursor: args.cursor,
-            as_of: args.as_of,
-            rrf_lexical_weight: args.rrf_lexical_weight,
-            rrf_dense_weight: args.rrf_dense_weight,
-            probes: args.probes,
-            court: args.court,
-            formation: args.formation,
-            publication: args.publication,
-            decided_from: args.decided_from,
-            decided_to: args.decided_to,
-            zone: args.zone,
-        },
-        index_dir.as_deref(),
-    )
+    search_payload(req)
 }
 
 pub(crate) fn session_fetch_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionFetchArgs>(args)
+    let req = serde_json::from_value::<FetchRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid fetch args: {error}")))?;
-    if args.ids.is_empty() {
-        return Err(ErrorObject::bad_input(
-            "fetch requires at least one stable ID",
-        ));
-    }
-    let index_dir = args.index_dir;
-    fetch_payload(
-        FetchArgs {
-            ids: args.ids,
-            part: args.part,
-            online: args.online,
-        },
-        index_dir.as_deref(),
-    )
+    fetch_payload(req)
 }
 
 pub(crate) fn session_cite_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionCiteArgs>(args)
+    let req = serde_json::from_value::<CiteRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid cite args: {error}")))?;
-    if args.cite.trim().is_empty() {
-        return Err(ErrorObject::bad_input("cite requires a non-empty citation"));
-    }
-    let index_dir = args.index_dir;
-    cite_payload(
-        CiteArgs {
-            cite: args.cite,
-            strict: args.strict,
-            online: args.online,
-            as_of: args.as_of,
-        },
-        index_dir.as_deref(),
-    )
+    cite_payload(req)
 }
 
 pub(crate) fn session_context_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionContextArgs>(args)
+    let req = serde_json::from_value::<ContextRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid context args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input(
-            "context requires a non-empty stable ID",
-        ));
-    }
-    let index_dir = args.index_dir;
-    context_payload(
-        ContextArgs {
-            id: args.id,
-            siblings: args.siblings,
-            as_of: args.as_of,
-        },
-        index_dir.as_deref(),
-    )
+    context_payload(req)
 }
 
 pub(crate) fn session_related_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionRelatedArgs>(args)
+    let req = serde_json::from_value::<RelatedRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid related args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input("related requires a non-empty stable ID"));
-    }
-    let index_dir = args.index_dir;
-    related_payload(
-        RelatedArgs {
-            id: args.id,
-            rel: args.rel,
-            limit: args.limit,
-            depth: args.depth,
-        },
-        index_dir.as_deref(),
-    )
+    related_payload(req)
 }
 
 pub(crate) fn session_compare_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionCompareArgs>(args)
+    let req = serde_json::from_value::<CompareRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid compare args: {error}")))?;
-    let index_dir = args.index_dir;
-    compare_payload(
-        CompareArgs {
-            query: args.query,
-            kind: args.kind,
-            top_k: args.top_k,
-            as_of: args.as_of,
-        },
-        index_dir.as_deref(),
-    )
+    compare_payload(req)
 }
 
 pub(crate) fn session_expand_payload(args: Value) -> Result<Value, ErrorObject> {
@@ -370,17 +172,9 @@ pub(crate) fn session_model_fetch_payload(args: Value) -> Result<Value, ErrorObj
 }
 
 pub(crate) fn session_eval_phase1_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionEvalPhase1Args>(args)
+    let req = serde_json::from_value::<EvalPhase1Request>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid eval phase1 args: {error}")))?;
-    eval_phase1_payload(
-        EvalPhase1Args {
-            list: args.list,
-            include_dev: args.include_dev,
-            mode: args.mode,
-            top_k: args.top_k,
-        },
-        args.index_dir.as_deref(),
-    )
+    eval_phase1_payload(req)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -407,59 +201,20 @@ pub(crate) fn session_stats_payload(args: Value) -> Result<Value, ErrorObject> {
     stats_payload(args.index_dir.as_deref())
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionInspectArgs {
-    pub(crate) id: String,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
-}
-
 pub(crate) fn session_inspect_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionInspectArgs>(args)
+    let req = serde_json::from_value::<InspectRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid inspect args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input("inspect requires a document id"));
-    }
-    let index_dir = args.index_dir;
-    inspect_payload(InspectArgs { id: args.id }, index_dir.as_deref())
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionVersionsArgs {
-    pub(crate) id: String,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
+    inspect_payload(req)
 }
 
 pub(crate) fn session_versions_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionVersionsArgs>(args)
+    let req = serde_json::from_value::<VersionsRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid versions args: {error}")))?;
-    if args.id.trim().is_empty() {
-        return Err(ErrorObject::bad_input("versions requires a document id"));
-    }
-    let index_dir = args.index_dir;
-    versions_payload(VersionsArgs { id: args.id }, index_dir.as_deref())
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct SessionDiffArgs {
-    pub(crate) id: String,
-    pub(crate) from: String,
-    pub(crate) to: String,
-    #[serde(default)]
-    pub(crate) index_dir: Option<PathBuf>,
+    versions_payload(req)
 }
 
 pub(crate) fn session_diff_payload(args: Value) -> Result<Value, ErrorObject> {
-    let args = serde_json::from_value::<SessionDiffArgs>(args)
+    let req = serde_json::from_value::<DiffRequest>(args)
         .map_err(|error| ErrorObject::bad_input(format!("invalid diff args: {error}")))?;
-    let index_dir = args.index_dir;
-    diff_payload(
-        DiffArgs {
-            id: args.id,
-            from: args.from,
-            to: args.to,
-        },
-        index_dir.as_deref(),
-    )
+    diff_payload(req)
 }

@@ -2,20 +2,24 @@
 
 use crate::*;
 
-pub(crate) fn emit_cite(args: CiteArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
-    match cite_payload(args, index_dir) {
+pub(crate) fn emit_cite(req: CiteRequest) -> anyhow::Result<()> {
+    match cite_payload(req) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }
 }
 
-pub(crate) fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    validate_as_of(args.as_of.as_deref())?;
-    let parsed = parse_citation_target(&args.cite);
-    let effective_as_of = args.as_of.clone().unwrap_or_else(today_utc);
+pub(crate) fn cite_payload(req: CiteRequest) -> Result<Value, ErrorObject> {
+    // Boundary validation shared by the one-shot and session paths.
+    if req.cite.trim().is_empty() {
+        return Err(ErrorObject::bad_input("cite requires a non-empty citation"));
+    }
+    validate_as_of(req.as_of.as_deref())?;
+    let parsed = parse_citation_target(&req.cite);
+    let effective_as_of = req.as_of.clone().unwrap_or_else(today_utc);
     let mut lookup = json!({ "matches": [] });
     if let Some(lookup_target) = parsed.lookup() {
-        let index_dir = require_existing_index_dir(index_dir)?;
+        let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
         let postgres = open_index(index_dir.as_path())?;
         ensure_query_readiness(&postgres, QueryReadinessGate::Fetch)?;
         let response = citation_lookup_json(
@@ -34,11 +38,11 @@ pub(crate) fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<V
         &parsed,
         &lookup,
         effective_as_of.as_str(),
-        args.as_of.as_deref(),
+        req.as_of.as_deref(),
     );
     // Decision identifiers are not corroborated against the Légifrance statutory probe, so an empty
     // decision lookup must stay `not_found` rather than being relabelled `source_unavailable`.
-    let state = if args.online
+    let state = if req.online
         && !parsed.is_decision()
         && !matches!(&parsed, ParsedCitationTarget::Malformed { .. })
         && lookup["matches"]
@@ -50,16 +54,16 @@ pub(crate) fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<V
         local_state
     };
     let mut response = json!({
-        "query": args.cite,
+        "query": req.cite,
         "input_class": parsed.input_class(),
         "normalized": parsed.normalized_value(),
         "as_of": effective_as_of,
-        "requested_as_of": args.as_of.as_deref(),
+        "requested_as_of": req.as_of.as_deref(),
         "state": citation_state_name(state),
         "local_state": citation_state_name(local_state),
-        "strict": args.strict,
+        "strict": req.strict,
         "online": {
-            "requested": args.online,
+            "requested": req.online,
             "checked": false,
             "state": null,
             "note": null
@@ -68,14 +72,14 @@ pub(crate) fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<V
         "matches": lookup["matches"].clone(),
     });
     annotate_valid_matches(&mut response, &effective_as_of);
-    if args.online && matches!(&parsed, ParsedCitationTarget::Malformed { .. }) {
+    if req.online && matches!(&parsed, ParsedCitationTarget::Malformed { .. }) {
         response["online"] = json!({
             "requested": true,
             "checked": false,
             "state": citation_state_name(CitationState::NotFound),
             "note": "Malformed citations are classified locally and are not sent to the online Légifrance probe."
         });
-    } else if args.online && parsed.is_decision() {
+    } else if req.online && parsed.is_decision() {
         // The online probe targets Légifrance (statutes). Decision verification belongs to Judilibre,
         // which is not yet wired here — never send a decision identifier to the statutory probe.
         response["online"] = json!({
@@ -85,12 +89,12 @@ pub(crate) fn cite_payload(args: CiteArgs, index_dir: Option<&Path>) -> Result<V
             "state": null,
             "note": "Online decision verification uses the Judilibre API and is not yet wired; the state above is from the local index."
         });
-    } else if args.online {
-        apply_online_citation_confirmation(&mut response, &args.cite)?;
+    } else if req.online {
+        apply_online_citation_confirmation(&mut response, &req.cite)?;
     }
 
-    if args.strict && !matches!(state, CitationState::Exact | CitationState::Normalized) {
-        return Err(strict_citation_error(&args.cite, state));
+    if req.strict && !matches!(state, CitationState::Exact | CitationState::Normalized) {
+        return Err(strict_citation_error(&req.cite, state));
     }
     Ok(response)
 }

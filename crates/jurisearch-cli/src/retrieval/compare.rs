@@ -5,30 +5,31 @@ use crate::*;
 /// Run the same query through bm25/dense/hybrid (document grouping) and return aligned per-mode
 /// top-k plus the pooled union with per-mode ranks and pairwise overlap. Single-page (no cursor):
 /// cross-mode pagination has no honest shared meaning.
-pub(crate) fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Result<Value, ErrorObject> {
-    if args.query.trim().is_empty() {
+pub(crate) fn compare_payload(req: CompareRequest) -> Result<Value, ErrorObject> {
+    // Boundary validation shared by the one-shot and session paths.
+    if req.query.trim().is_empty() {
         return Err(ErrorObject::bad_input("compare requires a query"));
     }
-    if args.top_k == 0 {
+    if req.top_k == 0 {
         return Err(ErrorObject::bad_input("compare --top-k must be at least 1"));
     }
-    let kind: LegalKind = args.kind.into();
-    let query_text = parade_query_text(&args.query).ok_or_else(|| {
+    let kind: LegalKind = req.kind.into();
+    let query_text = parade_query_text(&req.query).ok_or_else(|| {
         ErrorObject::bad_input("compare query must contain at least one searchable token")
     })?;
-    let as_of = args.as_of.clone().unwrap_or_else(today_utc);
+    let as_of = req.as_of.clone().unwrap_or_else(today_utc);
     let kind_filter = match kind {
         LegalKind::Code => Some("article"),
         LegalKind::Decision => Some("decision"),
         LegalKind::All => None,
     };
-    let pool_limit = args.top_k.saturating_mul(20);
+    let pool_limit = req.top_k.saturating_mul(20);
 
-    let index_dir = require_existing_index_dir(index_dir)?;
+    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
     let postgres = open_index(index_dir.as_path())?;
     ensure_query_readiness(&postgres, QueryReadinessGate::Search)?;
     let embedder = PreparedQueryEmbedder::from_env()?;
-    let (embedding_literal, embedding_fingerprint) = embedder.embed(args.query.as_str())?;
+    let (embedding_literal, embedding_fingerprint) = embedder.embed(req.query.as_str())?;
 
     let mut modes_out = serde_json::Map::new();
     let mut pool: Vec<Value> = Vec::new();
@@ -59,7 +60,7 @@ pub(crate) fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Re
                 decision_filters: DecisionFilters::default(),
                 lexical_limit: pool_limit,
                 dense_limit: pool_limit,
-                limit: args.top_k,
+                limit: req.top_k,
             },
         )
         .map_err(storage_error_object)?;
@@ -113,7 +114,7 @@ pub(crate) fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Re
     };
 
     Ok(json!({
-        "query": args.query,
+        "query": req.query,
         "as_of": as_of,
         "kind": match kind {
             LegalKind::Code => "code",
@@ -121,7 +122,7 @@ pub(crate) fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Re
             LegalKind::All => "all",
         },
         "group_by": "document",
-        "top_k": args.top_k,
+        "top_k": req.top_k,
         "modes": Value::Object(modes_out),
         "pool": pool,
         "overlap": {
@@ -133,8 +134,8 @@ pub(crate) fn compare_payload(args: CompareArgs, index_dir: Option<&Path>) -> Re
     }))
 }
 
-pub(crate) fn emit_compare(args: CompareArgs, index_dir: Option<&Path>) -> anyhow::Result<()> {
-    match compare_payload(args, index_dir) {
+pub(crate) fn emit_compare(req: CompareRequest) -> anyhow::Result<()> {
+    match compare_payload(req) {
         Ok(response) => write_json(&response),
         Err(error) => emit_error(error),
     }

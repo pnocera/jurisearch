@@ -655,34 +655,32 @@ pub(crate) fn eval_tune_payload(args: EvalTuneArgs, index_dir: Option<&Path>) ->
     }))
 }
 
-pub(crate) fn eval_phase1_payload(
-    args: EvalPhase1Args,
-    index_dir: Option<&Path>,
-) -> Result<Value, ErrorObject> {
-    if !args.list && args.top_k == 0 {
+pub(crate) fn eval_phase1_payload(req: EvalPhase1Request) -> Result<Value, ErrorObject> {
+    if !req.list && req.top_k == 0 {
         return Err(ErrorObject::bad_input(
             "eval phase1 --top-k must be at least 1 when executing fixtures",
         ));
     }
 
-    let fixtures = selected_phase1_eval_fixtures(args.include_dev);
+    let fixtures = selected_phase1_eval_fixtures(req.include_dev);
     let fixture_summary = phase1_eval_fixture_summary();
-    if args.list {
+    if req.list {
         return Ok(json!({
             "schema_version": SCHEMA_VERSION,
             "command": "eval phase1",
             "action": "list",
-            "include_dev": args.include_dev,
+            "include_dev": req.include_dev,
             "fixture_count": fixtures.len(),
             "eval_fixtures": fixture_summary,
             "fixtures": fixtures,
         }));
     }
 
+    let index_dir = req.index_dir.as_deref();
     let mut results = Vec::with_capacity(fixtures.len());
     for fixture in &fixtures {
         results.push(eval_phase1_fixture_result(
-            fixture, args.mode, args.top_k, index_dir,
+            fixture, req.mode, req.top_k, index_dir,
         )?);
     }
     let passed = results
@@ -690,15 +688,15 @@ pub(crate) fn eval_phase1_payload(
         .filter(|result| result["passed"].as_bool() == Some(true))
         .count();
     let failed = results.len().saturating_sub(passed);
-    let retrieval_mode: RetrievalMode = args.mode.into();
+    let retrieval_mode: RetrievalMode = req.mode.into();
 
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "command": "eval phase1",
         "action": "run",
-        "include_dev": args.include_dev,
+        "include_dev": req.include_dev,
         "retrieval_mode": retrieval_mode.as_str(),
-        "top_k": args.top_k,
+        "top_k": req.top_k,
         "eval_fixtures": fixture_summary,
         "summary": {
             "fixture_count": results.len(),
@@ -724,28 +722,26 @@ pub(crate) fn eval_phase1_fixture_result(
     top_k: u32,
     index_dir: Option<&Path>,
 ) -> Result<Value, ErrorObject> {
-    let search_result = search_payload(
-        SearchArgs {
-            query: fixture.query.clone(),
-            kind: CliKind::Code,
-            mode,
-            format: CliOutputFormat::Detailed,
-            group_by: CliGroupBy::Chunk,
-            top_k,
-            cursor: None,
-            as_of: fixture.as_of.clone(),
-            rrf_lexical_weight: None,
-            rrf_dense_weight: None,
-            probes: None,
-            court: None,
-            formation: None,
-            publication: None,
-            decided_from: None,
-            decided_to: None,
-            zone: None,
-        },
-        index_dir,
-    );
+    let search_result = search_payload(SearchRequest {
+        query: fixture.query.clone(),
+        kind: CliKind::Code,
+        mode,
+        format: CliOutputFormat::Detailed,
+        group_by: CliGroupBy::Chunk,
+        top_k,
+        cursor: None,
+        as_of: fixture.as_of.clone(),
+        rrf_lexical_weight: None,
+        rrf_dense_weight: None,
+        probes: None,
+        court: None,
+        formation: None,
+        publication: None,
+        decided_from: None,
+        decided_to: None,
+        zone: None,
+        index_dir: index_dir.map(Path::to_path_buf),
+    });
 
     match search_result {
         Ok(search) => Ok(eval_phase1_fixture_search_result(fixture, search)),

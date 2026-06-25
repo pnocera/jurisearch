@@ -29,56 +29,15 @@ pub(crate) fn run() -> anyhow::Result<()> {
         Command::Serve(args) => run_serve(args, index_dir.as_deref()),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
         Command::Eval(eval) => emit_eval(eval, index_dir.as_deref()),
-        Command::Search(args) => {
-            if args.query.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("search query must not be empty"))
-            } else if args.top_k == 0 {
-                emit_error(ErrorObject::bad_input("search --top-k must be at least 1"))
-            } else {
-                emit_search(args, index_dir.as_deref())
-            }
-        }
-        Command::Fetch(args) => {
-            if args.ids.is_empty() {
-                emit_error(ErrorObject::bad_input(
-                    "fetch requires at least one stable ID",
-                ))
-            } else {
-                emit_fetch(args, index_dir.as_deref())
-            }
-        }
-        Command::Cite(args) => {
-            if args.cite.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("cite requires a non-empty citation"))
-            } else {
-                emit_cite(args, index_dir.as_deref())
-            }
-        }
-        Command::Related(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("related requires a document id"))
-            } else {
-                emit_related(args, index_dir.as_deref())
-            }
-        }
-        Command::Compare(args) => {
-            if args.query.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("compare query must not be empty"))
-            } else if args.top_k == 0 {
-                emit_error(ErrorObject::bad_input("compare --top-k must be at least 1"))
-            } else {
-                emit_compare(args, index_dir.as_deref())
-            }
-        }
-        Command::Context(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input(
-                    "context requires a non-empty stable ID",
-                ))
-            } else {
-                emit_context(args, index_dir.as_deref())
-            }
-        }
+        // Boundary validation (empty query/id, top_k==0, …) now lives once in each payload builder,
+        // shared with the session path; the one-shot arms just build the request from the parsed
+        // clap args plus the global `--index-dir`.
+        Command::Search(args) => emit_search(args.into_request(index_dir)),
+        Command::Fetch(args) => emit_fetch(args.into_request(index_dir)),
+        Command::Cite(args) => emit_cite(args.into_request(index_dir)),
+        Command::Related(args) => emit_related(args.into_request(index_dir)),
+        Command::Compare(args) => emit_compare(args.into_request(index_dir)),
+        Command::Context(args) => emit_context(args.into_request(index_dir)),
         Command::Expand(args) => {
             if args.query.trim().is_empty() {
                 emit_error(ErrorObject::bad_input("expand query must not be empty"))
@@ -93,27 +52,15 @@ pub(crate) fn run() -> anyhow::Result<()> {
             Ok(response) => write_json(&response),
             Err(error) => emit_error(error),
         },
-        Command::Inspect(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("inspect requires a document id"))
-            } else {
-                match inspect_payload(args, index_dir.as_deref()) {
-                    Ok(response) => write_json(&response),
-                    Err(error) => emit_error(error),
-                }
-            }
-        }
-        Command::Versions(args) => {
-            if args.id.trim().is_empty() {
-                emit_error(ErrorObject::bad_input("versions requires a document id"))
-            } else {
-                match versions_payload(args, index_dir.as_deref()) {
-                    Ok(response) => write_json(&response),
-                    Err(error) => emit_error(error),
-                }
-            }
-        }
-        Command::Diff(args) => match diff_payload(args, index_dir.as_deref()) {
+        Command::Inspect(args) => match inspect_payload(args.into_request(index_dir)) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
+        Command::Versions(args) => match versions_payload(args.into_request(index_dir)) {
+            Ok(response) => write_json(&response),
+            Err(error) => emit_error(error),
+        },
+        Command::Diff(args) => match diff_payload(args.into_request(index_dir)) {
             Ok(response) => write_json(&response),
             Err(error) => emit_error(error),
         },

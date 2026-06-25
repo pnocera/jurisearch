@@ -18,10 +18,12 @@ pub(crate) use zones::*;
 
 pub(crate) fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {
     match eval.command {
-        Some(EvalSubcommand::Phase1(args)) => match eval_phase1_payload(args, index_dir) {
-            Ok(response) => write_json(&response),
-            Err(error) => emit_error(error),
-        },
+        Some(EvalSubcommand::Phase1(args)) => {
+            match eval_phase1_payload(args.into_request(index_dir.map(Path::to_path_buf))) {
+                Ok(response) => write_json(&response),
+                Err(error) => emit_error(error),
+            }
+        }
         Some(EvalSubcommand::FranceLegi(args)) => {
             let out_path = args.out.clone();
             match eval_france_legi_payload(args, index_dir) {
