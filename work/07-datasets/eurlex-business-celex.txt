@@ -1,0 +1,45 @@
+# Starter EUR-Lex CELEX manifest for French business-law research.
+# The 05-eurlex.sh script ignores blank lines and comments.
+
+# Private international law / commercial disputes
+32012R1215
+32008R0593
+32007R0864
+
+# Company law / insolvency / restructuring
+32017L1132
+32015R0848
+32019L1023
+
+# Competition / merger / vertical distribution
+32003R0001
+32004R0139
+32022R0720
+
+# Financial markets / listed companies / banking / payments
+32014R0596
+32014L0065
+32014R0600
+32017R1129
+32004L0109
+32013R0575
+32015L2366
+
+# Public procurement / concessions
+32014L0024
+32014L0025
+32014L0023
+
+# Data, digital and platform regulation
+32016R0679
+32023R2854
+32022R1925
+32022R2065
+32024R1689
+
+# AML / KYC
+32015L0849
+32024R1624
+
+# Commercial practice / payments
+32011L0007

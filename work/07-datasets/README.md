@@ -27,7 +27,7 @@ Credential/setup notes:
 
 ## How to get missing API credentials
 
-### RNE / INPI SFTP credentials
+### RNE / INPI FTP/SFTP credentials
 
 The full RNE bulk feed is free but account-gated by Data INPI.
 
@@ -38,17 +38,25 @@ The full RNE bulk feed is free but account-gated by Data INPI.
 3. In the personal account area, go to `Mes acces API / SFTP`.
 4. Select the enterprise/RNE datasets and formats you need, accept the reuse licence, and submit the access request.
 5. Wait for INPI to send the technical connection identifiers.
-6. Run the script with the SFTP values:
+6. Run the script with the values shown in your Data INPI personal space.
+
+Current Data INPI accounts may show an `ftp://...@www.inpi.net/` link:
 
 ```bash
-INPI_SFTP_HOST=... \
+INPI_TRANSFER_SCHEME=ftp \
+INPI_SFTP_HOST=www.inpi.net \
+INPI_SFTP_PORT=21 \
 INPI_SFTP_USER=... \
 INPI_SFTP_PASS=... \
-INPI_SFTP_REMOTE=/... \
+INPI_SFTP_REMOTE=/ \
 ./06-rne-inpi.sh
 ```
 
-The script expects `lftp` because it uses `mirror --continue` for resumable SFTP downloads.
+Some INPI SFTP technical documentation instead lists
+`registre-national-entreprises.inpi.fr` as the host and `9222` as the port. For
+that setup, set `INPI_TRANSFER_SCHEME=sftp`.
+
+The script expects `lftp` because it uses `mirror --continue` for resumable FTP/SFTP downloads.
 
 ### ACPR REGAFI API access
 
@@ -93,6 +101,52 @@ These scripts are public-download or manifest-download based:
 - `08-ted.sh`
 - `09-dg-comp-eu.sh`
 
-`05-eurlex.sh` needs `EURLEX_URLS_FILE` only for full dump URL selection. `09-dg-comp-eu.sh` needs `DG_COMP_URLS_FILE` only so you can choose the exact data.europa.eu distributions to download.
+`05-eurlex.sh` can be run immediately with the included business-law CELEX list:
+
+```bash
+CELEX_IDS_FILE=work/07-datasets/eurlex-business-celex.txt ./work/07-datasets/05-eurlex.sh
+```
+
+Then run the deeper EUR-Lex enrichments:
+
+```bash
+./work/07-datasets/05b-eurlex-consolidated.sh
+./work/07-datasets/05c-eurlex-relations.sh
+./work/07-datasets/05d-eurlex-transposition.sh
+./work/07-datasets/05e-eurlex-cjeu-business.sh
+```
+
+`05e-eurlex-cjeu-business.sh` only builds a CJEU case manifest by default. After
+reviewing the manifest, fetch the case files with:
+
+```bash
+EURLEX_CJEU_DOWNLOAD=1 ./work/07-datasets/05e-eurlex-cjeu-business.sh
+```
+
+Use `EURLEX_URLS_FILE` only for full dump URL selection. `09-dg-comp-eu.sh` needs `DG_COMP_URLS_FILE` only so you can choose the exact data.europa.eu distributions to download.
+
+### EUR-Lex scope for business lawyers
+
+EUR-Lex is the EU primary-law portal. For this project it is useful because many
+French business-law questions depend on EU regulations, directives, and CJEU
+case law: company law, insolvency, competition, public procurement, financial
+markets, AML/KYC, GDPR, platform regulation, and private international law.
+
+Do not start with the whole EUR-Lex corpus unless you want a broad EU-law index.
+Start with `eurlex-business-celex.txt`, then expand from query logs and missing
+answers. The full EUR-Lex data dump is useful later if we decide to index all
+EU legal acts in force in French; it is available through the Publications
+Office data-dump service and may require EU Login access.
+
+EUR-Lex enrichment scripts:
+
+- `05b-eurlex-consolidated.sh` discovers consolidated CELEX ids from Cellar RDF
+  and downloads the latest French consolidated XHTML by default.
+- `05c-eurlex-relations.sh` caches Cellar RDF and writes compact TSV files for
+  titles, case-law links, citations, amendments, and EuroVoc subjects.
+- `05d-eurlex-transposition.sh` extracts national implementation measure ids
+  and transposition dates for directives.
+- `05e-eurlex-cjeu-business.sh` builds a CJEU case-law manifest from relations
+  and can optionally download case RDF/XHTML.
 
 All scripts are resumable where the source protocol supports it. Partial HTTP downloads are kept as `.part` files and resumed with `curl -C -`; INPI SFTP uses `lftp mirror --continue`.
