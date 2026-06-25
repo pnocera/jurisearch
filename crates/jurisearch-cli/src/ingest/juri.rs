@@ -159,86 +159,55 @@ pub(crate) fn ingest_juri_archives_payload(
 
     'archives: for archive in &archives {
         let archive_name = archive.file_name.as_str();
-        let mut pending_members = Vec::with_capacity(LEGI_INGEST_TRANSACTION_BATCH_SIZE);
-        let mut pending_member_bytes = 0usize;
-        let read_result = for_each_xml_member_until(&archive.path, max_member_bytes, |member| {
-            if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
-                return Ok(ArchiveVisit::Stop);
-            }
-            counters.visited_members += 1;
-            let member_bytes = member.bytes.len();
-            if !pending_members.is_empty()
-                && pending_member_bytes.saturating_add(member_bytes)
-                    > LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT
-                && let Err(error) = flush_juri_archive_member_batch(
+        // Shared per-archive batching loop (see `read_archive_members_batched`); only the flush call
+        // and read-error label are JURI-specific. The visit count is threaded by value so the flush
+        // closure can hold the JURI-specific `&mut counters`.
+        let visited_before = counters.visited_members;
+        let read = read_archive_members_batched(
+            &archive.path,
+            max_member_bytes,
+            limit_members,
+            visited_before,
+            |pending_members, pending_member_bytes| {
+                flush_juri_archive_member_batch(
                     &mut ingest_client,
                     source,
                     run_id.as_str(),
                     archive_name,
-                    &mut pending_members,
-                    &mut pending_member_bytes,
+                    pending_members,
+                    pending_member_bytes,
                     quarantine_dir,
                     &mut counters,
                 )
-            {
-                fatal_error = Some(storage_error_object(error));
-                return Ok(ArchiveVisit::Stop);
+            },
+        );
+        match read {
+            Ok(report) => {
+                counters.visited_members = report.visited_members;
+                if report.stopped_by_limit {
+                    break 'archives;
+                }
             }
-            pending_members.push(member);
-            pending_member_bytes = pending_member_bytes.saturating_add(member_bytes);
-            if (pending_members.len() >= LEGI_INGEST_TRANSACTION_BATCH_SIZE
-                || pending_member_bytes >= LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT)
-                && let Err(error) = flush_juri_archive_member_batch(
-                    &mut ingest_client,
-                    source,
-                    run_id.as_str(),
-                    archive_name,
-                    &mut pending_members,
-                    &mut pending_member_bytes,
-                    quarantine_dir,
-                    &mut counters,
-                )
-            {
+            Err(ArchiveBatchReadError::Flush {
+                visited_members,
+                error,
+            }) => {
+                counters.visited_members = visited_members;
                 fatal_error = Some(storage_error_object(error));
-                return Ok(ArchiveVisit::Stop);
+                break 'archives;
             }
-            Ok(
-                if limit_members.is_some_and(|limit| counters.visited_members >= limit) {
-                    ArchiveVisit::Stop
-                } else {
-                    ArchiveVisit::Continue
-                },
-            )
-        });
-
-        if fatal_error.is_none()
-            && read_result.is_ok()
-            && !pending_members.is_empty()
-            && let Err(error) = flush_juri_archive_member_batch(
-                &mut ingest_client,
-                source,
-                run_id.as_str(),
-                archive_name,
-                &mut pending_members,
-                &mut pending_member_bytes,
-                quarantine_dir,
-                &mut counters,
-            )
-        {
-            fatal_error = Some(storage_error_object(error));
-        }
-
-        if let Err(error) = read_result {
-            fatal_error = Some(ErrorObject::bad_input(format!(
-                "failed to read {} archive `{}`: {error}",
-                source.as_str(),
-                archive.path.display()
-            )));
-        }
-        if fatal_error.is_some()
-            || limit_members.is_some_and(|limit| counters.visited_members >= limit)
-        {
-            break 'archives;
+            Err(ArchiveBatchReadError::Read {
+                visited_members,
+                error,
+            }) => {
+                counters.visited_members = visited_members;
+                fatal_error = Some(ErrorObject::bad_input(format!(
+                    "failed to read {} archive `{}`: {error}",
+                    source.as_str(),
+                    archive.path.display()
+                )));
+                break 'archives;
+            }
         }
     }
 

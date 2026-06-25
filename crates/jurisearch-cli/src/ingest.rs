@@ -14,10 +14,12 @@ use crate::*;
 mod juri;
 mod legi;
 mod pipeline;
+mod run;
 
 pub(crate) use juri::*;
 pub(crate) use legi::*;
 pub(crate) use pipeline::*;
+pub(crate) use run::*;
 
 /// Incremental sync: pull a source's new delta archives into the existing index. Reuses the proven
 /// per-source ingest path (and its compatibility-based resume, which skips already-ingested members
