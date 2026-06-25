@@ -141,7 +141,7 @@ impl PisteClient {
         build_exchange("judilibre", endpoint, "GET", url, request_json, None, fingerprint, result)
     }
 
-    pub(crate) fn judilibre_get_with_query(
+    fn judilibre_get_with_query(
         &self,
         path: &str,
         params: &[(&str, &str)],
@@ -349,7 +349,7 @@ pub struct OfficialApiExchange {
 /// `UpstreamError` (HTTP error or transport failure); a parsed `response_json` is kept whenever the body
 /// is valid JSON, even on error.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_exchange(
+fn build_exchange(
     provider: &'static str,
     endpoint: String,
     http_method: &'static str,
@@ -399,7 +399,7 @@ pub(crate) fn build_exchange(
 }
 
 /// Readable, bounded fingerprint of a GET query (sorted) for grouping re-fetches in the archive.
-pub(crate) fn query_fingerprint(params: &[(&str, &str)]) -> String {
+fn query_fingerprint(params: &[(&str, &str)]) -> String {
     let mut parts: Vec<String> = params
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
@@ -412,7 +412,7 @@ pub(crate) fn query_fingerprint(params: &[(&str, &str)]) -> String {
 /// exact serialized request body. Body-shape-agnostic on purpose — the previous version read a now-absent
 /// top-level `query` field, so every real-contract (`recherche.champs[*]…`) request collapsed to the same
 /// empty `legifrance-search:` fingerprint, destroying the per-row audit/dedup signal.
-pub(crate) fn legifrance_search_fingerprint(request_body: &str) -> String {
+pub(super) fn legifrance_search_fingerprint(request_body: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(request_body.as_bytes());
@@ -421,7 +421,7 @@ pub(crate) fn legifrance_search_fingerprint(request_body: &str) -> String {
 }
 
 /// GET query params as a JSON object, for the archive's `request_json` column.
-pub(crate) fn query_params_json(params: &[(&str, &str)]) -> Value {
+fn query_params_json(params: &[(&str, &str)]) -> Value {
     Value::Object(
         params
             .iter()
@@ -432,7 +432,7 @@ pub(crate) fn query_params_json(params: &[(&str, &str)]) -> Value {
 
 /// An exchange that never left the process because a required credential was missing — still archived
 /// as an `UpstreamError` so the attempt is durably accounted for.
-pub(crate) fn missing_credential_exchange(
+fn missing_credential_exchange(
     provider: &'static str,
     endpoint: String,
     http_method: &'static str,
@@ -464,7 +464,7 @@ struct TokenResponse {
 
 #[derive(Clone)]
 struct CachedToken {
-    pub(crate) access_token: String,
+    access_token: String,
     expires_at: Option<Instant>,
 }
 
@@ -479,13 +479,13 @@ impl fmt::Debug for CachedToken {
 }
 
 impl CachedToken {
-    pub(crate) fn is_valid(&self) -> bool {
+    fn is_valid(&self) -> bool {
         self.expires_at
             .is_none_or(|expires_at| Instant::now() < expires_at)
     }
 }
 
-pub(crate) fn join_url(base: &str, path: &str) -> String {
+fn join_url(base: &str, path: &str) -> String {
     format!(
         "{}/{}",
         base.trim_end_matches('/'),
@@ -493,7 +493,7 @@ pub(crate) fn join_url(base: &str, path: &str) -> String {
     )
 }
 
-pub(crate) fn response_json(response: ureq::Response) -> Result<Value, OfficialApiError> {
+fn response_json(response: ureq::Response) -> Result<Value, OfficialApiError> {
     response
         .into_json::<Value>()
         .map_err(|error| OfficialApiError::InvalidResponse(error.to_string()))

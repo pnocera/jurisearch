@@ -2,11 +2,11 @@
 
 use super::*;
 
-pub(crate) const LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS: usize = 6_000;
+pub(super) const LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS: usize = 6_000;
 
-pub(crate) const LEGI_ARTICLE_CHUNK_BUILDER_VERSION: &str = "legi_article_structural:v2";
+const LEGI_ARTICLE_CHUNK_BUILDER_VERSION: &str = "legi_article_structural:v2";
 
-pub(crate) fn build_article_chunks(document: &CanonicalDocument) -> Vec<CanonicalChunk> {
+pub(super) fn build_article_chunks(document: &CanonicalDocument) -> Vec<CanonicalChunk> {
     let context = article_chunk_context(document);
     let contextualized_body = contextualized_article_body(&context, &document.body);
     if contextualized_body.chars().count() <= LEGI_ARTICLE_CONTEXTUALIZED_CHUNK_MAX_CHARS {
@@ -83,7 +83,7 @@ pub(crate) fn build_article_chunks(document: &CanonicalDocument) -> Vec<Canonica
     }
 }
 
-pub(crate) fn article_chunk_context(document: &CanonicalDocument) -> String {
+fn article_chunk_context(document: &CanonicalDocument) -> String {
     let mut parts = document.hierarchy_path.clone();
     if let Some(title) = &document.title {
         parts.push(title.clone());
@@ -91,7 +91,7 @@ pub(crate) fn article_chunk_context(document: &CanonicalDocument) -> String {
     parts.join(" > ")
 }
 
-pub(crate) fn contextualized_article_body(context: &str, body: &str) -> String {
+fn contextualized_article_body(context: &str, body: &str) -> String {
     if context.is_empty() {
         body.to_owned()
     } else {
@@ -99,7 +99,7 @@ pub(crate) fn contextualized_article_body(context: &str, body: &str) -> String {
     }
 }
 
-pub(crate) fn structural_article_body_units(body: &str) -> Vec<&str> {
+fn structural_article_body_units(body: &str) -> Vec<&str> {
     // ARTICLE body assembly already collapses inline whitespace and emits one
     // '\n' per block boundary; split chunks can trim/drop empty lines and
     // rejoin units without changing the canonical text for current LEGI input.
@@ -109,7 +109,7 @@ pub(crate) fn structural_article_body_units(body: &str) -> Vec<&str> {
         .collect()
 }
 
-pub(crate) fn join_article_body_units(units: &[&str], extra: Option<&str>) -> String {
+fn join_article_body_units(units: &[&str], extra: Option<&str>) -> String {
     let mut body = units.join("\n");
     if let Some(extra) = extra {
         if !body.is_empty() {
@@ -120,7 +120,7 @@ pub(crate) fn join_article_body_units(units: &[&str], extra: Option<&str>) -> St
     body
 }
 
-pub(crate) fn push_alinea_chunk(
+fn push_alinea_chunk(
     document: &CanonicalDocument,
     context: &str,
     chunks: &mut Vec<CanonicalChunk>,
@@ -147,7 +147,7 @@ pub(crate) fn push_alinea_chunk(
     ));
 }
 
-pub(crate) fn build_article_chunk(
+fn build_article_chunk(
     document: &CanonicalDocument,
     context: &str,
     chunk_index: usize,
@@ -171,7 +171,7 @@ pub(crate) fn build_article_chunk(
     }
 }
 
-pub(crate) fn required(
+pub(super) fn required(
     entity: &'static str,
     field: &'static str,
     value: Option<String>,
@@ -180,7 +180,7 @@ pub(crate) fn required(
     required_non_empty(entity, field, value)
 }
 
-pub(crate) fn required_non_empty(
+pub(super) fn required_non_empty(
     entity: &'static str,
     field: &'static str,
     value: String,
@@ -192,7 +192,7 @@ pub(crate) fn required_non_empty(
     }
 }
 
-pub(crate) fn optional_non_empty(value: Option<String>) -> Option<String> {
+pub(super) fn optional_non_empty(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let trimmed = value.trim();
         if trimmed.is_empty() {

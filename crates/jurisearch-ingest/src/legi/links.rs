@@ -3,14 +3,14 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RawPublisherLink {
-    pub(crate) source_tag: String,
-    pub(crate) text: String,
-    pub(crate) attributes: Vec<GraphEdgeAttribute>,
+pub(super) struct RawPublisherLink {
+    source_tag: String,
+    text: String,
+    attributes: Vec<GraphEdgeAttribute>,
 }
 
 impl RawPublisherLink {
-    pub(crate) fn into_edge(self, index: usize, document: &CanonicalDocument) -> CanonicalGraphEdge {
+    pub(super) fn into_edge(self, index: usize, document: &CanonicalDocument) -> CanonicalGraphEdge {
         let to_source_uid = self.target_source_uid();
         let source_text = optional_non_empty(Some(self.text));
         let edge_id = publisher_edge_id(
@@ -38,14 +38,14 @@ impl RawPublisherLink {
         }
     }
 
-    pub(crate) fn target_source_uid(&self) -> Option<String> {
+    fn target_source_uid(&self) -> Option<String> {
         ["id", "cid", "cidtexte", "href"]
             .iter()
             .find_map(|key| self.attribute_value(key))
             .map(|value| extract_known_source_uid(value.as_str()).unwrap_or(value))
     }
 
-    pub(crate) fn attribute_value(&self, key: &str) -> Option<String> {
+    fn attribute_value(&self, key: &str) -> Option<String> {
         self.attributes
             .iter()
             .find(|attribute| attribute.key == key)
@@ -53,7 +53,7 @@ impl RawPublisherLink {
     }
 }
 
-pub(crate) fn push_publisher_link(
+pub(super) fn push_publisher_link(
     raw: &mut RawArticle,
     start: &BytesStart<'_>,
     source_tag: &str,
@@ -67,7 +67,7 @@ pub(crate) fn push_publisher_link(
     Ok(raw.publisher_links.len() - 1)
 }
 
-pub(crate) fn push_text_struct_link(
+pub(super) fn push_text_struct_link(
     raw: &mut RawTextStruct,
     start: &BytesStart<'_>,
     source_tag: &str,
@@ -92,21 +92,21 @@ pub(crate) fn push_text_struct_link(
     Ok(order)
 }
 
-pub(crate) fn text_struct_link_attribute(attributes: &[GraphEdgeAttribute], key: &str) -> Option<String> {
+fn text_struct_link_attribute(attributes: &[GraphEdgeAttribute], key: &str) -> Option<String> {
     attributes
         .iter()
         .find(|attribute| attribute.key == key)
         .and_then(|attribute| optional_non_empty(Some(attribute.value.clone())))
 }
 
-pub(crate) fn text_struct_link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Option<String> {
+fn text_struct_link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Option<String> {
     ["id", "cid", "cidtexte", "href"].iter().find_map(|key| {
         text_struct_link_attribute(attributes, key)
             .and_then(|value| extract_known_source_uid(value.as_str()))
     })
 }
 
-pub(crate) fn assign_text_struct_link_text(raw: &mut RawTextStruct, link_stack: &[usize], value: &str) {
+pub(super) fn assign_text_struct_link_text(raw: &mut RawTextStruct, link_stack: &[usize], value: &str) {
     let Some(link) = link_stack
         .last()
         .and_then(|index| raw.structure_links.get_mut(*index))
@@ -122,11 +122,11 @@ pub(crate) fn assign_text_struct_link_text(raw: &mut RawTextStruct, link_stack: 
     };
 }
 
-pub(crate) fn is_text_struct_link_tag(name: &str) -> bool {
+pub(super) fn is_text_struct_link_tag(name: &str) -> bool {
     matches!(name, "LIEN_TXT" | "LIEN_SECTION_TA" | "LIEN_ART")
 }
 
-pub(crate) fn assign_link_text(raw: &mut RawArticle, link_stack: &[usize], value: &str) {
+pub(super) fn assign_link_text(raw: &mut RawArticle, link_stack: &[usize], value: &str) {
     if let Some(link) = link_stack
         .last()
         .and_then(|index| raw.publisher_links.get_mut(*index))
@@ -135,14 +135,14 @@ pub(crate) fn assign_link_text(raw: &mut RawArticle, link_stack: &[usize], value
     }
 }
 
-pub(crate) fn is_publisher_link_tag(name: &str) -> bool {
+pub(super) fn is_publisher_link_tag(name: &str) -> bool {
     matches!(
         name,
         "LIEN" | "LIEN_ART" | "LIEN_SECTION_TA" | "LIEN_TXT" | "a" | "A"
     )
 }
 
-pub(crate) fn publisher_edge_id(
+fn publisher_edge_id(
     from_document_id: &str,
     index: usize,
     source_tag: &str,
@@ -159,7 +159,7 @@ pub(crate) fn publisher_edge_id(
     format!("publisher-edge:{digest}")
 }
 
-pub(crate) fn extract_known_source_uid(value: &str) -> Option<String> {
+pub(super) fn extract_known_source_uid(value: &str) -> Option<String> {
     ["LEGIARTI", "LEGISCTA", "LEGITEXT", "JORFTEXT"]
         .iter()
         .find_map(|prefix| {

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn validate_uid(value: &str, family: JuriFamily) -> Result<(), JuriParseError> {
+pub(super) fn validate_uid(value: &str, family: JuriFamily) -> Result<(), JuriParseError> {
     let prefix = family.uid_prefix();
     let expected: &'static str = match family {
         JuriFamily::Judicial => "JURITEXT[0-9]{12}",
@@ -24,14 +24,14 @@ pub(crate) fn validate_uid(value: &str, family: JuriFamily) -> Result<(), JuriPa
     }
 }
 
-pub(crate) fn validate_date_field(field: &'static str, value: &str) -> Result<(), JuriParseError> {
+pub(super) fn validate_date_field(field: &'static str, value: &str) -> Result<(), JuriParseError> {
     validate_iso_date(value).map_err(|()| JuriParseError::InvalidDate {
         field,
         value: value.to_owned(),
     })
 }
 
-pub(crate) fn validate_iso_date(value: &str) -> Result<(), ()> {
+pub(super) fn validate_iso_date(value: &str) -> Result<(), ()> {
     let bytes = value.as_bytes();
     let valid_shape = bytes.len() == 10
         && bytes[4] == b'-'
@@ -53,7 +53,7 @@ pub(crate) fn validate_iso_date(value: &str) -> Result<(), ()> {
     }
 }
 
-pub(crate) fn days_in_month(year: u16, month: u8) -> Option<u8> {
+fn days_in_month(year: u16, month: u8) -> Option<u8> {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
         4 | 6 | 9 | 11 => Some(30),
@@ -63,6 +63,6 @@ pub(crate) fn days_in_month(year: u16, month: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn is_leap_year(year: u16) -> bool {
+fn is_leap_year(year: u16) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }

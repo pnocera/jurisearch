@@ -2,13 +2,13 @@
 
 use super::*;
 
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) const NORMALIZED_L2_TOLERANCE: f32 = 0.01;
+const NORMALIZED_L2_TOLERANCE: f32 = 0.01;
 
-pub(crate) const INVALID_RESPONSE_BODY_LIMIT: usize = 1_000;
+const INVALID_RESPONSE_BODY_LIMIT: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,9 +83,9 @@ impl fmt::Display for EmbeddingInputStats {
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleClient {
-    pub(crate) config: EmbeddingConfig,
-    pub(crate) agent: ureq::Agent,
-    pub(crate) tokenizer: Option<Tokenizer>,
+    config: EmbeddingConfig,
+    agent: ureq::Agent,
+    tokenizer: Option<Tokenizer>,
 }
 
 impl OpenAiCompatibleClient {
@@ -224,18 +224,18 @@ impl OpenAiCompatibleClient {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct OpenAiEmbeddingResponse {
-    pub(crate) data: Vec<OpenAiEmbeddingData>,
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingData>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct OpenAiEmbeddingErrorResponse {
-    pub(crate) error: serde_json::Value,
+struct OpenAiEmbeddingErrorResponse {
+    error: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct OpenAiEmbeddingData {
-    pub(crate) embedding: Vec<f32>,
+struct OpenAiEmbeddingData {
+    embedding: Vec<f32>,
 }
 
 pub fn base_url_class(base_url: &str) -> BaseUrlClass {
@@ -252,7 +252,7 @@ pub fn base_url_class(base_url: &str) -> BaseUrlClass {
     }
 }
 
-pub(crate) fn endpoint_error(error: ureq::Error) -> EmbeddingError {
+fn endpoint_error(error: ureq::Error) -> EmbeddingError {
     match error {
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
@@ -267,7 +267,7 @@ pub(crate) fn endpoint_error(error: ureq::Error) -> EmbeddingError {
     }
 }
 
-pub(crate) fn truncate_response_body(body: &str) -> String {
+fn truncate_response_body(body: &str) -> String {
     let body = body.trim();
     let mut end = body.len();
     let mut chars = 0usize;

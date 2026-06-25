@@ -252,18 +252,18 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
 }
 
 #[derive(Debug)]
-pub(crate) struct HierarchyBackfillCandidate {
-    pub(crate) document_id: String,
-    pub(crate) document_json: String,
-    pub(crate) document_valid_from: Option<String>,
-    pub(crate) edge_payload: String,
-    pub(crate) section_json: String,
-    pub(crate) section_valid_from: Option<String>,
-    pub(crate) section_valid_to: Option<String>,
-    pub(crate) text_section_links_json: Option<String>,
+struct HierarchyBackfillCandidate {
+    document_id: String,
+    document_json: String,
+    document_valid_from: Option<String>,
+    edge_payload: String,
+    section_json: String,
+    section_valid_from: Option<String>,
+    section_valid_to: Option<String>,
+    text_section_links_json: Option<String>,
 }
 
-pub(crate) fn select_hierarchy_backfill_candidates(
+fn select_hierarchy_backfill_candidates(
     candidates: Vec<HierarchyBackfillCandidate>,
 ) -> Result<Vec<HierarchyBackfillCandidate>, StorageError> {
     let mut selected = Vec::new();
@@ -289,7 +289,7 @@ pub(crate) fn select_hierarchy_backfill_candidates(
     Ok(selected)
 }
 
-pub(crate) fn select_hierarchy_backfill_candidate(
+fn select_hierarchy_backfill_candidate(
     mut candidates: Vec<HierarchyBackfillCandidate>,
 ) -> Result<HierarchyBackfillCandidate, StorageError> {
     for index in 0..candidates.len() {
@@ -312,7 +312,7 @@ pub(crate) fn select_hierarchy_backfill_candidate(
     Ok(candidates.remove(0))
 }
 
-pub(crate) fn hierarchy_backfill_anchor(
+fn hierarchy_backfill_anchor(
     edge_payload: &str,
     document_valid_from: Option<&str>,
 ) -> Result<Option<String>, StorageError> {
@@ -335,7 +335,7 @@ pub(crate) fn hierarchy_backfill_anchor(
     }))
 }
 
-pub(crate) fn section_validity_contains(
+fn section_validity_contains(
     anchor: &str,
     valid_from: Option<&str>,
     valid_to: Option<&str>,
@@ -348,7 +348,7 @@ pub(crate) fn section_validity_contains(
         && valid_to.is_none_or(|date| is_iso_date(date) && anchor < date)
 }
 
-pub(crate) fn is_iso_date(value: &str) -> bool {
+fn is_iso_date(value: &str) -> bool {
     // Storage comparisons only need the canonical shape; ingest performs
     // semantic date validation before records reach these tables.
     value.as_bytes().iter().enumerate().all(|(index, byte)| {
@@ -360,7 +360,7 @@ pub(crate) fn is_iso_date(value: &str) -> bool {
     }) && value.len() == 10
 }
 
-pub(crate) fn enriched_article_hierarchy_json(
+pub(super) fn enriched_article_hierarchy_json(
     document_json: &str,
     section_json: &str,
     text_section_links_json: Option<&str>,
@@ -413,7 +413,7 @@ pub(crate) fn enriched_article_hierarchy_json(
     Ok(Some(serde_json::to_string(&document)?))
 }
 
-pub(crate) fn section_hierarchy_from_json(section: &serde_json::Value) -> Vec<String> {
+fn section_hierarchy_from_json(section: &serde_json::Value) -> Vec<String> {
     let mut hierarchy = string_array_field(section, "hierarchy_path");
     if let Some(section_title) = section.get("title").and_then(serde_json::Value::as_str)
         && hierarchy.last().is_none_or(|last| last != section_title)
@@ -423,7 +423,7 @@ pub(crate) fn section_hierarchy_from_json(section: &serde_json::Value) -> Vec<St
     hierarchy
 }
 
-pub(crate) fn text_struct_hierarchy_from_links(
+pub(super) fn text_struct_hierarchy_from_links(
     section: &serde_json::Value,
     links_json: &str,
 ) -> Result<Option<Vec<String>>, StorageError> {
@@ -458,7 +458,7 @@ pub(crate) fn text_struct_hierarchy_from_links(
     Ok(Some(merge_hierarchy_with_overlap(base, stack)))
 }
 
-pub(crate) fn merge_hierarchy_with_overlap(mut base: Vec<String>, suffix: Vec<String>) -> Vec<String> {
+pub(super) fn merge_hierarchy_with_overlap(mut base: Vec<String>, suffix: Vec<String>) -> Vec<String> {
     let max_overlap = base.len().min(suffix.len());
     let overlap = (0..=max_overlap)
         .rev()
@@ -468,7 +468,7 @@ pub(crate) fn merge_hierarchy_with_overlap(mut base: Vec<String>, suffix: Vec<St
     base
 }
 
-pub(crate) fn contextualized_article_body(hierarchy: &[String], title: Option<&str>, body: &str) -> String {
+fn contextualized_article_body(hierarchy: &[String], title: Option<&str>, body: &str) -> String {
     let mut parts = hierarchy.to_vec();
     if let Some(title) = title {
         parts.push(title.to_owned());

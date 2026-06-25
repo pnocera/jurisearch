@@ -2,11 +2,11 @@
 
 use super::*;
 
-pub(crate) const JURI_EMPTY_XML_ROOT: &str = "EMPTY_XML";
+const JURI_EMPTY_XML_ROOT: &str = "EMPTY_XML";
 
-pub(crate) const ROOT_JUDI: &str = "TEXTE_JURI_JUDI";
+pub(super) const ROOT_JUDI: &str = "TEXTE_JURI_JUDI";
 
-pub(crate) const ROOT_ADMIN: &str = "TEXTE_JURI_ADMIN";
+pub(super) const ROOT_ADMIN: &str = "TEXTE_JURI_ADMIN";
 
 /// Parse a bulk jurisprudence archive member into a canonical decision (or an unsupported-root
 /// classification). `source` is the dataset the archive belongs to (`cass`/`capp`/`inca`/`jade`).
@@ -50,7 +50,7 @@ pub fn parse_juri_xml(
     Ok(ParsedJuriXml::Decision(Box::new(decision)))
 }
 
-pub(crate) fn detect_root(xml: &str) -> Result<String, JuriParseError> {
+fn detect_root(xml: &str) -> Result<String, JuriParseError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     loop {
@@ -70,25 +70,25 @@ pub(crate) fn detect_root(xml: &str) -> Result<String, JuriParseError> {
 }
 
 #[derive(Default)]
-pub(crate) struct RawDecision {
-    pub(crate) fields: BTreeMap<String, String>,
-    pub(crate) case_numbers: Vec<String>,
+struct RawDecision {
+    fields: BTreeMap<String, String>,
+    case_numbers: Vec<String>,
     /// Body text accumulated with inline whitespace collapsed and `\n` at block boundaries.
-    pub(crate) body: String,
-    pub(crate) summaries: Vec<DecisionSummary>,
-    pub(crate) current_summary: Option<DecisionSummary>,
-    pub(crate) links: Vec<RawLink>,
+    body: String,
+    summaries: Vec<DecisionSummary>,
+    current_summary: Option<DecisionSummary>,
+    links: Vec<RawLink>,
 }
 
 /// Capture the judicial `PUBLI_BULL@publie` flag (`oui`/`non`) under a distinct metadata key so it
 /// never collides with any `PUBLI_BULL` text content.
-pub(crate) fn capture_publi_bull(raw: &mut RawDecision, start: &BytesStart<'_>) {
+fn capture_publi_bull(raw: &mut RawDecision, start: &BytesStart<'_>) {
     if let Some(publie) = attribute_value(start, "publie") {
         raw.fields.insert("PUBLI_BULL_publie".to_owned(), publie);
     }
 }
 
-pub(crate) fn parse_decision(
+fn parse_decision(
     source: ArchiveSource,
     family: JuriFamily,
     xml: &str,
@@ -194,7 +194,7 @@ pub(crate) fn parse_decision(
 }
 
 /// Tags whose text content we capture as scalar metadata (last-write-wins per tag).
-pub(crate) fn is_scalar_metadata_tag(name: &str) -> bool {
+fn is_scalar_metadata_tag(name: &str) -> bool {
     matches!(
         name,
         "ID" | "ANCIEN_ID"
@@ -224,7 +224,7 @@ pub(crate) fn is_scalar_metadata_tag(name: &str) -> bool {
     )
 }
 
-pub(crate) fn assign_text(raw: &mut RawDecision, stack: &[String], value: &str) {
+fn assign_text(raw: &mut RawDecision, stack: &[String], value: &str) {
     // CONTENU body text lives under BLOC_TEXTUEL/CONTENU and may be wrapped in inline/block tags;
     // capture it with inline whitespace collapsing (block boundaries are added on tag start/end).
     if in_body_context(stack) {
@@ -264,12 +264,12 @@ pub(crate) fn assign_text(raw: &mut RawDecision, stack: &[String], value: &str) 
 /// Whether the current element stack is inside the decision's main text body
 /// (`…/BLOC_TEXTUEL/CONTENU/…`). Mirrors the text-capture and `<br/>` guard exactly so they never
 /// diverge (NIT 1). `SOMMAIRE` and `CITATION_JP/CONTENU` are excluded because they lack `BLOC_TEXTUEL`.
-pub(crate) fn in_body_context(stack: &[String]) -> bool {
+fn in_body_context(stack: &[String]) -> bool {
     path_contains(stack, &["BLOC_TEXTUEL", "CONTENU"])
 }
 
 impl RawDecision {
-    pub(crate) fn into_decision(
+    fn into_decision(
         mut self,
         source: ArchiveSource,
         family: JuriFamily,

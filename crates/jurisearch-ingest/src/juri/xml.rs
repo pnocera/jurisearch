@@ -4,7 +4,7 @@ use super::*;
 
 /// Append decision body text, collapsing runs of whitespace to a single space and never emitting a
 /// leading space. Block boundaries are inserted separately by [`append_block_boundary`].
-pub(crate) fn append_xml_content(buffer: &mut String, value: &str) {
+pub(super) fn append_xml_content(buffer: &mut String, value: &str) {
     for character in value.chars() {
         if character.is_whitespace() {
             if !buffer.is_empty()
@@ -22,7 +22,7 @@ pub(crate) fn append_xml_content(buffer: &mut String, value: &str) {
 }
 
 /// End the current paragraph with a single `\n` (idempotent: never doubles newlines).
-pub(crate) fn append_block_boundary(buffer: &mut String) {
+pub(super) fn append_block_boundary(buffer: &mut String) {
     let trimmed_len = buffer.trim_end_matches(' ').len();
     buffer.truncate(trimmed_len);
     if !buffer.is_empty() && !buffer.ends_with('\n') {
@@ -31,7 +31,7 @@ pub(crate) fn append_block_boundary(buffer: &mut String) {
 }
 
 /// XHTML/DILA block tags whose start/end (or self-close) ends a paragraph inside the body.
-pub(crate) fn is_body_block_boundary(name: &str) -> bool {
+pub(super) fn is_body_block_boundary(name: &str) -> bool {
     matches!(
         name,
         "p" | "P"
@@ -55,7 +55,7 @@ pub(crate) fn is_body_block_boundary(name: &str) -> bool {
 }
 
 /// Finalize the accumulated body: trim, drop empty lines, and rejoin paragraphs with single `\n`.
-pub(crate) fn finish_body(buffer: &str) -> String {
+pub(super) fn finish_body(buffer: &str) -> String {
     buffer
         .split('\n')
         .map(collapse_ws)
@@ -64,7 +64,7 @@ pub(crate) fn finish_body(buffer: &str) -> String {
         .join("\n")
 }
 
-pub(crate) fn path_contains(stack: &[String], needle: &[&str]) -> bool {
+pub(super) fn path_contains(stack: &[String], needle: &[&str]) -> bool {
     !needle.is_empty()
         && stack.len() >= needle.len()
         && stack
@@ -72,11 +72,11 @@ pub(crate) fn path_contains(stack: &[String], needle: &[&str]) -> bool {
             .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
 }
 
-pub(crate) fn collapse_ws(value: &str) -> String {
+pub(super) fn collapse_ws(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn local_name(name: &[u8]) -> String {
+pub(super) fn local_name(name: &[u8]) -> String {
     let name = std::str::from_utf8(name).unwrap_or_default();
     match name.rsplit_once(':') {
         Some((_, local)) => local.to_owned(),
@@ -86,7 +86,7 @@ pub(crate) fn local_name(name: &[u8]) -> String {
 
 /// Resolve a general/character XML entity reference to its text value (predefined entities plus
 /// numeric char refs). Mirrors the LEGI parser's handling so decision text decodes identically.
-pub(crate) fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, JuriParseError> {
+pub(super) fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, JuriParseError> {
     let name = reference.decode().map_err(|error| JuriParseError::Xml {
         message: error.to_string(),
     })?;
@@ -112,7 +112,7 @@ pub(crate) fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, Juri
     }
 }
 
-pub(crate) fn collect_attributes(start: &BytesStart<'_>) -> Vec<GraphEdgeAttribute> {
+pub(super) fn collect_attributes(start: &BytesStart<'_>) -> Vec<GraphEdgeAttribute> {
     start
         .attributes()
         .flatten()
@@ -126,7 +126,7 @@ pub(crate) fn collect_attributes(start: &BytesStart<'_>) -> Vec<GraphEdgeAttribu
         .collect()
 }
 
-pub(crate) fn attribute_value(start: &BytesStart<'_>, key: &str) -> Option<String> {
+pub(super) fn attribute_value(start: &BytesStart<'_>, key: &str) -> Option<String> {
     start.attributes().flatten().find_map(|attribute| {
         if local_name(attribute.key.as_ref()).eq_ignore_ascii_case(key) {
             attribute
@@ -140,7 +140,7 @@ pub(crate) fn attribute_value(start: &BytesStart<'_>, key: &str) -> Option<Strin
     })
 }
 
-pub(crate) fn required(
+pub(super) fn required(
     entity: &'static str,
     field: &'static str,
     value: Option<String>,

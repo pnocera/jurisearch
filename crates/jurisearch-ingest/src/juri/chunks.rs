@@ -2,14 +2,14 @@
 
 use super::*;
 
-pub(crate) const JURI_DECISION_CHUNK_BUILDER_VERSION: &str = "juri_decision_heuristic:v1";
+pub(super) const JURI_DECISION_CHUNK_BUILDER_VERSION: &str = "juri_decision_heuristic:v1";
 
 /// Conservative per-chunk character budget for heuristic body splitting. Mirrors the LEGI article
 /// contextualized-chunk ceiling so decision chunks stay inside the embedding endpoint budget.
-pub(crate) const JURI_DECISION_CHUNK_MAX_CHARS: usize = 6_000;
+pub(super) const JURI_DECISION_CHUNK_MAX_CHARS: usize = 6_000;
 
 /// Build the decision context line prepended to every chunk's contextualized body.
-pub(crate) fn decision_context(decision: &CanonicalDecision) -> String {
+fn decision_context(decision: &CanonicalDecision) -> String {
     let mut parts = Vec::new();
     if let Some(title) = &decision.title {
         parts.push(title.clone());
@@ -27,7 +27,7 @@ pub(crate) fn decision_context(decision: &CanonicalDecision) -> String {
 
 /// Heuristic decision chunking: an optional summary chunk (SOMMAIRE titrage + analyses) followed by
 /// the full text split on paragraph boundaries into size-bounded chunks. Always `heuristic`.
-pub(crate) fn build_decision_chunks(decision: &CanonicalDecision) -> Vec<CanonicalChunk> {
+pub(super) fn build_decision_chunks(decision: &CanonicalDecision) -> Vec<CanonicalChunk> {
     let context = decision_context(decision);
     let mut chunks = Vec::new();
 
@@ -66,7 +66,7 @@ pub(crate) fn build_decision_chunks(decision: &CanonicalDecision) -> Vec<Canonic
     chunks
 }
 
-pub(crate) fn make_chunk(
+fn make_chunk(
     decision: &CanonicalDecision,
     context: &str,
     chunk_index: usize,
@@ -98,15 +98,15 @@ pub(crate) fn make_chunk(
 
 /// One body chunk plus an honest boundary marker distinguishing a natural paragraph pack from an
 /// emergency size-based split (WARN 5 / ADR fallback-quality case).
-pub(crate) struct BodyPiece {
-    pub(crate) text: String,
-    pub(crate) boundary: &'static str,
+struct BodyPiece {
+    text: String,
+    boundary: &'static str,
 }
 
 /// Split body text on paragraph boundaries, packing paragraphs into chunks under `max_chars`.
 /// A single over-long paragraph is hard-split on character count as a last resort, and those pieces
 /// are labelled `hard_split` so downstream diagnostics can tell them from natural `paragraph` packs.
-pub(crate) fn split_body(body: &str, max_chars: usize) -> Vec<BodyPiece> {
+fn split_body(body: &str, max_chars: usize) -> Vec<BodyPiece> {
     let paragraphs: Vec<&str> = body
         .split('\n')
         .map(str::trim)
@@ -154,7 +154,7 @@ pub(crate) fn split_body(body: &str, max_chars: usize) -> Vec<BodyPiece> {
     pieces
 }
 
-pub(crate) fn hard_split(text: &str, max_chars: usize) -> Vec<String> {
+fn hard_split(text: &str, max_chars: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     chars
         .chunks(max_chars.max(1))

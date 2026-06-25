@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>, LegiParseError> {
+pub(super) fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdgeAttribute>, LegiParseError> {
     let mut attributes = Vec::new();
     for attribute in start.attributes().with_checks(false) {
         let attribute = attribute.map_err(|error| LegiParseError::Xml {
@@ -21,7 +21,7 @@ pub(crate) fn collect_attributes(start: &BytesStart<'_>) -> Result<Vec<GraphEdge
     Ok(attributes)
 }
 
-pub(crate) fn attribute_value(start: &BytesStart<'_>, wanted: &str) -> Result<Option<String>, LegiParseError> {
+pub(super) fn attribute_value(start: &BytesStart<'_>, wanted: &str) -> Result<Option<String>, LegiParseError> {
     for attribute in start.attributes().with_checks(false) {
         let attribute = attribute.map_err(|error| LegiParseError::Xml {
             message: error.to_string(),
@@ -39,13 +39,13 @@ pub(crate) fn attribute_value(start: &BytesStart<'_>, wanted: &str) -> Result<Op
     Ok(None)
 }
 
-pub(crate) fn assign_if_empty(slot: &mut Option<String>, value: &str) {
+pub(super) fn assign_if_empty(slot: &mut Option<String>, value: &str) {
     if slot.is_none() {
         *slot = Some(value.to_owned());
     }
 }
 
-pub(crate) fn append_xml_content(buffer: &mut String, value: &str) {
+pub(super) fn append_xml_content(buffer: &mut String, value: &str) {
     for character in value.chars() {
         if character.is_whitespace() {
             if !buffer.is_empty()
@@ -62,7 +62,7 @@ pub(crate) fn append_xml_content(buffer: &mut String, value: &str) {
     }
 }
 
-pub(crate) fn append_block_boundary(buffer: &mut String) {
+pub(super) fn append_block_boundary(buffer: &mut String) {
     let trimmed_len = buffer.trim_end_matches(' ').len();
     buffer.truncate(trimmed_len);
     if !buffer.is_empty() && !buffer.ends_with('\n') {
@@ -70,7 +70,7 @@ pub(crate) fn append_block_boundary(buffer: &mut String) {
     }
 }
 
-pub(crate) fn is_body_block_boundary(name: &str) -> bool {
+pub(super) fn is_body_block_boundary(name: &str) -> bool {
     matches!(
         name,
         "p" | "P"
@@ -93,7 +93,7 @@ pub(crate) fn is_body_block_boundary(name: &str) -> bool {
     )
 }
 
-pub(crate) fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, LegiParseError> {
+pub(super) fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, LegiParseError> {
     match reference
         .decode()
         .map_err(|error| LegiParseError::Xml {
@@ -122,7 +122,7 @@ pub(crate) fn resolve_reference(reference: &BytesRef<'_>) -> Result<String, Legi
     }
 }
 
-pub(crate) fn path_ends_with(stack: &[String], tail: &[&str]) -> bool {
+pub(super) fn path_ends_with(stack: &[String], tail: &[&str]) -> bool {
     stack.len() >= tail.len()
         && stack[stack.len() - tail.len()..]
             .iter()
@@ -130,7 +130,7 @@ pub(crate) fn path_ends_with(stack: &[String], tail: &[&str]) -> bool {
             .eq(tail.iter().copied())
 }
 
-pub(crate) fn path_contains(stack: &[String], needle: &[&str]) -> bool {
+pub(super) fn path_contains(stack: &[String], needle: &[&str]) -> bool {
     !needle.is_empty()
         && stack.len() >= needle.len()
         && stack
@@ -138,11 +138,11 @@ pub(crate) fn path_contains(stack: &[String], needle: &[&str]) -> bool {
             .any(|window| window.iter().map(String::as_str).eq(needle.iter().copied()))
 }
 
-pub(crate) fn local_name(name: &[u8]) -> String {
+pub(super) fn local_name(name: &[u8]) -> String {
     String::from_utf8_lossy(name).into_owned()
 }
 
-pub(crate) fn attribute_name(name: &[u8]) -> String {
+fn attribute_name(name: &[u8]) -> String {
     let name = local_name(name);
     name.rsplit_once(':')
         .map(|(_, local)| local.to_owned())

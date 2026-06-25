@@ -2,35 +2,35 @@
 
 use crate::*;
 
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(crate) const LEGIFRANCE_TOKEN_SKEW: Duration = Duration::from_secs(30);
+pub(super) const LEGIFRANCE_TOKEN_SKEW: Duration = Duration::from_secs(30);
 
-pub(crate) const UPSTREAM_BODY_LIMIT: usize = 500;
+pub(super) const UPSTREAM_BODY_LIMIT: usize = 500;
 
-pub(crate) const PROD_JUDILIBRE_CREDENTIALS: &[&str] = &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_API_KEY"];
+const PROD_JUDILIBRE_CREDENTIALS: &[&str] = &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_API_KEY"];
 
-pub(crate) const SANDBOX_JUDILIBRE_CREDENTIALS: &[&str] =
+const SANDBOX_JUDILIBRE_CREDENTIALS: &[&str] =
     &["JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "PISTE_SANDBOX_API_KEY"];
 
-pub(crate) const PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS: &[&str] = &[
+const PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS: &[&str] = &[
     "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID",
     "PISTE_OAUTH_CLIENT_ID",
 ];
 
-pub(crate) const SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS: &[&str] = &[
+const SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS: &[&str] = &[
     "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID",
     "PISTE_SANDBOX_OAUTH_CLIENT_ID",
 ];
 
-pub(crate) const PROD_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
+const PROD_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
     "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
     "PISTE_OAUTH_CLIENT_SECRET",
 ];
 
-pub(crate) const SANDBOX_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
+const SANDBOX_LEGIFRANCE_CLIENT_SECRET_CREDENTIALS: &[&str] = &[
     "JURISEARCH_PISTE_LEGIFRANCE_CLIENT_SECRET",
     "PISTE_SANDBOX_OAUTH_CLIENT_SECRET",
 ];
@@ -152,34 +152,34 @@ impl OfficialApiConfig {
     }
 }
 
-pub(crate) fn first_nonempty_env(names: &[&str]) -> Option<String> {
+fn first_nonempty_env(names: &[&str]) -> Option<String> {
     names
         .iter()
         .find_map(|name| env::var(name).ok().filter(|value| !value.trim().is_empty()))
 }
 
-pub(crate) fn nonempty_env_or_default(name: &str, default: String) -> String {
+fn nonempty_env_or_default(name: &str, default: String) -> String {
     env::var(name)
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(default)
 }
 
-pub(crate) fn judilibre_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
+pub(super) fn judilibre_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
     match environment {
         PisteEnvironment::Production => PROD_JUDILIBRE_CREDENTIALS,
         PisteEnvironment::Sandbox => SANDBOX_JUDILIBRE_CREDENTIALS,
     }
 }
 
-pub(crate) fn legifrance_client_id_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
+pub(super) fn legifrance_client_id_credential_names(environment: PisteEnvironment) -> &'static [&'static str] {
     match environment {
         PisteEnvironment::Production => PROD_LEGIFRANCE_CLIENT_ID_CREDENTIALS,
         PisteEnvironment::Sandbox => SANDBOX_LEGIFRANCE_CLIENT_ID_CREDENTIALS,
     }
 }
 
-pub(crate) fn legifrance_client_secret_credential_names(
+pub(super) fn legifrance_client_secret_credential_names(
     environment: PisteEnvironment,
 ) -> &'static [&'static str] {
     match environment {

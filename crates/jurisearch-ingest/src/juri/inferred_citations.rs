@@ -4,12 +4,12 @@ use super::*;
 
 /// Max inferred citation edges kept per decision. Decisions citing more distinct articles are rare;
 /// this bounds graph bloat while covering the common case.
-pub(crate) const MAX_INFERRED_CITATION_EDGES: usize = 64;
+const MAX_INFERRED_CITATION_EDGES: usize = 64;
 
 // Matches "article(s) <num>" where <num> is an optional L/R/D prefix plus a dotted/hyphenated
 // article number (e.g. "L. 1242-14", "R.1332-2", "1014", "1240"). Stops the number at the first
 // separator. Case-insensitive.
-pub(crate) static ARTICLE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
+static ARTICLE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\barticles?\s+(?P<num>(?:[LRD]\.?\s?)?\d+(?:[-\u{2011}]\d+)*)")
         .expect("valid article citation regex")
 });
@@ -17,12 +17,12 @@ pub(crate) static ARTICLE_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
 // Within the short window after an article number (and before the next "article" keyword), detects
 // "du [même] code <name>" so a reference can be tied to a statutory code (the signal that
 // distinguishes a LEGI article citation from a treaty/convention article).
-pub(crate) static CODE_HINT_RE: LazyLock<Regex> = LazyLock::new(|| {
+static CODE_HINT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bdu\s+(?P<same>m[êe]me\s+)?code\b(?P<name>[^.;,\n)]{0,48})")
         .expect("valid code hint regex")
 });
 
-pub(crate) static NEXT_ARTICLE_RE: LazyLock<Regex> =
+static NEXT_ARTICLE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\barticles?\b").expect("valid next-article regex"));
 
 /// Parse lower-trust article-citation references from the decision body text into `inferred` graph
@@ -30,7 +30,7 @@ pub(crate) static NEXT_ARTICLE_RE: LazyLock<Regex> =
 /// treaty/convention articles), a reference is kept only when it carries an `L`/`R`/`D` statutory
 /// prefix OR is followed by a "du [même] code …" hint. Targets are NOT resolved here (`to_source_uid`
 /// stays `None`); the normalized article number + optional code hint are preserved as evidence.
-pub(crate) fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec<CanonicalGraphEdge> {
+pub(super) fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec<CanonicalGraphEdge> {
     let body = decision.body.as_str();
     let mut edges = Vec::new();
     let mut seen = BTreeSet::new();
@@ -108,7 +108,7 @@ pub(crate) fn build_inferred_citation_edges(decision: &CanonicalDecision) -> Vec
 /// Byte offset `max_bytes` after `start`, clamped to the string length and floored to the nearest
 /// UTF-8 char boundary at or after `start`. `start` must already be a char boundary (regex match
 /// ends are). This keeps body windowing panic-safe on accented French text.
-pub(crate) fn char_safe_window_end(text: &str, start: usize, max_bytes: usize) -> usize {
+fn char_safe_window_end(text: &str, start: usize, max_bytes: usize) -> usize {
     let mut end = start.saturating_add(max_bytes).min(text.len());
     while end > start && !text.is_char_boundary(end) {
         end -= 1;
@@ -117,7 +117,7 @@ pub(crate) fn char_safe_window_end(text: &str, start: usize, max_bytes: usize) -
 }
 
 /// Normalize a raw matched article number ("L. 1242-14" → "L1242-14", "R.1332-2" → "R1332-2").
-pub(crate) fn normalize_article_number(raw: &str) -> String {
+fn normalize_article_number(raw: &str) -> String {
     let mut normalized = String::new();
     for character in raw.chars() {
         match character {
@@ -132,7 +132,7 @@ pub(crate) fn normalize_article_number(raw: &str) -> String {
     normalized
 }
 
-pub(crate) fn inferred_edge_id(from_document_id: &str, article_number: &str, code_hint: Option<&str>) -> String {
+fn inferred_edge_id(from_document_id: &str, article_number: &str, code_hint: Option<&str>) -> String {
     let evidence = format!(
         "{from_document_id}|inferred|cites_article|{article_number}|{}",
         code_hint.unwrap_or_default()

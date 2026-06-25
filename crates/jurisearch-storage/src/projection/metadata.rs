@@ -86,7 +86,7 @@ pub fn insert_legi_metadata_roots_with_client<C: GenericClient>(
     })
 }
 
-pub(crate) fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<String> {
+pub(super) fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<String> {
     value
         .get(field)
         .and_then(serde_json::Value::as_array)
@@ -97,29 +97,29 @@ pub(crate) fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<
         .collect()
 }
 
-pub(crate) fn non_empty_json_str(value: &serde_json::Value, field: &str) -> Option<String> {
+pub(super) fn non_empty_json_str(value: &serde_json::Value, field: &str) -> Option<String> {
     let value = value.get(field)?.as_str()?.trim();
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-pub(crate) struct LegiMetadataRow {
-    pub(crate) metadata_key: String,
-    pub(crate) root_kind: &'static str,
-    pub(crate) source_uid: Option<String>,
-    pub(crate) parent_source_uid: Option<String>,
-    pub(crate) title: Option<String>,
-    pub(crate) valid_from: Option<String>,
-    pub(crate) valid_to: Option<String>,
-    pub(crate) valid_to_raw: Option<String>,
-    pub(crate) source_payload_hash: String,
-    pub(crate) source_archive: Option<String>,
-    pub(crate) source_member_path: Option<String>,
-    pub(crate) canonical_version: String,
-    pub(crate) canonical_json: String,
+struct LegiMetadataRow {
+    metadata_key: String,
+    root_kind: &'static str,
+    source_uid: Option<String>,
+    parent_source_uid: Option<String>,
+    title: Option<String>,
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+    valid_to_raw: Option<String>,
+    source_payload_hash: String,
+    source_archive: Option<String>,
+    source_member_path: Option<String>,
+    canonical_version: String,
+    canonical_json: String,
 }
 
 impl LegiMetadataRow {
-    pub(crate) fn from_root(root: LegiMetadataRoot<'_>) -> Result<Self, StorageError> {
+    fn from_root(root: LegiMetadataRoot<'_>) -> Result<Self, StorageError> {
         match root {
             LegiMetadataRoot::TextVersion(text) => Ok(Self {
                 metadata_key: legi_metadata_key(
@@ -183,7 +183,7 @@ impl LegiMetadataRow {
     }
 }
 
-pub(crate) fn legi_text_struct_metadata_key(text_struct: &ParsedTextStruct) -> String {
+fn legi_text_struct_metadata_key(text_struct: &ParsedTextStruct) -> String {
     let digest = source_payload_digest(text_struct.source_payload_hash.as_str());
     match text_struct.source_date_debut_hint.as_deref() {
         Some(date_anchor) => format!(
@@ -194,7 +194,7 @@ pub(crate) fn legi_text_struct_metadata_key(text_struct: &ParsedTextStruct) -> S
     }
 }
 
-pub(crate) fn legi_metadata_key(
+fn legi_metadata_key(
     root_kind: &str,
     source_uid: Option<&str>,
     date_anchor: Option<&str>,
@@ -209,7 +209,7 @@ pub(crate) fn legi_metadata_key(
     }
 }
 
-pub(crate) fn source_payload_digest(source_payload_hash: &str) -> &str {
+fn source_payload_digest(source_payload_hash: &str) -> &str {
     source_payload_hash
         .strip_prefix("sha256:")
         .unwrap_or(source_payload_hash)

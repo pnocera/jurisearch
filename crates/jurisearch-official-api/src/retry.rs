@@ -2,11 +2,11 @@
 
 use crate::*;
 
-pub(crate) const DEFAULT_MAX_RETRIES: u32 = 3;
+pub(super) const DEFAULT_MAX_RETRIES: u32 = 3;
 
-pub(crate) const DEFAULT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const DEFAULT_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
 
-pub(crate) const DEFAULT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const DEFAULT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// Retry/backoff policy for transient upstream failures (HTTP 429 and 5xx). Only safe,
 /// read-style PISTE requests are issued through it; transport errors are not retried.
@@ -58,7 +58,7 @@ impl RetryPolicy {
 /// Send a request, retrying transient upstream failures (HTTP 429 and 5xx) per `policy`.
 /// The `send` closure rebuilds and issues the request on each attempt (ureq builders are
 /// single-use). Transport errors and non-retryable statuses (e.g. 4xx) are returned immediately.
-pub(crate) fn send_with_retry<F>(policy: RetryPolicy, mut send: F) -> Result<ureq::Response, ureq::Error>
+pub(super) fn send_with_retry<F>(policy: RetryPolicy, mut send: F) -> Result<ureq::Response, ureq::Error>
 where
     F: FnMut() -> Result<ureq::Response, ureq::Error>,
 {
@@ -80,11 +80,11 @@ where
     }
 }
 
-pub(crate) fn is_retryable_status(error: &ureq::Error) -> bool {
+fn is_retryable_status(error: &ureq::Error) -> bool {
     matches!(error, ureq::Error::Status(code, _) if *code == 429 || (500..=599).contains(code))
 }
 
-pub(crate) fn retry_after_from_error(error: &ureq::Error) -> Option<Duration> {
+pub(super) fn retry_after_from_error(error: &ureq::Error) -> Option<Duration> {
     match error {
         // `Retry-After` is upstream-directed for any retryable status (429 and 5xx both use it).
         ureq::Error::Status(code, response) if *code == 429 || (500..=599).contains(code) => {
@@ -98,7 +98,7 @@ pub(crate) fn retry_after_from_error(error: &ureq::Error) -> Option<Duration> {
 
 /// Backoff for a given attempt (0-based): a `Retry-After` value wins (capped by `max_delay`),
 /// otherwise exponential `base_delay * 2^attempt`, capped by `max_delay`.
-pub(crate) fn retry_delay(retry_after: Option<Duration>, attempt: u32, policy: RetryPolicy) -> Duration {
+pub(super) fn retry_delay(retry_after: Option<Duration>, attempt: u32, policy: RetryPolicy) -> Duration {
     if let Some(after) = retry_after {
         return after.min(policy.max_delay);
     }
@@ -110,6 +110,6 @@ pub(crate) fn retry_delay(retry_after: Option<Duration>, attempt: u32, policy: R
         .min(policy.max_delay)
 }
 
-pub(crate) fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
+fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }

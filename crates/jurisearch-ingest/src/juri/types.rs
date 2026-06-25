@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) const JURI_DECISION_CANONICAL_VERSION: &str = "juri_decision:v1";
+pub(super) const JURI_DECISION_CANONICAL_VERSION: &str = "juri_decision:v1";
 
 /// Result of parsing one bulk jurisprudence XML member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,7 +217,7 @@ impl CanonicalDecision {
         Ok(())
     }
 
-    pub(crate) fn validate_chunk(
+    fn validate_chunk(
         &self,
         chunk: &CanonicalChunk,
         expected_index: usize,
@@ -335,7 +335,7 @@ pub enum JuriParseError {
 }
 
 impl JuriFamily {
-    pub(crate) fn entity_name(self) -> &'static str {
+    pub(super) fn entity_name(self) -> &'static str {
         match self {
             JuriFamily::Judicial => "TEXTE_JURI_JUDI",
             JuriFamily::Administrative => "TEXTE_JURI_ADMIN",

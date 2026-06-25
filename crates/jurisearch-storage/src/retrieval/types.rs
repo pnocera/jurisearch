@@ -4,9 +4,9 @@ use super::*;
 
 // Dense ANN candidates are post-filtered by document validity, so fetch a
 // wider pool before assigning gap-free dense ranks.
-pub(crate) const DENSE_TEMPORAL_OVERFETCH_FACTOR: u32 = 4;
+pub(super) const DENSE_TEMPORAL_OVERFETCH_FACTOR: u32 = 4;
 
-pub(crate) const DEFAULT_CONTEXT_SIBLING_LIMIT: u32 = 50;
+pub(super) const DEFAULT_CONTEXT_SIBLING_LIMIT: u32 = 50;
 
 // Reciprocal-rank-fusion constant and per-arm weights. LEGI has many near-duplicate sibling
 // articles (same parent text, different article number) whose dense embeddings are nearly
@@ -15,13 +15,13 @@ pub(crate) const DEFAULT_CONTEXT_SIBLING_LIMIT: u32 = 50;
 // vote; tune via env without recompiling. The default down-weights dense to 0.3 (BM25-favored).
 pub(crate) const RRF_K: f64 = 60.0;
 
-pub(crate) const DEFAULT_RRF_LEXICAL_WEIGHT: f64 = 1.0;
+pub(super) const DEFAULT_RRF_LEXICAL_WEIGHT: f64 = 1.0;
 
 // Dense down-weighted to a recall-expander/tie-breaker. France-LEGI calibration over the production
 // index: equal weight (1.0) gave known-item recall@10 0.55; 0.3 lifts it to 0.60 with no temporal
 // regression (0.75) and an immaterial cross-reference change. Lower still (0.15) trades temporal
 // away for known-item. See reviews/2026-06-23-retrieval-fusion-*.
-pub(crate) const DEFAULT_RRF_DENSE_WEIGHT: f64 = 0.3;
+pub(super) const DEFAULT_RRF_DENSE_WEIGHT: f64 = 0.3;
 
 /// `(lexical_weight, dense_weight)` for hybrid RRF, overridable via
 /// `JURISEARCH_RRF_LEXICAL_WEIGHT` / `JURISEARCH_RRF_DENSE_WEIGHT` (finite, >= 0).
@@ -100,7 +100,7 @@ pub struct DecisionFilters<'a> {
 }
 
 impl DecisionFilters<'_> {
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.jurisdiction.is_none()
             && self.formation.is_none()
             && self.publication.is_none()
@@ -171,11 +171,11 @@ pub(crate) fn effective_probes(options: &RetrievalOptions) -> u32 {
 }
 
 impl HybridCandidateQuery<'_> {
-    pub(crate) fn effective_rrf_weights(&self) -> (f64, f64) {
+    pub(super) fn effective_rrf_weights(&self) -> (f64, f64) {
         effective_rrf_weights(&self.options)
     }
 
-    pub(crate) fn effective_probes(&self) -> u32 {
+    pub(super) fn effective_probes(&self) -> u32 {
         effective_probes(&self.options)
     }
 }
@@ -261,7 +261,7 @@ impl RelatedRelation {
         }
     }
 
-    pub(crate) fn direction(self) -> &'static str {
+    pub(super) fn direction(self) -> &'static str {
         match self {
             Self::Cites | Self::Temporal => "outgoing",
             Self::CitedBy | Self::InterpretedBy => "incoming",

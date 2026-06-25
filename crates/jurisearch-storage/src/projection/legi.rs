@@ -31,9 +31,9 @@ pub fn insert_legi_documents(
 /// LEGI document/chunk/edge upsert statements, prepared once and reused across a whole ingest batch
 /// instead of being re-parsed per member (an archive batch holds up to ~128 members).
 pub struct LegiProjectionStatements {
-    pub(crate) document: postgres::Statement,
-    pub(crate) chunk: postgres::Statement,
-    pub(crate) edge: postgres::Statement,
+    pub(super) document: postgres::Statement,
+    pub(super) chunk: postgres::Statement,
+    pub(super) edge: postgres::Statement,
 }
 
 /// Prepare the three LEGI projection statements on `client` (typically once per ingest transaction).

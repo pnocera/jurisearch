@@ -150,7 +150,7 @@ pub enum CanonicalValidationError {
 }
 
 impl CanonicalChunk {
-    pub(crate) fn validate_for_document(
+    fn validate_for_document(
         &self,
         document: &CanonicalDocument,
         expected_index: usize,
@@ -190,7 +190,7 @@ impl CanonicalChunk {
     }
 }
 
-pub(crate) fn invalid_chunk(chunk: &CanonicalChunk, message: impl Into<String>) -> CanonicalValidationError {
+fn invalid_chunk(chunk: &CanonicalChunk, message: impl Into<String>) -> CanonicalValidationError {
     CanonicalValidationError::InvalidChunk {
         chunk_id: chunk.chunk_id.clone(),
         message: message.into(),

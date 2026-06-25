@@ -77,7 +77,7 @@ pub fn refresh_replay_snapshot_with_client(
     Ok(snapshot)
 }
 
-pub(crate) fn load_replay_snapshot(
+fn load_replay_snapshot(
     client: &mut postgres::Client,
 ) -> Result<ReplaySnapshotReport, StorageError> {
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
@@ -159,7 +159,7 @@ pub(crate) fn load_replay_snapshot(
     })
 }
 
-pub(crate) fn load_cached_replay_snapshot<C: GenericClient>(
+pub(super) fn load_cached_replay_snapshot<C: GenericClient>(
     client: &mut C,
 ) -> Result<Option<ReplaySnapshotReport>, StorageError> {
     let Some(row) = client
@@ -183,7 +183,7 @@ pub(crate) fn load_cached_replay_snapshot<C: GenericClient>(
     }
 }
 
-pub(crate) fn store_replay_snapshot<C: GenericClient>(
+fn store_replay_snapshot<C: GenericClient>(
     client: &mut C,
     snapshot: &ReplaySnapshotReport,
 ) -> Result<(), StorageError> {
@@ -205,7 +205,7 @@ pub(crate) fn store_replay_snapshot<C: GenericClient>(
     Ok(())
 }
 
-pub(crate) fn snapshot_component<C: GenericClient>(
+fn snapshot_component<C: GenericClient>(
     client: &mut C,
     component_name: &str,
     rows_sql: &str,

@@ -2,57 +2,57 @@
 
 use super::*;
 
-pub(crate) const LEGI_EMPTY_XML_ROOT: &str = "EMPTY_XML";
+const LEGI_EMPTY_XML_ROOT: &str = "EMPTY_XML";
 
 #[derive(Debug, Default)]
-pub(crate) struct RawArticle {
-    pub(crate) id: Option<String>,
-    pub(crate) url: Option<String>,
-    pub(crate) nature: Option<String>,
-    pub(crate) etat: Option<String>,
-    pub(crate) num: Option<String>,
-    pub(crate) article_type: Option<String>,
-    pub(crate) date_debut: Option<String>,
-    pub(crate) date_fin: Option<String>,
-    pub(crate) body: String,
-    pub(crate) hierarchy_path: Vec<String>,
-    pub(crate) publisher_links: Vec<RawPublisherLink>,
+pub(super) struct RawArticle {
+    id: Option<String>,
+    url: Option<String>,
+    nature: Option<String>,
+    etat: Option<String>,
+    num: Option<String>,
+    article_type: Option<String>,
+    date_debut: Option<String>,
+    date_fin: Option<String>,
+    body: String,
+    hierarchy_path: Vec<String>,
+    pub(super) publisher_links: Vec<RawPublisherLink>,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct RawTextVersion {
-    pub(crate) id: Option<String>,
-    pub(crate) url: Option<String>,
-    pub(crate) nature: Option<String>,
-    pub(crate) title: Option<String>,
-    pub(crate) title_full: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) date_debut: Option<String>,
-    pub(crate) date_fin: Option<String>,
+struct RawTextVersion {
+    id: Option<String>,
+    url: Option<String>,
+    nature: Option<String>,
+    title: Option<String>,
+    title_full: Option<String>,
+    status: Option<String>,
+    date_debut: Option<String>,
+    date_fin: Option<String>,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct RawSectionTa {
-    pub(crate) id: Option<String>,
-    pub(crate) title: Option<String>,
-    pub(crate) date_debut: Option<String>,
-    pub(crate) date_fin: Option<String>,
-    pub(crate) parent_text_id: Option<String>,
-    pub(crate) hierarchy_path: Vec<String>,
+struct RawSectionTa {
+    id: Option<String>,
+    title: Option<String>,
+    date_debut: Option<String>,
+    date_fin: Option<String>,
+    parent_text_id: Option<String>,
+    hierarchy_path: Vec<String>,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct RawTextStruct {
-    pub(crate) id: Option<String>,
-    pub(crate) url: Option<String>,
-    pub(crate) nature: Option<String>,
-    pub(crate) cid: Option<String>,
-    pub(crate) num: Option<String>,
-    pub(crate) nor: Option<String>,
-    pub(crate) date_publi: Option<String>,
-    pub(crate) date_texte: Option<String>,
-    pub(crate) source_date_debut_hint: Option<String>,
-    pub(crate) structure_links: Vec<ParsedTextStructLink>,
+pub(super) struct RawTextStruct {
+    id: Option<String>,
+    url: Option<String>,
+    nature: Option<String>,
+    cid: Option<String>,
+    num: Option<String>,
+    nor: Option<String>,
+    date_publi: Option<String>,
+    date_texte: Option<String>,
+    source_date_debut_hint: Option<String>,
+    pub(super) structure_links: Vec<ParsedTextStructLink>,
 }
 
 pub fn parse_legi_xml(
@@ -87,7 +87,7 @@ pub fn parse_legi_member(member: &ArchiveMember) -> Result<ParsedLegiXml, LegiPa
     parse_legi_xml(xml, SourceProvenance::from_archive_member(member))
 }
 
-pub(crate) fn detect_root(xml: &str) -> Result<String, LegiParseError> {
+fn detect_root(xml: &str) -> Result<String, LegiParseError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
 
@@ -109,7 +109,7 @@ pub(crate) fn detect_root(xml: &str) -> Result<String, LegiParseError> {
     }
 }
 
-pub(crate) fn parse_article(
+fn parse_article(
     xml: &str,
     provenance: SourceProvenance,
 ) -> Result<CanonicalDocument, LegiParseError> {
@@ -182,7 +182,7 @@ pub(crate) fn parse_article(
     raw.into_document(xml, provenance)
 }
 
-pub(crate) fn parse_text_version(
+fn parse_text_version(
     xml: &str,
     provenance: SourceProvenance,
 ) -> Result<ParsedTextVersion, LegiParseError> {
@@ -230,7 +230,7 @@ pub(crate) fn parse_text_version(
     raw.into_text_version(xml, provenance)
 }
 
-pub(crate) fn parse_section_ta(
+fn parse_section_ta(
     xml: &str,
     provenance: SourceProvenance,
 ) -> Result<ParsedSectionTa, LegiParseError> {
@@ -298,7 +298,7 @@ pub(crate) fn parse_section_ta(
     raw.into_section_ta(xml, provenance)
 }
 
-pub(crate) fn parse_text_struct(
+fn parse_text_struct(
     xml: &str,
     provenance: SourceProvenance,
 ) -> Result<ParsedTextStruct, LegiParseError> {
@@ -375,7 +375,7 @@ pub(crate) fn parse_text_struct(
     raw.into_text_struct(xml, provenance)
 }
 
-pub(crate) fn assign_article_text(raw: &mut RawArticle, stack: &[String], value: &str) {
+fn assign_article_text(raw: &mut RawArticle, stack: &[String], value: &str) {
     if path_contains(stack, &["BLOC_TEXTUEL", "CONTENU"]) {
         append_xml_content(&mut raw.body, value);
         return;
@@ -409,7 +409,7 @@ pub(crate) fn assign_article_text(raw: &mut RawArticle, stack: &[String], value:
     }
 }
 
-pub(crate) fn assign_text_version_text(raw: &mut RawTextVersion, stack: &[String], value: &str) {
+fn assign_text_version_text(raw: &mut RawTextVersion, stack: &[String], value: &str) {
     if value.trim().is_empty() {
         return;
     }
@@ -434,7 +434,7 @@ pub(crate) fn assign_text_version_text(raw: &mut RawTextVersion, stack: &[String
     }
 }
 
-pub(crate) fn assign_section_text(raw: &mut RawSectionTa, stack: &[String], value: &str) {
+fn assign_section_text(raw: &mut RawSectionTa, stack: &[String], value: &str) {
     if value.trim().is_empty() {
         return;
     }
@@ -451,7 +451,7 @@ pub(crate) fn assign_section_text(raw: &mut RawSectionTa, stack: &[String], valu
     }
 }
 
-pub(crate) fn assign_section_title_dates(
+fn assign_section_title_dates(
     raw: &mut RawSectionTa,
     start: &BytesStart<'_>,
 ) -> Result<(), LegiParseError> {
@@ -468,7 +468,7 @@ pub(crate) fn assign_section_title_dates(
     Ok(())
 }
 
-pub(crate) fn assign_text_struct_text(raw: &mut RawTextStruct, stack: &[String], value: &str) {
+fn assign_text_struct_text(raw: &mut RawTextStruct, stack: &[String], value: &str) {
     if value.trim().is_empty() {
         return;
     }
@@ -493,7 +493,7 @@ pub(crate) fn assign_text_struct_text(raw: &mut RawTextStruct, stack: &[String],
     }
 }
 
-pub(crate) fn assign_text_struct_date_hint(
+fn assign_text_struct_date_hint(
     raw: &mut RawTextStruct,
     start: &BytesStart<'_>,
 ) -> Result<(), LegiParseError> {
@@ -511,7 +511,7 @@ pub(crate) fn assign_text_struct_date_hint(
     Ok(())
 }
 
-pub(crate) fn append_body_block_boundary_for_current_tag(raw: &mut RawArticle, stack: &[String]) {
+fn append_body_block_boundary_for_current_tag(raw: &mut RawArticle, stack: &[String]) {
     if stack
         .last()
         .is_some_and(|name| is_body_block_boundary(name.as_str()))
@@ -522,7 +522,7 @@ pub(crate) fn append_body_block_boundary_for_current_tag(raw: &mut RawArticle, s
 }
 
 impl RawArticle {
-    pub(crate) fn into_document(
+    fn into_document(
         self,
         xml: &str,
         provenance: SourceProvenance,
@@ -596,7 +596,7 @@ impl RawArticle {
 }
 
 impl RawTextVersion {
-    pub(crate) fn into_text_version(
+    fn into_text_version(
         self,
         xml: &str,
         provenance: SourceProvenance,
@@ -643,7 +643,7 @@ impl RawTextVersion {
 }
 
 impl RawSectionTa {
-    pub(crate) fn into_section_ta(
+    fn into_section_ta(
         self,
         xml: &str,
         provenance: SourceProvenance,
@@ -682,7 +682,7 @@ impl RawSectionTa {
 }
 
 impl RawTextStruct {
-    pub(crate) fn into_text_struct(
+    fn into_text_struct(
         self,
         xml: &str,
         provenance: SourceProvenance,

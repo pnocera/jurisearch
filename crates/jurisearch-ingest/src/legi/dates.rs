@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn validate_id(
+pub(super) fn validate_id(
     field: &'static str,
     value: &str,
     prefix: &'static str,
@@ -26,12 +26,12 @@ pub(crate) fn validate_id(
     }
 }
 
-pub(crate) fn normalize_required_date(field: &'static str, value: &str) -> Result<String, LegiParseError> {
+pub(super) fn normalize_required_date(field: &'static str, value: &str) -> Result<String, LegiParseError> {
     validate_date(field, value)?;
     Ok(value.to_owned())
 }
 
-pub(crate) fn normalize_end_date(field: &'static str, value: &str) -> Result<Option<String>, LegiParseError> {
+pub(super) fn normalize_end_date(field: &'static str, value: &str) -> Result<Option<String>, LegiParseError> {
     validate_date(field, value)?;
     if matches!(value, "2999-01-01" | "2999-12-31") {
         Ok(None)
@@ -40,7 +40,7 @@ pub(crate) fn normalize_end_date(field: &'static str, value: &str) -> Result<Opt
     }
 }
 
-pub(crate) fn validate_date(field: &'static str, value: &str) -> Result<(), LegiParseError> {
+pub(super) fn validate_date(field: &'static str, value: &str) -> Result<(), LegiParseError> {
     let bytes = value.as_bytes();
     let valid_shape = bytes.len() == 10
         && bytes[4] == b'-'
@@ -68,7 +68,7 @@ pub(crate) fn validate_date(field: &'static str, value: &str) -> Result<(), Legi
     }
 }
 
-pub(crate) fn days_in_month(year: u16, month: u8) -> Option<u8> {
+fn days_in_month(year: u16, month: u8) -> Option<u8> {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
         4 | 6 | 9 | 11 => Some(30),
@@ -78,6 +78,6 @@ pub(crate) fn days_in_month(year: u16, month: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn is_leap_year(year: u16) -> bool {
+fn is_leap_year(year: u16) -> bool {
     (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }

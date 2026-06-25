@@ -55,7 +55,7 @@ impl OfficialApiError {
     }
 }
 
-pub(crate) fn official_api_error(error: ureq::Error) -> OfficialApiError {
+pub(super) fn official_api_error(error: ureq::Error) -> OfficialApiError {
     match error {
         ureq::Error::Status(429, response) => {
             let retry_after = response.header("Retry-After").map(str::to_owned);
@@ -70,7 +70,7 @@ pub(crate) fn official_api_error(error: ureq::Error) -> OfficialApiError {
     }
 }
 
-pub(crate) fn truncated_body(body: String) -> String {
+fn truncated_body(body: String) -> String {
     let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut truncated = body.chars().take(UPSTREAM_BODY_LIMIT).collect::<String>();
     if body.chars().count() > UPSTREAM_BODY_LIMIT {

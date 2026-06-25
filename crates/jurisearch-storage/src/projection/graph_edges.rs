@@ -4,7 +4,7 @@ use super::*;
 
 /// Insert one canonical graph edge (publisher or inferred). The stored `edge_source` column is taken
 /// from `edge.edge_source`, so publisher and inferred edges remain distinguishable in queries.
-pub(crate) fn insert_graph_edge(
+pub(super) fn insert_graph_edge(
     client: &mut impl GenericClient,
     statement: &postgres::Statement,
     edge: &CanonicalGraphEdge,

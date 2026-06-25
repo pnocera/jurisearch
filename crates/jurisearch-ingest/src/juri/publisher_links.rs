@@ -2,15 +2,15 @@
 
 use super::*;
 
-pub(crate) struct RawLink {
-    pub(crate) text: String,
-    pub(crate) attributes: Vec<GraphEdgeAttribute>,
+pub(super) struct RawLink {
+    pub(super) text: String,
+    pub(super) attributes: Vec<GraphEdgeAttribute>,
 }
 
 /// Build publisher graph edges from `LIENS/LIEN` applied-text references. Bulk/official links are
 /// `edge_source = publisher`; targets are resolved when an `id`/`cidtexte` is present, otherwise the
 /// raw evidence text is preserved for later resolution.
-pub(crate) fn build_publisher_edges(
+pub(super) fn build_publisher_edges(
     decision: &CanonicalDecision,
     links: &[RawLink],
 ) -> Vec<CanonicalGraphEdge> {
@@ -56,7 +56,7 @@ pub(crate) fn build_publisher_edges(
         .collect()
 }
 
-pub(crate) fn link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Option<String> {
+fn link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Option<String> {
     ["id", "cidtexte"].iter().find_map(|key| {
         attributes
             .iter()
@@ -66,7 +66,7 @@ pub(crate) fn link_target_source_uid(attributes: &[GraphEdgeAttribute]) -> Optio
     })
 }
 
-pub(crate) fn decision_edge_id(
+fn decision_edge_id(
     from_document_id: &str,
     index: usize,
     source_tag: &str,

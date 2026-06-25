@@ -24,7 +24,7 @@ impl IngestMemberStatus {
         }
     }
 
-    pub(crate) fn from_db(value: &str) -> Result<Self, StorageError> {
+    pub(super) fn from_db(value: &str) -> Result<Self, StorageError> {
         match value {
             "discovered" => Ok(Self::Discovered),
             "parsed" => Ok(Self::Parsed),

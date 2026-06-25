@@ -172,7 +172,7 @@ pub fn update_ingest_run_manifest_with_client<C: GenericClient>(
     }
 }
 
-pub(crate) fn compatibility_mismatches(
+pub(super) fn compatibility_mismatches(
     actual: (&str, &str, &str, &str),
     expected: IngestCompatibility<'_>,
 ) -> Vec<String> {

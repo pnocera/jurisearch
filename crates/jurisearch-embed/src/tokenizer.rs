@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn load_tokenizer(path: Option<&Path>) -> Result<Option<Tokenizer>, EmbeddingError> {
+pub(super) fn load_tokenizer(path: Option<&Path>) -> Result<Option<Tokenizer>, EmbeddingError> {
     let Some(path) = path else {
         return Ok(None);
     };

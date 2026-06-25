@@ -32,7 +32,7 @@ pub fn load_ingest_embedding_coverage(
     load_embedding_coverage(&mut client)
 }
 
-pub(crate) fn load_readiness_metrics(
+pub(super) fn load_readiness_metrics(
     client: &mut postgres::Client,
 ) -> Result<IngestReadinessReport, StorageError> {
     Ok(IngestReadinessReport {
@@ -44,7 +44,7 @@ pub(crate) fn load_readiness_metrics(
 /// Manifest key holding a cached, fully-ready query-readiness report. Its mere PRESENCE means the
 /// index was fully query-ready (projection AND embedding coverage complete) at cache time; ingest
 /// and embed runs delete it (see `invalidate_query_readiness`), so a present entry is still valid.
-pub(crate) const QUERY_READINESS_MANIFEST_KEY: &str = "query_readiness";
+const QUERY_READINESS_MANIFEST_KEY: &str = "query_readiness";
 
 /// Load the cached fully-ready query-readiness report, if present and parseable. A returned `Some`
 /// means the index was fully query-ready and nothing has ingested/embedded since.
@@ -152,11 +152,11 @@ pub fn load_or_compute_query_readiness(
 }
 
 /// A coverage metric is complete when every counted item is covered and at least one exists.
-pub(crate) fn coverage_is_complete(metric: &CoverageMetric) -> bool {
+fn coverage_is_complete(metric: &CoverageMetric) -> bool {
     metric.total > 0 && metric.covered == metric.total
 }
 
-pub(crate) fn load_projection_coverage<C: GenericClient>(
+fn load_projection_coverage<C: GenericClient>(
     client: &mut C,
 ) -> Result<CoverageMetric, StorageError> {
     let projection = client
@@ -178,7 +178,7 @@ pub(crate) fn load_projection_coverage<C: GenericClient>(
     })
 }
 
-pub(crate) fn load_embedding_coverage<C: GenericClient>(
+fn load_embedding_coverage<C: GenericClient>(
     client: &mut C,
 ) -> Result<CoverageMetric, StorageError> {
     // The non-NULL guards are redundant with SQL equality semantics, but make

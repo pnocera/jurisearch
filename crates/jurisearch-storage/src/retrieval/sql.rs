@@ -10,7 +10,7 @@ pub(crate) fn format_sql_f64(value: f64) -> String {
 }
 
 /// Build a `%value%` LIKE pattern, escaping the LIKE metacharacters `\ % _` (escape char `\`).
-pub(crate) fn like_contains(value: &str) -> String {
+pub(super) fn like_contains(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);
     escaped.push('%');
     for ch in value.chars() {
@@ -24,7 +24,7 @@ pub(crate) fn like_contains(value: &str) -> String {
 }
 
 /// Keyset cursor predicate for chunk grouping (over the `ranked` rows). Tie-break on `chunk_id`.
-pub(crate) fn cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
+pub(super) fn cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
     match cursor {
         Some(RetrievalCursor::Chunk { score, chunk_id }) => {
             let score = sql_string_literal(score);
@@ -57,7 +57,7 @@ pub(crate) fn document_cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> 
     }
 }
 
-pub(crate) fn ranked_candidate_ctes(
+pub(super) fn ranked_candidate_ctes(
     query: &HybridCandidateQuery<'_>,
     query_text: &str,
     as_of: &str,
@@ -229,7 +229,7 @@ ranked AS (
     }
 }
 
-pub(crate) fn dense_query_inputs<'a>(
+fn dense_query_inputs<'a>(
     query: &'a HybridCandidateQuery<'a>,
 ) -> Result<(&'a str, &'a str), StorageError> {
     let query_embedding = query
@@ -252,21 +252,21 @@ pub(crate) fn dense_query_inputs<'a>(
     Ok((query_embedding, embedding_fingerprint))
 }
 
-pub(crate) fn dense_pool_limit(dense_limit: u32) -> u32 {
+fn dense_pool_limit(dense_limit: u32) -> u32 {
     dense_limit
         .saturating_mul(DENSE_TEMPORAL_OVERFETCH_FACTOR)
         .max(dense_limit)
 }
 
-pub(crate) const CITATION_FILTER: &str =
+pub(super) const CITATION_FILTER: &str =
     r#"'[{"key":"typelien","value":"CITATION"},{"key":"sens","value":"cible"}]'::jsonb"#;
 
-pub(crate) const VERSION_FILTER: &str =
+pub(super) const VERSION_FILTER: &str =
     r#"'[{"key":"debut"},{"key":"fin"},{"key":"num"},{"key":"etat"}]'::jsonb"#;
 
 /// The version family of an article: the target plus its LIEN_ART version-edge neighbours, with a
 /// shared CTE body so `versions` and `diff` resolve the same set. `$id` is interpolated by the caller.
-pub(crate) fn version_family_cte(id: &str) -> String {
+pub(super) fn version_family_cte(id: &str) -> String {
     // No `is_target` column here: LIEN_ART edges include a self-link, so the target also appears in
     // the edge branch. Keeping the columns identical lets UNION dedupe to one row per document;
     // consumers derive `is_target` as `document_id = id`.

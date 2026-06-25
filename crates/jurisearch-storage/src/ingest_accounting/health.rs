@@ -164,7 +164,7 @@ pub fn load_ingest_health_with_replay_snapshot_mode(
     })
 }
 
-pub(crate) fn percentage(covered: i64, total: i64) -> Option<f64> {
+pub(super) fn percentage(covered: i64, total: i64) -> Option<f64> {
     if total == 0 {
         None
     } else {
