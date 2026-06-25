@@ -82,24 +82,29 @@ pub(crate) fn france_juris_zone_retrieval_category(
     qrels: &Value,
     top_k: u32,
 ) -> Result<FranceJurisCategoryResult, ErrorObject> {
-    let mut hits = 0usize;
-    let mut done = 0usize;
-    for qrel in qrels.as_array().into_iter().flatten() {
-        let (Some(query), Some(gold_id)) =
-            (qrel["query"].as_str(), qrel["gold_document_id"].as_str())
-        else {
-            continue;
-        };
-        let docs =
-            france_juris_zone_search_documents(postgres, embedder, retrieval_mode, zone, query, top_k)?;
-        done += 1;
-        if docs.iter().take(top_k as usize).any(|doc| doc == gold_id) {
-            hits += 1;
-        }
-    }
+    let score = score_known_item_qrels(
+        qrels,
+        |qrel| {
+            let Some(query) = qrel["query"].as_str() else {
+                return Ok(None);
+            };
+            Ok(Some((
+                france_juris_zone_search_documents(
+                    postgres,
+                    embedder,
+                    retrieval_mode,
+                    zone,
+                    query,
+                    top_k,
+                )?,
+                None,
+            )))
+        },
+        |docs, gold_id| docs.iter().take(top_k as usize).any(|doc| doc == gold_id),
+    )?;
     Ok(FranceJurisCategoryResult {
-        metric: mean(hits, done),
-        queries: done,
+        metric: score.metric,
+        queries: score.queries,
     })
 }
 

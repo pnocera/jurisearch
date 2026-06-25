@@ -83,23 +83,22 @@ pub(crate) fn france_juris_retrieval_category(
     top_k: u32,
     overfetch: u32,
 ) -> Result<FranceJurisCategoryResult, ErrorObject> {
-    let mut hits = 0usize;
-    let mut done = 0usize;
-    for qrel in qrels.as_array().into_iter().flatten() {
-        let (Some(query), Some(gold_id)) =
-            (qrel["query"].as_str(), qrel["gold_document_id"].as_str())
-        else {
-            continue;
-        };
-        let docs = france_juris_search_documents(postgres, embedder, query, overfetch)?;
-        done += 1;
-        if docs.iter().take(top_k as usize).any(|doc| doc == gold_id) {
-            hits += 1;
-        }
-    }
+    let score = score_known_item_qrels(
+        qrels,
+        |qrel| {
+            let Some(query) = qrel["query"].as_str() else {
+                return Ok(None);
+            };
+            Ok(Some((
+                france_juris_search_documents(postgres, embedder, query, overfetch)?,
+                None,
+            )))
+        },
+        |docs, gold_id| docs.iter().take(top_k as usize).any(|doc| doc == gold_id),
+    )?;
     Ok(FranceJurisCategoryResult {
-        metric: mean(hits, done),
-        queries: done,
+        metric: score.metric,
+        queries: score.queries,
     })
 }
 
@@ -115,26 +114,13 @@ pub(crate) fn france_juris_search_documents(
     let Some(query_text) = parade_query_text(query) else {
         return Ok(Vec::new());
     };
-    let request = SearchRequest {
-        query: query.to_owned(),
-        kind: CliKind::Decision,
-        mode: CliSearchMode::Hybrid,
-        format: CliOutputFormat::Concise,
-        group_by: CliGroupBy::Document,
+    let request = benchmark_search_request(
+        query,
+        CliKind::Decision,
+        CliGroupBy::Document,
+        None,
         top_k,
-        cursor: None,
-        as_of: None,
-        rrf_lexical_weight: None,
-        rrf_dense_weight: None,
-        probes: None,
-        court: None,
-        formation: None,
-        publication: None,
-        decided_from: None,
-        decided_to: None,
-        zone: None,
-        index_dir: None,
-    };
+    );
     let response = match search_with_postgres(
         postgres,
         &request,
@@ -175,23 +161,19 @@ pub(crate) fn france_juris_citation_category(
     postgres: &ManagedPostgres,
     qrels: &Value,
 ) -> Result<FranceJurisCategoryResult, ErrorObject> {
-    let mut hits = 0usize;
-    let mut done = 0usize;
-    for qrel in qrels.as_array().into_iter().flatten() {
-        let (Some(query), Some(gold_id)) =
-            (qrel["query"].as_str(), qrel["gold_document_id"].as_str())
-        else {
-            continue;
-        };
-        let docs = france_juris_cite_documents(postgres, query)?;
-        done += 1;
-        if docs.iter().any(|doc| doc == gold_id) {
-            hits += 1;
-        }
-    }
+    let score = score_known_item_qrels(
+        qrels,
+        |qrel| {
+            let Some(query) = qrel["query"].as_str() else {
+                return Ok(None);
+            };
+            Ok(Some((france_juris_cite_documents(postgres, query)?, None)))
+        },
+        |docs, gold_id| docs.iter().any(|doc| doc == gold_id),
+    )?;
     Ok(FranceJurisCategoryResult {
-        metric: mean(hits, done),
-        queries: done,
+        metric: score.metric,
+        queries: score.queries,
     })
 }
 

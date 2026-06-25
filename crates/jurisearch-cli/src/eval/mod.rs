@@ -8,12 +8,14 @@ pub(crate) mod artifact;
 pub(crate) mod france_juris;
 pub(crate) mod france_legi;
 pub(crate) mod generic;
+pub(crate) mod scoring;
 pub(crate) mod zones;
 
 pub(crate) use artifact::*;
 pub(crate) use france_juris::*;
 pub(crate) use france_legi::*;
 pub(crate) use generic::*;
+pub(crate) use scoring::*;
 pub(crate) use zones::*;
 
 pub(crate) fn emit_eval(eval: EvalCommand, index_dir: Option<&Path>) -> anyhow::Result<()> {

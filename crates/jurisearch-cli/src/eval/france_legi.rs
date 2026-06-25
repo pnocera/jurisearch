@@ -37,45 +37,26 @@ pub(crate) fn eval_france_legi_payload(
     // routing backend served each query (the gate audit). known-item -> structured_citation_resolution
     // and temporal -> temporal_version_pinning resolve structurally; cross-reference is the advisory
     // semantic stress test (full body -> cited article, via hybrid).
-    let mut known_hits = 0usize;
-    let mut known_done = 0usize;
-    let mut known_backends = std::collections::BTreeMap::<String, usize>::new();
-    for qrel in gold["known_item"].as_array().into_iter().flatten() {
-        let (Some(query), Some(gold_id), Some(as_of)) = (
-            qrel["query"].as_str(),
-            qrel["gold_document_id"].as_str(),
-            qrel["as_of"].as_str(),
-        ) else {
-            continue;
-        };
-        let (docs, backend) =
-            france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
-        *known_backends.entry(backend).or_default() += 1;
-        known_done += 1;
-        if docs.iter().take(top_k).any(|doc| doc == gold_id) {
-            known_hits += 1;
-        }
-    }
-
-    let mut temporal_hits = 0usize;
-    let mut temporal_done = 0usize;
-    let mut temporal_backends = std::collections::BTreeMap::<String, usize>::new();
-    for qrel in gold["temporal"].as_array().into_iter().flatten() {
-        let (Some(query), Some(gold_id), Some(as_of)) = (
-            qrel["query"].as_str(),
-            qrel["gold_document_id"].as_str(),
-            qrel["as_of"].as_str(),
-        ) else {
-            continue;
-        };
-        let (docs, backend) =
-            france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
-        *temporal_backends.entry(backend).or_default() += 1;
-        temporal_done += 1;
-        if docs.iter().take(top_k).any(|doc| doc == gold_id) {
-            temporal_hits += 1;
-        }
-    }
+    // known-item and temporal share the single-gold scoring loop; each resolves `query` + `as_of`
+    // through the production search (recording the routing backend) and scores recall@top_k. A qrel
+    // missing query/as_of is skipped (resolver returns None) exactly as before.
+    let score_legi_category = |qrels: &Value| {
+        score_known_item_qrels(
+            qrels,
+            |qrel| {
+                let (Some(query), Some(as_of)) = (qrel["query"].as_str(), qrel["as_of"].as_str())
+                else {
+                    return Ok(None);
+                };
+                let (docs, backend) =
+                    france_legi_search_documents(&postgres, &embedder, query, as_of, overfetch)?;
+                Ok(Some((docs, Some(backend))))
+            },
+            |docs, gold_id| docs.iter().take(top_k).any(|doc| doc == gold_id),
+        )
+    };
+    let known_score = score_legi_category(&gold["known_item"])?;
+    let temporal_score = score_legi_category(&gold["temporal"])?;
 
     // cross-reference (advisory semantic): production search applies a temporal prefilter, so match
     // the cited ARTICLE (any version, by source_uid) rather than the exact cited version; as_of =
@@ -118,14 +99,14 @@ pub(crate) fn eval_france_legi_payload(
     }
 
     let structured = FranceLegiCategoryResult {
-        metric: mean(known_hits, known_done),
-        queries: known_done,
-        backends: json!(known_backends),
+        metric: known_score.metric,
+        queries: known_score.queries,
+        backends: json!(known_score.backends),
     };
     let temporal = FranceLegiCategoryResult {
-        metric: mean(temporal_hits, temporal_done),
-        queries: temporal_done,
-        backends: json!(temporal_backends),
+        metric: temporal_score.metric,
+        queries: temporal_score.queries,
+        backends: json!(temporal_score.backends),
     };
     let semantic = FranceLegiCategoryResult {
         metric: if cross_done > 0 {
@@ -269,26 +250,13 @@ pub(crate) fn france_legi_search_documents(
     let Some(query_text) = parade_query_text(query) else {
         return Ok((Vec::new(), "none".to_owned()));
     };
-    let request = SearchRequest {
-        query: query.to_owned(),
-        kind: CliKind::Code,
-        mode: CliSearchMode::Hybrid,
-        format: CliOutputFormat::Concise,
-        group_by: CliGroupBy::Chunk,
+    let request = benchmark_search_request(
+        query,
+        CliKind::Code,
+        CliGroupBy::Chunk,
+        Some(as_of.to_owned()),
         top_k,
-        cursor: None,
-        as_of: Some(as_of.to_owned()),
-        rrf_lexical_weight: None,
-        rrf_dense_weight: None,
-        probes: None,
-        court: None,
-        formation: None,
-        publication: None,
-        decided_from: None,
-        decided_to: None,
-        zone: None,
-        index_dir: None,
-    };
+    );
     let response = match search_with_postgres(
         postgres,
         &request,
