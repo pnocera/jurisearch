@@ -122,6 +122,7 @@ fn embedded_example() -> EmbeddedManifest {
         payload: PayloadLayout {
             files: vec![PayloadFile {
                 table: "documents".to_owned(),
+                columns: vec!["document_id".to_owned(), "body".to_owned()],
                 op: EventKind::Upsert,
                 format: PayloadFormat::Jsonl,
                 compression: Compression::Zstd,

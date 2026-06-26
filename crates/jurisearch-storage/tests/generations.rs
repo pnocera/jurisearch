@@ -6,8 +6,9 @@ use jurisearch_storage::{
     france_juris::{FranceJurisGoldLimits, france_juris_gold_json, france_juris_index_revision},
     generations::{
         ActivationStamps, REPLICATED_TABLES, activate_generation, active_generation_schema,
-        create_generation_from_public, create_generation_schema, drop_retired_generation,
-        generation_name, generation_schema, populate_generation_from_public,
+        build_generation_indexes, create_generation_from_public, create_generation_load_tables,
+        create_generation_schema, drop_retired_generation, generation_name, generation_schema,
+        populate_generation_from_public,
     },
     ingest_accounting::load_or_compute_query_readiness,
     retrieval::{
@@ -41,7 +42,7 @@ fn stamps() -> ActivationStamps<'static> {
     ActivationStamps {
         sequence: 1,
         baseline_id: "core-2026-06-26-g0001",
-        schema_version: 20,
+        schema_version: 21,
         embedding_fingerprint: "bge-m3:1024:cls:normalize=true",
         builder_versions: &serde_json::Value::Null,
         last_package_id: None,
@@ -637,6 +638,142 @@ fn citation_lookup_resolves_decision_identifiers_against_the_active_generation()
     assert!(
         by_pourvoi.contains("cass:DEC1"),
         "pourvoi lookup read the active generation: {by_pourvoi}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_loaded_generation_has_the_full_index_inventory_before_activation() -> Result<(), StorageError>
+{
+    // r-codex P3 D3 footgun guard: `create_generation_load_tables` clones EXCLUDING INDEXES (which
+    // also drops PK/UNIQUE, since they are index-backed); `build_generation_indexes` must recreate the
+    // FULL inventory — PK + every replayed index + the two IVFFlat ANN indexes at corpus-sized lists —
+    // so the loaded generation is structurally equal to `public` and its indexes are FUNCTIONAL before
+    // it is ever activated.
+    let Some(pg_config) = discover_pg_config("generation index inventory")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-gen-inventory.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_public_core(&postgres)?;
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+
+    // Load path: clone column shape only, bulk-load rows, then build the index/constraint inventory.
+    let g1 = create_generation_load_tables(&mut client, "core", 1, None)?;
+    populate_generation_from_public(&mut client, "core", &g1)?;
+    let report = build_generation_indexes(&mut client, &g1, "core")?;
+    assert!(report.constraints_built >= 1, "PK/UNIQUE recreated");
+    assert_eq!(
+        report.ivfflat_built.len(),
+        2,
+        "both IVFFlat ANN indexes built"
+    );
+
+    let schema = generation_schema("core", 1);
+
+    // The PK on documents is back (it would be absent if EXCLUDING INDEXES had not been compensated).
+    let pk = postgres.execute_sql(&format!(
+        "SELECT count(*)::text FROM pg_constraint \
+         WHERE conrelid = '{schema}.documents'::regclass AND contype = 'p';"
+    ))?;
+    assert_eq!(
+        pk.trim(),
+        "1",
+        "documents primary key recreated in the generation"
+    );
+
+    // Exactly two IVFFlat indexes and at least one BM25 index live in the generation schema.
+    let by_am = |am: &str| -> Result<String, StorageError> {
+        postgres.execute_sql(&format!(
+            "SELECT count(*)::text FROM pg_index x \
+             JOIN pg_class i ON i.oid = x.indexrelid \
+             JOIN pg_am a ON a.oid = i.relam \
+             JOIN pg_namespace n ON n.oid = i.relnamespace \
+             WHERE n.nspname = '{schema}' AND a.amname = '{am}';"
+        ))
+    };
+    assert_eq!(
+        by_am("ivfflat")?.trim(),
+        "2",
+        "two IVFFlat ANN indexes in the generation"
+    );
+    assert!(
+        by_am("bm25")?.trim().parse::<i32>().unwrap_or(0) >= 1,
+        "BM25 index in the generation"
+    );
+
+    // r-codex P3 WARN-2: the FOREIGN KEY inventory is recreated too (the load-mode footgun). The
+    // generation's FK count over replicated tables equals `public`'s, and points INTO the generation.
+    let replicated_array = REPLICATED_TABLES
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let gen_fks = postgres.execute_sql(&format!(
+        "SELECT count(*)::text FROM pg_constraint c \
+         JOIN pg_namespace n ON n.oid = c.connamespace \
+         WHERE n.nspname = '{schema}' AND c.contype = 'f';"
+    ))?;
+    let public_fks = postgres.execute_sql(&format!(
+        "SELECT count(*)::text FROM pg_constraint c \
+         JOIN pg_class t ON t.oid = c.conrelid \
+         JOIN pg_namespace n ON n.oid = t.relnamespace \
+         WHERE n.nspname = 'public' AND c.contype = 'f' AND t.relname IN ({replicated_array});"
+    ))?;
+    assert_eq!(
+        gen_fks.trim(),
+        public_fks.trim(),
+        "the generation's FK inventory matches public over replicated tables"
+    );
+    assert_eq!(
+        report.foreign_keys_built.to_string(),
+        gen_fks.trim(),
+        "every recreated FK is accounted for in the report"
+    );
+    assert!(
+        report.foreign_keys_built >= 2,
+        "chunks->documents and chunk_embeddings->chunks at least"
+    );
+    // A FK in the generation references INTO the generation, not back to public.
+    let fk_target_schema = postgres.execute_sql(&format!(
+        "SELECT DISTINCT nf.nspname FROM pg_constraint c \
+         JOIN pg_namespace n ON n.oid = c.connamespace \
+         JOIN pg_class cf ON cf.oid = c.confrelid \
+         JOIN pg_namespace nf ON nf.oid = cf.relnamespace \
+         WHERE n.nspname = '{schema}' AND c.contype = 'f' AND cf.relname = 'documents';"
+    ))?;
+    assert_eq!(
+        fk_target_schema.trim(),
+        schema,
+        "a replicated FK target resolves to the generation, not public"
+    );
+
+    // The indexes are FUNCTIONAL: a BM25 search and a vector search over the generation return the seed.
+    let gen_schema = generation_schema("core", 1);
+    let bm25_hit = postgres.execute_sql_with_search_path(
+        &[&gen_schema, "public"],
+        "SELECT chunk_id FROM chunks WHERE contextualized_body @@@ 'responsabilite' LIMIT 1;",
+    )?;
+    assert_eq!(
+        bm25_hit.trim(),
+        "cass:GEN1#0",
+        "BM25 index functional in the generation"
+    );
+    let vec_query = vector_literal(3);
+    let vec_hit = postgres.execute_sql_with_search_path(
+        &[&gen_schema, "public"],
+        &format!(
+            "SELECT chunk_id FROM chunk_embeddings ORDER BY embedding <-> '{vec_query}'::vector LIMIT 1;"
+        ),
+    )?;
+    assert_eq!(
+        vec_hit.trim(),
+        "cass:GEN1#0",
+        "IVFFlat index functional in the generation"
     );
     Ok(())
 }

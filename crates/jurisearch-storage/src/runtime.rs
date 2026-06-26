@@ -238,6 +238,30 @@ impl ManagedPostgres {
         psql(&self.pg_config, self.port, &self.database, sql)
     }
 
+    /// Open a fresh libpq client to this database (the connection dance every module repeats).
+    ///
+    /// # Errors
+    /// [`StorageError::PostgresClient`] if the connection fails.
+    pub fn client(&self) -> Result<postgres::Client, StorageError> {
+        postgres::Client::connect(&self.connection_string(), postgres::NoTls)
+            .map_err(StorageError::PostgresClient)
+    }
+
+    /// The server's major version (e.g. `18`), from `server_version_num / 10000`. Used to guard the
+    /// `COPY (FORMAT binary)` baseline transport (plan P3 D2): binary COPY is tied to the server's
+    /// type layout, so the producer stamps its major into the manifest and the consumer rejects a
+    /// mismatch instead of silently corrupting rows.
+    ///
+    /// # Errors
+    /// [`StorageError::PostgresClient`] on a DB error.
+    pub fn server_version_major(&self) -> Result<u32, StorageError> {
+        let raw = self.execute_sql("SELECT current_setting('server_version_num');")?;
+        let num: u32 = raw.trim().parse().map_err(|_| StorageError::Generations {
+            message: format!("could not parse server_version_num `{}`", raw.trim()),
+        })?;
+        Ok(num / 10_000)
+    }
+
     /// Run `sql` with a `search_path` set to `schemas` (each quoted) for this (fresh) `psql` session
     /// only (plan P2). The client read role resolves the active generation per query and sets the
     /// path here, so it can never go stale after a generation switch (unlike `ALTER DATABASE SET
@@ -829,7 +853,11 @@ fn connection_string(port: u16, database: &str) -> String {
     format!("host=127.0.0.1 port={port} user={SUPERUSER} dbname={database} connect_timeout=5")
 }
 
-pub(crate) fn sql_identifier(identifier: &str) -> String {
+/// Quote a SQL identifier (schema/table/column) by doubling embedded quotes — so a name derived from a
+/// corpus/generation can never break out of the statement. Public so the consumer service can build
+/// schema-qualified `COPY` statements (plan P3).
+#[must_use]
+pub fn sql_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
@@ -903,6 +931,8 @@ pub enum StorageError {
     Outbox { message: String },
     #[error("generation topology failed: {message}")]
     Generations { message: String },
+    #[error("package catalog conflict: {message}")]
+    PackageCatalog { message: String },
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("postgres client error: {0}")]

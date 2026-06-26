@@ -12,8 +12,9 @@ use jurisearch_storage::{
     },
     official_api_archive::{InsertOfficialApiResponse, insert_official_api_response_with_client},
     outbox::{
-        OutboxContext, OutboxEvent, corpus_table_digests, current_change_seq, emit_change,
-        scope_kind, scopes_changed_for_corpus,
+        DigestSource, OutboxContext, OutboxEvent, corpus_table_digests,
+        corpus_table_digests_with_client, current_change_seq, current_change_seq_with_client,
+        emit_change, scope_kind, scopes_changed_for_corpus,
     },
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
     runtime::{ManagedPostgres, StorageError},
@@ -223,7 +224,7 @@ fn corpus_digests_are_independent_of_the_outbox() -> Result<(), StorageError> {
          VALUES ('judilibre','production','/decision','GET','cass:DG1','fp','ok','sha256:x','core');",
     )?;
 
-    let digests = corpus_table_digests(&postgres, "core")?;
+    let digests = corpus_table_digests(&postgres, "core", DigestSource::ProducerPublic)?;
     let documents = digests
         .iter()
         .find(|d| d.table_name == "documents")
@@ -240,7 +241,7 @@ fn corpus_digests_are_independent_of_the_outbox() -> Result<(), StorageError> {
 
     // A change to a column the OLD hand-written signature omitted (official_api_responses.error)
     // now changes the digest — the §5.4 backstop covers all replicated content (WARN-1 fix).
-    let before = corpus_table_digests(&postgres, "core")?
+    let before = corpus_table_digests(&postgres, "core", DigestSource::ProducerPublic)?
         .into_iter()
         .find(|d| d.table_name == "official_api_responses")
         .expect("archive digest")
@@ -248,7 +249,7 @@ fn corpus_digests_are_independent_of_the_outbox() -> Result<(), StorageError> {
     postgres.execute_sql(
         "UPDATE official_api_responses SET error = 'mutated' WHERE subject_document_id = 'cass:DG1';",
     )?;
-    let after = corpus_table_digests(&postgres, "core")?
+    let after = corpus_table_digests(&postgres, "core", DigestSource::ProducerPublic)?
         .into_iter()
         .find(|d| d.table_name == "official_api_responses")
         .expect("archive digest")
@@ -256,7 +257,7 @@ fn corpus_digests_are_independent_of_the_outbox() -> Result<(), StorageError> {
     assert_ne!(before, after, "a replicated-column change flips the digest");
 
     // A non-existent corpus has zero rows everywhere.
-    let empty = corpus_table_digests(&postgres, "inpi")?;
+    let empty = corpus_table_digests(&postgres, "inpi", DigestSource::ProducerPublic)?;
     assert!(empty.iter().all(|d| d.row_count == 0));
     let _ = ChangeSeq::ZERO; // (imported for the read API window seeds elsewhere)
     Ok(())
@@ -705,6 +706,106 @@ fn dense_finalizers_emit_a_parent_scope_for_stamped_fingerprints() -> Result<(),
         current_change_seq(&postgres)?,
         stable,
         "no-op zone finalize emits nothing"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_build_snapshot_freezes_the_corpus_and_change_seq_against_concurrent_commits()
+-> Result<(), StorageError> {
+    // P3 BLOCKER regression: the baseline is cut from ONE producer snapshot so the payload and the
+    // catalog `change_seq` window can never disagree under concurrent ingest. Prove the `_with_client`
+    // digest + change_seq reads honour a REPEATABLE READ snapshot: a COMMITTED concurrent write is
+    // invisible inside the open transaction (the old per-call connections would have seen it).
+    let Some(pg_config) = discover_pg_config("outbox snapshot")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-outbox-snap.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    seed_decision(&postgres, "cass:S1")?;
+    let mut writer = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    let ctx = OutboxContext::new("snap-run", 21);
+    emit_change(
+        &mut writer,
+        &ctx,
+        &OutboxEvent::scope(
+            "core",
+            "documents",
+            EventKind::Upsert,
+            scope_kind::DOCUMENT,
+            "S1",
+        ),
+    )?;
+
+    // Open the build snapshot and read the corpus + change_seq through it.
+    let mut snap = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    let mut tx = snap
+        .build_transaction()
+        .isolation_level(postgres::IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .map_err(StorageError::PostgresClient)?;
+    let docs_before =
+        corpus_table_digests_with_client(&mut tx, "core", DigestSource::ProducerPublic)?
+            .into_iter()
+            .find(|d| d.table_name == "documents")
+            .expect("documents digest")
+            .row_count;
+    let seq_before = current_change_seq_with_client(&mut tx)?;
+
+    // A COMMITTED concurrent write: a new document + a new outbox row (bumps change_seq).
+    seed_decision(&postgres, "cass:S2")?;
+    emit_change(
+        &mut writer,
+        &ctx,
+        &OutboxEvent::scope(
+            "core",
+            "documents",
+            EventKind::Upsert,
+            scope_kind::DOCUMENT,
+            "S2",
+        ),
+    )?;
+
+    // Inside the SAME snapshot, both reads are unchanged.
+    let docs_after =
+        corpus_table_digests_with_client(&mut tx, "core", DigestSource::ProducerPublic)?
+            .into_iter()
+            .find(|d| d.table_name == "documents")
+            .expect("documents digest")
+            .row_count;
+    let seq_after = current_change_seq_with_client(&mut tx)?;
+    assert_eq!(
+        docs_before, docs_after,
+        "documents count is frozen in the build snapshot"
+    );
+    assert_eq!(
+        seq_before, seq_after,
+        "change_seq high-water is frozen in the build snapshot"
+    );
+    tx.commit().map_err(StorageError::PostgresClient)?;
+
+    // Outside the snapshot, a fresh read DOES see the concurrent commit — proving the freeze above was
+    // the transaction snapshot, not a missing write.
+    let docs_now = corpus_table_digests(&postgres, "core", DigestSource::ProducerPublic)?
+        .into_iter()
+        .find(|d| d.table_name == "documents")
+        .expect("documents digest")
+        .row_count;
+    assert_eq!(
+        docs_now,
+        docs_before + 1,
+        "a fresh read sees the concurrent commit"
+    );
+    assert_eq!(
+        current_change_seq(&postgres)?,
+        ChangeSeq::new(seq_before.get() + 1)
     );
     Ok(())
 }

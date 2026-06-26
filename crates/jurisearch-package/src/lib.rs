@@ -22,6 +22,7 @@
 //! * [`signed`] — the detached-signature document wrapper (§6.2).
 //! * [`manifest`] — the two-tier remote + embedded manifests (§6.2).
 
+pub mod artifact;
 pub mod canonical;
 pub mod compat;
 pub mod corpus;

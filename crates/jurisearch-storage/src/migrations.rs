@@ -1,6 +1,27 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
+use postgres::GenericClient;
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 20;
+/// A reproducible digest over the applied migration set (`version:name` pairs, ordered) — the P3
+/// stand-in for the schema-migration bundle (plan P3 WARN-1). The producer stamps it into the manifest
+/// (`schema_migration_bundle_digest`) and the consumer recomputes it with THIS SAME function and
+/// rejects a mismatch, so a client whose migration set differs from the producer's cannot apply even if
+/// its `max(version)` happens to match.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn schema_bundle_digest<C: GenericClient>(client: &mut C) -> Result<String, StorageError> {
+    let row = client
+        .query_one(
+            "SELECT coalesce(string_agg(version || ':' || name, '|' ORDER BY version), '') AS agg \
+             FROM schema_migrations;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let agg: String = row.get("agg");
+    Ok(jurisearch_package::canonical::digest_bytes(agg.as_bytes()))
+}
+
+pub const CURRENT_SCHEMA_VERSION: i32 = 21;
 
 struct Migration {
     version: i32,
@@ -938,6 +959,57 @@ CREATE OR REPLACE VIEW jurisearch_server.official_api_responses AS SELECT * FROM
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 20), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 21,
+        name: "producer_package_catalog",
+        // Plan P3 (D5, design §5.1 "two sequence layers"): the PRODUCER-side catalog mapping each
+        // per-corpus `package_sequence` to the frozen global `change_seq` window it was built from,
+        // plus the chain link + compatibility stamps + build/publish status. This is the bridge that
+        // keeps the per-corpus package sequence distinct from the global change_seq (so a cross-corpus
+        // gap is never a false `sequence_gap`). Producer-only; the client never reads it. Lives in
+        // `public` (control/operational, never per-generation).
+        sql: r#"
+CREATE TABLE IF NOT EXISTS package_catalog (
+    corpus                   text    NOT NULL,
+    package_sequence         bigint  NOT NULL,
+    package_id               text    NOT NULL,
+    package_kind             text    NOT NULL CHECK (package_kind IN ('baseline','rebaseline','incremental')),
+    baseline_id              text    NOT NULL,
+    generation               text    NOT NULL,
+    -- The frozen global change_seq high-water mark this package was built from, so the next
+    -- incremental has a well-defined `lo` to diff from (design §5.1). NOT NULL even for a baseline.
+    included_change_seq_high bigint  NOT NULL,
+    previous_package_id      text,
+    previous_package_digest  text,
+    -- Integrity + compatibility stamps frozen at build (reserved now to avoid P4 churn).
+    package_digest           text,
+    manifest_digest          text,
+    schema_version           integer NOT NULL,
+    embedding_fingerprint    text    NOT NULL,
+    builder_versions         jsonb   NOT NULL DEFAULT '{}'::jsonb,
+    status                   text    NOT NULL DEFAULT 'built'
+                                     CHECK (status IN ('built','published','failed')),
+    created_at               timestamptz NOT NULL DEFAULT now(),
+    published_at             timestamptz,
+    updated_at               timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (corpus, package_sequence)
+);
+
+-- A package_id is globally unique (it is the artifact identity + chain link target).
+CREATE UNIQUE INDEX IF NOT EXISTS package_catalog_package_id_idx
+ON package_catalog (package_id);
+
+-- The newest catalog row per corpus drives the next build's `lo` and chain link.
+CREATE INDEX IF NOT EXISTS package_catalog_corpus_seq_idx
+ON package_catalog (corpus, package_sequence DESC);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 21), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

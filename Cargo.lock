@@ -922,6 +922,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-package-build"
+version = "0.1.0"
+dependencies = [
+ "jurisearch-package",
+ "jurisearch-storage",
+ "jurisearch-syncd",
+ "postgres",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "jurisearch-storage"
 version = "0.1.0"
 dependencies = [
@@ -930,6 +943,20 @@ dependencies = [
  "jurisearch-package",
  "postgres",
  "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "jurisearch-syncd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jurisearch-package",
+ "jurisearch-storage",
+ "postgres",
  "serde_json",
  "tempfile",
  "thiserror",

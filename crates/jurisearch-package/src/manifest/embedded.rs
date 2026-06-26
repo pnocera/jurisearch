@@ -230,6 +230,10 @@ impl PayloadLayout {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadFile {
     pub table: String,
+    /// The explicit, ordered column list moved by this file (plan P3 D2) — generated columns excluded.
+    /// Producer and consumer COPY exactly these columns in this order, so a producer/consumer column
+    /// drift is caught instead of silently corrupting a binary COPY.
+    pub columns: Vec<String>,
     pub op: crate::event::EventKind,
     pub format: PayloadFormat,
     pub compression: Compression,
@@ -351,6 +355,7 @@ mod tests {
             payload: PayloadLayout {
                 files: vec![PayloadFile {
                     table: "documents".to_owned(),
+                    columns: vec!["document_id".to_owned(), "body".to_owned()],
                     op: EventKind::Upsert,
                     format: PayloadFormat::Jsonl,
                     compression: Compression::Zstd,

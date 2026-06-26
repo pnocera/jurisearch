@@ -1,0 +1,30 @@
+[package]
+name = "jurisearch-syncd"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Consumer-side sync service (plan P3+): verify -> apply (baseline/incremental/rebaseline) -> corpus
+# status, on the client storage topology (generations/views/cursor). The "consumer brain". Each
+# sub-responsibility is a module (SRP). Depends on the contract crate + storage apply primitives.
+
+[lib]
+name = "jurisearch_syncd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jurisearch-syncd"
+path = "src/main.rs"
+
+[dependencies]
+jurisearch-package = { path = "../jurisearch-package" }
+jurisearch-storage = { path = "../jurisearch-storage" }
+anyhow.workspace = true
+clap.workspace = true
+postgres.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

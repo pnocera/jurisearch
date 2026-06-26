@@ -11,7 +11,7 @@
 //! ([`scopes_changed_for_corpus`]) reasons only in `change_seq` space — never package-sequence space
 //! — which is exactly what prevents a cross-corpus false `sequence_gap`.
 
-use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
+use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 use jurisearch_package::ChangeSeq;
 use jurisearch_package::event::EventKind;
 use postgres::GenericClient;
@@ -217,8 +217,19 @@ pub fn scopes_changed_for_corpus(
 /// # Errors
 /// [`StorageError::PostgresClient`] on a DB error.
 pub fn current_change_seq(postgres: &ManagedPostgres) -> Result<ChangeSeq, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    current_change_seq_with_client(&mut client)
+}
+
+/// [`current_change_seq`] on a caller-provided client/transaction — so the producer can freeze the
+/// baseline watermark inside the SAME snapshot it reads the payload + digests from (plan P3 BLOCKER:
+/// the catalog window must match the snapshot, not wall-clock state after the payload loop).
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn current_change_seq_with_client<C: GenericClient>(
+    client: &mut C,
+) -> Result<ChangeSeq, StorageError> {
     let row = client
         .query_one(
             "SELECT COALESCE(max(change_seq), 0) AS hi FROM package_change_log;",
@@ -252,14 +263,49 @@ fn parse_op(text: &str) -> Result<EventKind, StorageError> {
 /// the digest. Rows are aggregated in `ORDER BY` of the primary key **inside the aggregate** so the
 /// digest is order-deterministic regardless of scan order.
 ///
+/// The relations the digest reads from: the producer's authoritative `public` tables, or a client
+/// generation's physical schema (plan P3 D6 — the SAME digest code path validates a not-yet-active
+/// generation against the producer's postconditions). A generation holds every replicated table, so
+/// the only difference is the `search_path`; the SQL (counts, volatile-column exclusions, corpus
+/// predicate, order-by) is identical, which is exactly what makes producer/consumer digests comparable.
+#[derive(Debug, Clone, Copy)]
+pub enum DigestSource<'a> {
+    /// The producer's authoritative working set in `public`.
+    ProducerPublic,
+    /// A client generation's physical schema (e.g. `jurisearch_server_core_g0001`).
+    Generation { schema: &'a str },
+}
+
 /// # Errors
 /// [`StorageError::PostgresClient`] on a DB error.
 pub fn corpus_table_digests(
     postgres: &ManagedPostgres,
     corpus: &str,
+    source: DigestSource<'_>,
 ) -> Result<Vec<TableDigest>, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    corpus_table_digests_with_client(&mut client, corpus, source)
+}
+
+/// [`corpus_table_digests`] on a caller-provided client/transaction — so the producer can compute the
+/// postcondition digests inside the SAME snapshot it COPYs the payload from (plan P3 BLOCKER). Setting
+/// the generation `search_path` here mutates the caller's session; pass a dedicated client/transaction.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn corpus_table_digests_with_client<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+    source: DigestSource<'_>,
+) -> Result<Vec<TableDigest>, StorageError> {
+    // For a generation, resolve the unqualified table names in every spec to the generation's physical
+    // schema; built-in functions (to_jsonb/md5/string_agg) still resolve via pg_catalog. The producer
+    // path keeps the default search_path (public).
+    if let DigestSource::Generation { schema } = source {
+        client
+            .batch_execute(&format!("SET search_path TO {};", sql_identifier(schema)))
+            .map_err(StorageError::PostgresClient)?;
+    }
     let corpus_lit = sql_string_literal(corpus);
     // `to_jsonb(<alias>) - 'created_at' - 'updated_at' - ...` drops volatile keys (a no-op when a key
     // is absent), leaving every replicated column in the signature.
