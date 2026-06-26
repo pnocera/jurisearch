@@ -42,6 +42,7 @@ import xml.etree.ElementTree as ET
 
 dest, celex_file, country = sys.argv[1], sys.argv[2], sys.argv[3]
 RDF_RESOURCE = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}resource"
+RDF_ABOUT = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about"
 
 def local(tag): return tag.rsplit("}", 1)[-1]
 def clean(text): return (text or "").strip().replace("\t", " ").replace("\n", " ")
@@ -52,6 +53,8 @@ out = open(os.path.join(dest, "transposition", "national-transposition.tsv"), "w
 out.write("directive_celex\trelation\tnim_id_or_uri\n")
 dates = open(os.path.join(dest, "transposition", "directive-transposition-dates.tsv"), "w", encoding="utf-8")
 dates.write("directive_celex\tfield\tvalue\n")
+seen_nims = set()
+seen_dates = set()
 
 for line in open(celex_file, encoding="utf-8"):
     celex = line.strip()
@@ -61,16 +64,37 @@ for line in open(celex_file, encoding="utf-8"):
     if not os.path.exists(path):
         continue
     root = ET.parse(path).getroot()
-    for elem in root.iter():
-        name = local(elem.tag)
-        target = elem.attrib.get(RDF_RESOURCE)
-        value = clean(elem.text)
-        if name in {"date_transposition", "directive_date_transposition"} and value:
-            dates.write(f"{celex}\t{name}\t{value}\n")
-        if "implement" in name and target and "/resource/nim/" in target:
-            # The RDF may include all Member States. We keep all NIM ids here;
-            # country filtering can be refined after fetching specific NIM RDF.
-            out.write(f"{celex}\t{name}\t{rid(target)}\n")
+    country_nims = set()
+    if country:
+        for desc in root.iter():
+            if local(desc.tag) != "Description" or rid(desc.attrib.get(RDF_ABOUT, "")) != country:
+                continue
+            for child in list(desc):
+                name = local(child.tag)
+                target = child.attrib.get(RDF_RESOURCE)
+                if "country_implements" in name and target and "/resource/nim/" in target:
+                    country_nims.add(rid(target))
+
+    for desc in root.iter():
+        if local(desc.tag) != "Description" or rid(desc.attrib.get(RDF_ABOUT, "")) != celex:
+            continue
+        for elem in list(desc):
+            name = local(elem.tag)
+            target = elem.attrib.get(RDF_RESOURCE)
+            value = clean(elem.text)
+            if name in {"date_transposition", "directive_date_transposition"} and value:
+                row = (celex, name, value)
+                if row not in seen_dates:
+                    seen_dates.add(row)
+                    dates.write("\t".join(row) + "\n")
+            if "implement" in name and target and "/resource/nim/" in target:
+                nim = rid(target)
+                if country and country_nims and nim not in country_nims:
+                    continue
+                row = (celex, name, nim)
+                if row not in seen_nims:
+                    seen_nims.add(row)
+                    out.write("\t".join(row) + "\n")
 
 out.close()
 dates.close()
@@ -85,8 +109,8 @@ directive_celex, relation, nim_id_or_uri
 directive-transposition-dates.tsv columns:
 directive_celex, field, value
 
-EURLEX_NIM_COUNTRY_FILTER=$EURLEX_NIM_COUNTRY_FILTER is reserved for a later
-NIM-detail enrichment step; the current script records all NIM ids exposed by
-the directive RDF.
+EURLEX_NIM_COUNTRY_FILTER=$EURLEX_NIM_COUNTRY_FILTER filters NIM ids through
+country_implements_measure_national_implementing links when the country node is
+present in the directive RDF. Set it to an empty string to keep all NIM ids
+exposed by the directive RDF.
 EOF
-

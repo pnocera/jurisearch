@@ -74,6 +74,20 @@ cit.write("source_celex\trelation\ttarget_celex_or_uri\n")
 amend.write("source_celex\trelation\ttarget_celex_or_uri\n")
 subjects.write("source_celex\teurovoc_uri\n")
 
+seen = {
+    "meta": set(),
+    "cases": set(),
+    "cit": set(),
+    "amend": set(),
+    "subjects": set(),
+}
+
+def write_once(kind, handle, row):
+    if row in seen[kind]:
+        return
+    seen[kind].add(row)
+    handle.write("\t".join(row) + "\n")
+
 for celex in celex_ids():
     for kind, path in (
         ("work", os.path.join(dest, "work-rdf", f"{celex}.rdf")),
@@ -88,7 +102,7 @@ for celex in celex_ids():
             about = desc.attrib.get(RDF_ABOUT, "")
             about_id = rid(about)
             if about_id not in {celex, f"{celex}.{lang}"} and not about_id.startswith("JOL_"):
-                pass
+                continue
             for child in list(desc):
                 name = local(child.tag)
                 if name.startswith("annotated"):
@@ -96,17 +110,17 @@ for celex in celex_ids():
                 target = child.attrib.get(RDF_RESOURCE)
                 text = (child.text or "").strip().replace("\t", " ").replace("\n", " ")
                 if name in {"title", "expression_title", "title_short", "expression_title_short", "date_document", "work_date_document"} and text:
-                    meta.write(f"{celex}\t{name}\t{text}\n")
+                    write_once("meta", meta, (celex, name, text))
                 if target:
                     target_id = rid(target)
                     if "interpreted_by_case" in name or re.match(r"6[0-9].*", target_id):
-                        cases.write(f"{celex}\t{name}\t{target_id or target}\n")
+                        write_once("cases", cases, (celex, name, target_id or target))
                     elif "cited_by" in name or "cites" in name:
-                        cit.write(f"{celex}\t{name}\t{target_id or target}\n")
+                        write_once("cit", cit, (celex, name, target_id or target))
                     elif any(word in name for word in ("amend", "correct", "repeal", "based_on")):
-                        amend.write(f"{celex}\t{name}\t{target_id or target}\n")
-                    elif "eurovoc" in name or "subject" in name and "eurovoc.europa.eu" in target:
-                        subjects.write(f"{celex}\t{target}\n")
+                        write_once("amend", amend, (celex, name, target_id or target))
+                    elif ("eurovoc" in name or "subject" in name) and "eurovoc.europa.eu" in target:
+                        write_once("subjects", subjects, (celex, target))
 
 for f in (meta, cases, cit, amend, subjects):
     f.close()
