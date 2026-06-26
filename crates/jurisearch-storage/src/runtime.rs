@@ -429,6 +429,96 @@ fn ensure_database(pg_config: &PgConfig, port: u16, database: &str) -> Result<()
     Ok(())
 }
 
+/// Deliberately conservative common LOWER bound for every overridable memory GUC, in bytes (1 MiB).
+/// It sits comfortably above the actual per-GUC minimums Postgres enforces (all ≤ ~1 MB), so a single
+/// floor keeps EVERY override startup-safe: a value below it is rejected and falls back to the
+/// conservative default rather than producing a `jurisearch.conf` Postgres refuses to start with.
+const MIN_PG_MEM_BYTES: u64 = 1024 * 1024;
+/// Common UPPER bound for every overridable memory GUC, in bytes. The tightest max among the exposed
+/// memory GUCs is the `work_mem`/`maintenance_work_mem` family's `MAX_KILOBYTES` (`INT_MAX` kB); the
+/// other exposed GUCs (`shared_buffers`, `effective_cache_size`, `temp_buffers`) allow strictly more,
+/// so a value at/below this is startup-safe for ALL of them. Above it — e.g. `2TB`/`16TB` — is rejected
+/// and falls back to the default instead of writing a literal Postgres rejects at startup.
+const MAX_PG_MEM_BYTES: u64 = (i32::MAX as u64) * 1024;
+/// Upper bound for the overridable `*_parallel_*_workers` GUCs (Postgres caps each at 1024). A larger
+/// value — or one that overflows — is rejected so a hostile override cannot break startup.
+const MAX_PG_PARALLEL_WORKERS: u32 = 1024;
+
+/// Resolve a managed-Postgres tuning value: the `JURISEARCH_PG_*` override in `var` if present AND it
+/// passes `valid`, otherwise `default`. Thin env wrapper over [`resolve_pg_setting`] (which holds the
+/// testable logic, so the validation/fallback contract is covered without mutating process env).
+fn pg_runtime_setting(var: &str, default: &str, valid: fn(&str) -> bool) -> String {
+    resolve_pg_setting(std::env::var(var).ok().as_deref(), default, valid)
+}
+
+/// Choose `override_value` (trimmed) when present AND it passes `valid`, else `default`. The result is
+/// written verbatim into `jurisearch.conf`, so `valid` MUST reject anything Postgres would choke on —
+/// a malformed, out-of-range, or hostile override silently falls back to the conservative default
+/// instead of injecting config or breaking startup.
+fn resolve_pg_setting(
+    override_value: Option<&str>,
+    default: &str,
+    valid: fn(&str) -> bool,
+) -> String {
+    override_value
+        .map(str::trim)
+        .filter(|value| valid(value))
+        .map_or_else(|| default.to_owned(), str::to_owned)
+}
+
+/// Parse a Postgres memory literal — `<number><unit>` with a plain decimal number (no sign/exponent)
+/// and a required `B`/`kB`/`MB`/`GB`/`TB` unit (e.g. `256MB`, `1.5GB`) — into a byte count. Returns
+/// `None` on any malformed input or on overflow, so it doubles as the injection/overflow guard.
+fn parse_pg_bytes(value: &str) -> Option<u64> {
+    let unit_start = value.find(|c: char| c.is_ascii_alphabetic())?;
+    let (number, unit) = value.split_at(unit_start);
+    if !is_plain_decimal(number) {
+        return None;
+    }
+    let number: f64 = number.parse().ok()?;
+    let multiplier: u64 = match unit {
+        "B" => 1,
+        "kB" => 1 << 10,
+        "MB" => 1 << 20,
+        "GB" => 1 << 30,
+        "TB" => 1 << 40,
+        _ => return None,
+    };
+    let bytes = number * multiplier as f64;
+    (bytes.is_finite() && (0.0..=u64::MAX as f64).contains(&bytes)).then_some(bytes as u64)
+}
+
+/// A plain non-negative decimal: digits, optionally one `.` with a fractional part. No sign, exponent,
+/// or stray characters — so `f64::parse` afterwards can only see a value Postgres also accepts.
+fn is_plain_decimal(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let integer = parts.next().unwrap_or_default();
+    let fraction = parts.next();
+    parts.next().is_none()
+        && !integer.is_empty()
+        && integer.bytes().all(|byte| byte.is_ascii_digit())
+        && fraction.is_none_or(|frac| !frac.is_empty() && frac.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A memory override Postgres will accept AND start with: a well-formed literal whose size is within
+/// `[MIN_PG_MEM_BYTES, MAX_PG_MEM_BYTES]`. Rejects `0`-sized/sub-floor values and over-max values (both
+/// fail startup) and anything unparseable.
+fn is_pg_mem_literal(value: &str) -> bool {
+    parse_pg_bytes(value)
+        .is_some_and(|bytes| (MIN_PG_MEM_BYTES..=MAX_PG_MEM_BYTES).contains(&bytes))
+}
+
+/// A worker-count override: a bare non-negative integer within `[0, MAX_PG_PARALLEL_WORKERS]`. The
+/// leading ASCII-digit check rejects signs (incl. the `+` Rust's `parse` would otherwise accept) and
+/// units; `parse::<u32>` then rejects overflow; the bound rejects out-of-range counts.
+fn is_pg_int_literal(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value
+            .parse::<u32>()
+            .is_ok_and(|count| count <= MAX_PG_PARALLEL_WORKERS)
+}
+
 fn write_runtime_conf(
     data_dir: &Path,
     socket_dir: &Path,
@@ -455,31 +545,74 @@ fn write_runtime_conf(
         "shared_preload_libraries = 'pg_search'\nlisten_addresses = '127.0.0.1'\nport = {port}\nunix_socket_directories = {}\n",
         sql_string_literal(&socket_dir.to_string_lossy())
     );
-    // Analytical/parallel knobs applied to both profiles. The durable (search/eval) profile
-    // previously inherited stock Postgres defaults (work_mem=4MB, no parallelism), which made the
-    // France-LEGI gold CTEs and BM25/vector candidate fusion spill to disk and run single-threaded.
-    runtime_conf.push_str(
-        "effective_cache_size = '8GB'\n\
-         work_mem = '128MB'\n\
-         maintenance_work_mem = '1GB'\n\
-         temp_buffers = '64MB'\n\
-         max_parallel_workers_per_gather = '4'\n\
-         max_parallel_workers = '8'\n",
+    // Analytical/parallel knobs applied to both profiles. Defaults are deliberately CONSERVATIVE: a
+    // jurisearch client is typically a modest machine that co-hosts local LLM/embedding services, so
+    // the managed Postgres must not claim a large buffer pool or big per-op work_mem by default. Every
+    // knob is overridable via a `JURISEARCH_PG_*` env var (validated to a safe Postgres literal so an
+    // override can never inject arbitrary config into the conf file) — that is how a dedicated server
+    // (e.g. bear) opts into aggressive values, rather than the code defaulting to them. Stock Postgres
+    // (work_mem=4MB, no parallelism) made the France-LEGI gold CTEs and BM25/vector fusion spill to
+    // disk and run single-threaded, so these sit above stock but well below a 25%-of-RAM profile.
+    let effective_cache_size = pg_runtime_setting(
+        "JURISEARCH_PG_EFFECTIVE_CACHE_SIZE",
+        "2GB",
+        is_pg_mem_literal,
+    );
+    let work_mem = pg_runtime_setting("JURISEARCH_PG_WORK_MEM", "64MB", is_pg_mem_literal);
+    let maintenance_work_mem = pg_runtime_setting(
+        "JURISEARCH_PG_MAINTENANCE_WORK_MEM",
+        "256MB",
+        is_pg_mem_literal,
+    );
+    let temp_buffers = pg_runtime_setting("JURISEARCH_PG_TEMP_BUFFERS", "32MB", is_pg_mem_literal);
+    let max_parallel_workers_per_gather = pg_runtime_setting(
+        "JURISEARCH_PG_MAX_PARALLEL_WORKERS_PER_GATHER",
+        "2",
+        is_pg_int_literal,
+    );
+    let max_parallel_workers =
+        pg_runtime_setting("JURISEARCH_PG_MAX_PARALLEL_WORKERS", "4", is_pg_int_literal);
+    // Bounds parallel index builds (e.g. the client-side IVFFlat rebuild after applying packages).
+    let max_parallel_maintenance_workers = pg_runtime_setting(
+        "JURISEARCH_PG_MAX_PARALLEL_MAINTENANCE_WORKERS",
+        "2",
+        is_pg_int_literal,
+    );
+    runtime_conf.push_str(&format!(
+        "effective_cache_size = '{effective_cache_size}'\n\
+         work_mem = '{work_mem}'\n\
+         maintenance_work_mem = '{maintenance_work_mem}'\n\
+         temp_buffers = '{temp_buffers}'\n\
+         max_parallel_workers_per_gather = '{max_parallel_workers_per_gather}'\n\
+         max_parallel_workers = '{max_parallel_workers}'\n\
+         max_parallel_maintenance_workers = '{max_parallel_maintenance_workers}'\n",
+    ));
+    // shared_buffers is the dominant RAM claim — keep its default small and tunable. The bulk-ingest
+    // profile gets a slightly larger default for checkpoint efficiency during a transient load; both
+    // honor the same `JURISEARCH_PG_SHARED_BUFFERS` operator override.
+    let default_shared_buffers = match profile {
+        PostgresRuntimeProfile::BulkIngest => "512MB",
+        PostgresRuntimeProfile::Durable => "256MB",
+    };
+    let shared_buffers = pg_runtime_setting(
+        "JURISEARCH_PG_SHARED_BUFFERS",
+        default_shared_buffers,
+        is_pg_mem_literal,
     );
     match profile {
         PostgresRuntimeProfile::BulkIngest => {
-            runtime_conf.push_str(
+            runtime_conf.push_str(&format!(
                 "synchronous_commit = 'off'\n\
                  wal_compression = 'on'\n\
                  max_wal_size = '8GB'\n\
                  checkpoint_timeout = '30min'\n\
                  checkpoint_completion_target = '0.9'\n\
-                 shared_buffers = '1GB'\n",
-            );
+                 shared_buffers = '{shared_buffers}'\n",
+            ));
         }
         PostgresRuntimeProfile::Durable => {
-            // Larger buffer pool for read-heavy search/eval; no bulk WAL relaxation.
-            runtime_conf.push_str("shared_buffers = '2GB'\n");
+            // No bulk WAL relaxation on the read-heavy search/eval profile.
+            runtime_conf.push_str(&format!("shared_buffers = '{shared_buffers}'\n"));
         }
     }
 
@@ -732,8 +865,8 @@ pub enum StorageError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DataDirLock, ManagedPostgres, PgConfig, StorageError, data_dir_lock_key, sql_identifier,
-        sql_string_literal, version_key,
+        DataDirLock, ManagedPostgres, PgConfig, StorageError, data_dir_lock_key, is_pg_int_literal,
+        is_pg_mem_literal, resolve_pg_setting, sql_identifier, sql_string_literal, version_key,
     };
 
     fn discover_pg_config_for_storage_tests() -> Result<Option<PgConfig>, StorageError> {
@@ -785,6 +918,86 @@ mod tests {
         assert_eq!(sql_identifier("jurisearch"), "\"jurisearch\"");
         assert_eq!(sql_identifier("bad\"name"), "\"bad\"\"name\"");
         assert_eq!(sql_string_literal("sock's"), "'sock''s'");
+    }
+
+    #[test]
+    fn pg_setting_literals_reject_unsafe_overrides() {
+        // Well-formed memory literals within [1 MiB, ~2 TiB] — including fractional and `B`-unit forms
+        // Postgres accepts, and a value just under the MAX_KILOBYTES ceiling — are valid.
+        for ok in [
+            "1MB", "256MB", "2GB", "1.5GB", "1TB", "8GB", "64GB", "1048576B", "2047GB",
+        ] {
+            assert!(is_pg_mem_literal(ok), "{ok} should be a valid mem literal");
+        }
+        for bad in [
+            "256",      // unit required
+            "256 MB",   // no embedded space
+            "256mb",    // case-sensitive unit
+            "25%",      // not a size
+            "256MB; x", // config-injection attempt
+            "'256MB'",  // already-quoted
+            "",         // empty
+            "GB",       // no digits
+            "-1GB",     // no sign
+            "1e3MB",    // no exponent form
+            "0MB",      // below the floor → Postgres refuses to start
+            "512kB",    // 0.5 MiB, below the uniform 1 MiB floor
+            "1.GB",     // malformed decimal
+            ".5GB",     // malformed decimal
+            "2048GB",   // == 2 TiB, just over the MAX_KILOBYTES ceiling → startup FATAL
+            "2TB",      // over the ceiling
+            "8192GB",   // over the ceiling
+            "16TB",     // over the ceiling
+        ] {
+            assert!(!is_pg_mem_literal(bad), "{bad:?} must be rejected");
+        }
+
+        // Worker counts: bare integers in [0, 1024]. Signs, overflow, and out-of-range are rejected so
+        // a hostile value can never break startup.
+        for ok in ["0", "8", "1024"] {
+            assert!(is_pg_int_literal(ok), "{ok} should be a valid int literal");
+        }
+        for bad in [
+            "",
+            "-1",
+            "+1", // Rust's parse would accept the leading `+`; the digit check rejects it
+            "2 ",
+            "4workers",
+            "0x4",
+            "2;DROP",
+            "1025",                                    // above the GUC cap
+            "999999999999999999999999999999999999999", // overflows u32
+        ] {
+            assert!(!is_pg_int_literal(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn resolve_pg_setting_prefers_valid_override_else_default() {
+        // No override → default.
+        assert_eq!(
+            resolve_pg_setting(None, "256MB", is_pg_mem_literal),
+            "256MB"
+        );
+        // A valid override (trimmed) wins over the default.
+        assert_eq!(
+            resolve_pg_setting(Some("  4GB "), "256MB", is_pg_mem_literal),
+            "4GB"
+        );
+        // Malformed, sub-floor, and injection-shaped overrides all fall back to the conservative
+        // default rather than reaching the conf file.
+        for bad in ["rm -rf", "0MB", "256MB; evil = 1"] {
+            assert_eq!(
+                resolve_pg_setting(Some(bad), "256MB", is_pg_mem_literal),
+                "256MB",
+                "{bad:?} should fall back to the default"
+            );
+        }
+        // An overflowing worker count also falls back instead of breaking startup.
+        assert_eq!(
+            resolve_pg_setting(Some("999999999999"), "4", is_pg_int_literal),
+            "4"
+        );
     }
 
     #[test]
