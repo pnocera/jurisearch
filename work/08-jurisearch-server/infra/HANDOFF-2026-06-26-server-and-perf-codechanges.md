@@ -52,6 +52,14 @@ the jurisearch CLI, shaped by a server-vs-client constraint).
 
 ## 4. REMAINING WORK — propagate the perf fixes into the jurisearch CLI (the main next phase)
 
+> **STATUS 2026-06-26 (DONE):** all three fixes implemented, Codex-reviewed to GO, and committed on
+> `main`. Fix #1+#2 = `ee68ba1` (auto-`lists` + coupled `probes`; codex GO r2; reviews
+> `reviews/2026-06-26-ivfflat-autolists-probes-codex-review*.md`). Fix #3 = `011f3ff` (conservative +
+> env-tunable managed-PG profile; codex GO r3 vs PG 18.4 source;
+> `reviews/2026-06-26-managed-pg-perf-profile-codex-review*.md`). The `infra/` folder is already
+> committed (`25abbdb`). Remaining = only the non-blocking bear-side housekeeping in §5 (reclaim the
+> 165 GB staging, add a vzdump backup job for CT 110). The original plan is kept below for reference.
+
 ### THE CONSTRAINT (shapes every default)
 **Server (bear)** = dedicated, powerful → aggressive config OK (that's what `tune-pg18.sh` does, bear-only).
 **Clients** = weaker (≈ a workstation like fedora) and **share RAM with local LLMs + embedding services** → the jurisearch **CODE defaults must be conservative + tunable**; the aggressive server values are an explicit *override*, never the default. **IVFFlat is the right index for this** (small memory footprint; HNSW would be wrong — graph wants RAM). Clients **build indexes locally** after applying packages (work/08 design §9.3) within an apply-time/resource budget (§9.4), so build-time `maintenance_work_mem`/parallelism must also be conservative/tunable.
@@ -88,7 +96,8 @@ the jurisearch CLI, shaped by a server-vs-client constraint).
 
 ## 6. RESUME CHECKLIST
 1. ✅ Reindex done (§3) — dense queries now 491 ms (was ~13–19 s). bear perf work complete.
-2. **NEXT: start Fix #1 + #2** (auto-`lists` + coupled `probes`) in the jurisearch repo — implement,
-   `cargo fmt`/`cargo check`/tests, Codex review (give only the scope name), commit on `main`.
-3. Then Fix #3 (conservative + tunable managed-PG profile, `runtime.rs`).
-4. Offer to commit the `infra/` folder (scripts + reviews + README + this handoff) to `main`.
+2. ✅ Fix #1 + #2 (auto-`lists` + coupled `probes`) — committed `ee68ba1` (codex GO r2).
+3. ✅ Fix #3 (conservative + tunable managed-PG profile, `runtime.rs`) — committed `011f3ff` (codex GO r3).
+4. ✅ `infra/` folder already committed (`25abbdb`); this handoff lives inside it.
+5. ☐ (optional, non-blocking, §5) bear-side housekeeping: reclaim the 165 GB staging + `mp1` bind-mount,
+   and add a vzdump backup job for CT 110 → `storebox`. Operator decisions; not code.
