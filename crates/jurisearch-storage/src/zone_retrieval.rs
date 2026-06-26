@@ -14,6 +14,7 @@
 use crate::retrieval::{
     DecisionFilters, RRF_K, RetrievalCursor, RetrievalMode, RetrievalOptions,
     document_cursor_predicate, effective_probes, effective_rrf_weights, format_sql_f64,
+    manifest_default_probes,
 };
 use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
@@ -215,9 +216,10 @@ pub fn zone_candidates_json(
     );
     let ranked_ctes = ranked_zone_ctes(query, &query_text, &zone_literal, &doc_scope)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
+        let stored_probes = manifest_default_probes(postgres, "zone_embedding")?;
         format!(
             "SET ivfflat.probes = {};\n\n",
-            effective_probes(&query.options)
+            effective_probes(&query.options, stored_probes)
         )
     } else {
         String::new()

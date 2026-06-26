@@ -173,7 +173,8 @@ pub(crate) struct SearchArgs {
     /// Override the hybrid RRF dense weight (per-request; default from env, else 0.3).
     #[arg(long)]
     pub(crate) rrf_dense_weight: Option<f64>,
-    /// Override ivfflat.probes for dense ANN (per-request; default 4; higher = more recall, slower).
+    /// Override ivfflat.probes for dense ANN (per-request; default = the index manifest's built-time
+    /// recommendation, else 4; higher = more recall, slower).
     #[arg(long)]
     pub(crate) probes: Option<u32>,
     /// Decision filter: court / jurisdiction substring (e.g. "Cour de cassation", "CAA de PARIS").
@@ -726,8 +727,9 @@ pub(crate) enum IngestSubcommand {
         /// Maximum chunk count allowed for this run; refuses larger indexes instead of finalizing partial coverage.
         #[arg(long)]
         limit: Option<u32>,
-        /// Number of ivfflat lists to use when rebuilding the dense vector index.
-        #[arg(long, default_value_t = 32)]
+        /// Number of ivfflat lists to use when rebuilding the dense vector index. 0 = auto, scaled to
+        /// corpus size (recommended).
+        #[arg(long, default_value_t = 0)]
         index_lists: u32,
         /// Number of chunk texts sent per embeddings request.
         #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_BATCH_SIZE)]
@@ -773,8 +775,9 @@ pub(crate) enum IngestSubcommand {
         /// Maximum zone-unit count allowed for this run; refuses larger sets instead of partial finalize.
         #[arg(long)]
         limit: Option<u32>,
-        /// Number of ivfflat lists for the zone-unit dense index.
-        #[arg(long, default_value_t = 32)]
+        /// Number of ivfflat lists for the zone-unit dense index. 0 = auto, scaled to corpus size
+        /// (recommended).
+        #[arg(long, default_value_t = 0)]
         index_lists: u32,
         /// Number of zone-unit texts sent per embeddings request.
         #[arg(long, default_value_t = EMBED_CHUNKS_DEFAULT_BATCH_SIZE)]

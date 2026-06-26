@@ -17,7 +17,9 @@ pub fn hybrid_candidates_json(
     let filter_predicate = format!("{kind_predicate}{}", query.decision_filters.predicate());
     let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &filter_predicate)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
-        format!("SET ivfflat.probes = {};\n\n", query.effective_probes())
+        let stored_probes = manifest_default_probes(postgres, "embedding")?;
+        let probes = effective_probes(&query.options, stored_probes);
+        format!("SET ivfflat.probes = {probes};\n\n")
     } else {
         String::new()
     };

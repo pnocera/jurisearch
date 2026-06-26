@@ -113,6 +113,26 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
     assert_eq!(manifest["coverage"]["embeddings"], 2);
     assert_eq!(manifest["vector_index"]["name"], DENSE_VECTOR_INDEX_NAME);
     assert_eq!(manifest["vector_index"]["lists"], 1);
+    // Fix #2: the build now persists a query-side probes recommendation derived from the lists built
+    // (`recommended_probes(1) == 1`).
+    assert_eq!(manifest["vector_index"]["default_probes"], 1);
+
+    // Fix #1: `index_lists == 0` auto-scales to the corpus size. For this 2-row corpus the pgvector
+    // heuristic (rows/1000, clamped >= 1) lands on a single list, and probes follow.
+    let auto_report = finalize_dense_rebuild(
+        &postgres,
+        &DenseRebuildSpec {
+            index_lists: 0,
+            ..spec
+        },
+    )?;
+    assert_eq!(auto_report.index_lists, 1);
+    let auto_manifest: serde_json::Value = serde_json::from_str(
+        &postgres.execute_sql("SELECT value FROM index_manifest WHERE key = 'embedding';")?,
+    )
+    .expect("embedding manifest is stable JSON");
+    assert_eq!(auto_manifest["vector_index"]["lists"], 1);
+    assert_eq!(auto_manifest["vector_index"]["default_probes"], 1);
 
     Ok(())
 }

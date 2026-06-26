@@ -217,11 +217,37 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
     assert_eq!(report.zone_units, 3);
     assert_eq!(report.embeddings, 3);
     assert_eq!(report.index_name, ZONE_UNIT_VECTOR_INDEX_NAME);
+    // Explicit `index_lists = 1` is honored verbatim and the manifest carries the derived probes.
+    assert_eq!(report.index_lists, 1);
 
     let index = postgres.execute_sql(&format!(
         "SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname='{ZONE_UNIT_VECTOR_INDEX_NAME}';",
     ))?;
     assert_eq!(index.trim(), ZONE_UNIT_VECTOR_INDEX_NAME);
+
+    let manifest: serde_json::Value = serde_json::from_str(
+        &postgres.execute_sql("SELECT value FROM index_manifest WHERE key = 'zone_embedding';")?,
+    )
+    .expect("zone embedding manifest is stable JSON");
+    assert_eq!(manifest["vector_index"]["lists"], 1);
+    assert_eq!(manifest["vector_index"]["default_probes"], 1);
+
+    // `index_lists == 0` auto-scales to the corpus size (3 zone units → a single list, probes follow),
+    // and the report reflects the list count actually built rather than the requested 0.
+    let auto_report = finalize_zone_dense_rebuild(
+        &postgres,
+        &DenseRebuildSpec {
+            index_lists: 0,
+            ..spec
+        },
+    )?;
+    assert_eq!(auto_report.index_lists, 1);
+    let auto_manifest: serde_json::Value = serde_json::from_str(
+        &postgres.execute_sql("SELECT value FROM index_manifest WHERE key = 'zone_embedding';")?,
+    )
+    .expect("zone embedding manifest is stable JSON");
+    assert_eq!(auto_manifest["vector_index"]["lists"], 1);
+    assert_eq!(auto_manifest["vector_index"]["default_probes"], 1);
 
     // Coverage block reflects the seeded state.
     let coverage: serde_json::Value =

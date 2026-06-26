@@ -479,6 +479,16 @@ pub fn finalize_zone_dense_rebuild(
         });
     }
 
+    // `index_lists == 0` auto-scales the partition count to the embedded zone-unit count (same rule as
+    // the chunk path); an explicit value is honored. `default_probes` is derived from the lists built and
+    // persisted for the zone query path (Fix #2).
+    let effective_lists = if spec.index_lists == 0 {
+        crate::dense::recommended_ivfflat_lists(embeddings)
+    } else {
+        spec.index_lists
+    };
+    let default_probes = crate::dense::recommended_probes(effective_lists);
+
     transaction
         .execute(
             "UPDATE zone_units SET embedding_fingerprint = $1;",
@@ -494,7 +504,7 @@ pub fn finalize_zone_dense_rebuild(
              ANALYZE zone_units; \
              ANALYZE zone_unit_embeddings;",
             index_name = ZONE_UNIT_VECTOR_INDEX_NAME,
-            lists = spec.index_lists
+            lists = effective_lists
         ))
         .map_err(StorageError::PostgresClient)?;
 
@@ -507,7 +517,8 @@ pub fn finalize_zone_dense_rebuild(
             "name": ZONE_UNIT_VECTOR_INDEX_NAME,
             "method": "ivfflat",
             "operator_class": "vector_l2_ops",
-            "lists": spec.index_lists
+            "lists": effective_lists,
+            "default_probes": default_probes
         },
         "coverage": { "zone_units": zone_units, "embeddings": embeddings }
     })
@@ -528,7 +539,7 @@ pub fn finalize_zone_dense_rebuild(
         embeddings,
         embedding_fingerprint: spec.embedding_fingerprint.to_owned(),
         index_name: ZONE_UNIT_VECTOR_INDEX_NAME.to_owned(),
-        index_lists: spec.index_lists,
+        index_lists: effective_lists,
     })
 }
 
@@ -559,11 +570,7 @@ fn validate_zone_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageEr
             ),
         });
     }
-    if spec.index_lists == 0 {
-        return Err(StorageError::DenseRebuild {
-            message: "index_lists must be at least 1".to_owned(),
-        });
-    }
+    // `index_lists == 0` requests auto-scaling at finalize time (see `recommended_ivfflat_lists`).
     Ok(())
 }
 

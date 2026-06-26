@@ -13,6 +13,28 @@ pub(crate) fn format_sql_f64(value: f64) -> String {
     format!("{value:.6}")
 }
 
+/// Read the index's built-time recommended `ivfflat.probes` (`vector_index.default_probes`) from
+/// `index_manifest` for `key` (`embedding` for chunks, `zone_embedding` for zone units). Returns `None`
+/// when the manifest row is absent or predates Fix #2 (no `default_probes`), so the caller falls back to
+/// the fixed conservative default and older indexes keep their prior behaviour. One lightweight indexed
+/// single-row read on the dense query path; the value scales probes to a corpus-sized `lists`.
+pub(crate) fn manifest_default_probes(
+    postgres: &ManagedPostgres,
+    key: &str,
+) -> Result<Option<u32>, StorageError> {
+    let raw = postgres.execute_sql(&format!(
+        "SELECT value->'vector_index'->>'default_probes' FROM index_manifest WHERE key = {};",
+        sql_string_literal(key)
+    ))?;
+    // Honor the same `[1, 4096]` contract as `--probes` and `recommended_probes`: an out-of-range or
+    // unparseable stored value is ignored so the caller falls back to the fixed conservative default.
+    Ok(raw
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|probes| (1..=4096).contains(probes)))
+}
+
 /// Build a `%value%` LIKE pattern, escaping the LIKE metacharacters `\ % _` (escape char `\`).
 pub(super) fn like_contains(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len() + 2);

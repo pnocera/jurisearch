@@ -21,23 +21,9 @@ fn ingest_embed_chunks_rejects_zero_limit_before_opening_index() {
     assert_eq!(json["error"]["code"], "bad_input");
 }
 
-#[test]
-fn ingest_embed_chunks_rejects_zero_index_lists_before_opening_index() {
-    let output = Command::cargo_bin("jurisearch")
-        .unwrap()
-        .env_remove("JURISEARCH_INDEX_DIR")
-        .args(["ingest", "embed-chunks", "--index-lists", "0"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::is_empty())
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["ok"], false);
-    assert_eq!(json["error"]["code"], "bad_input");
-}
+// NOTE: `--index-lists 0` is intentionally NOT rejected — it requests auto-scaling the ivfflat lists
+// to the corpus size at finalize time (see `dense::recommended_ivfflat_lists`). Coverage for the
+// auto/explicit lists resolution lives in the storage unit/integration tests.
 
 #[test]
 fn ingest_embed_chunks_rejects_zero_pool_knobs_before_opening_index() {

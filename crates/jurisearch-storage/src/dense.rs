@@ -5,6 +5,29 @@ use crate::runtime::{ManagedPostgres, StorageError};
 pub const DENSE_VECTOR_INDEX_NAME: &str = "chunk_embeddings_embedding_ivfflat_idx";
 pub const DENSE_VECTOR_DIMENSION: i32 = 1024;
 
+/// pgvector's IVFFlat `lists` heuristic for a corpus of `rows` indexed vectors: `rows / 1000` up to
+/// 1M rows, then `sqrt(rows)` beyond, clamped to at least 1. Used when the embed CLI passes
+/// `--index-lists 0` (auto). It replaces the previous fixed `lists = 32` default, which badly
+/// under-partitioned multi-million-row corpora (4.7M vectors / 32 lists ≈ 147k vectors per probe →
+/// seconds-long dense scans); auto scales it to ≈2168 lists for the same corpus.
+pub fn recommended_ivfflat_lists(rows: i64) -> u32 {
+    let rows = rows.max(0) as f64;
+    let lists = if rows <= 1_000_000.0 {
+        rows / 1000.0
+    } else {
+        rows.sqrt()
+    };
+    lists.round().clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
+/// Recommended `ivfflat.probes` for an index built with `lists` partitions: `sqrt(lists)`, clamped to
+/// the `--probes` range `[1, 4096]`. Persisted as `vector_index.default_probes` in the index manifest at
+/// build time so the query path can scale probes to a corpus-sized index — a fixed `probes = 4` over
+/// ~2168 lists probes ~0.2% of the clusters, collapsing recall.
+pub fn recommended_probes(lists: u32) -> u32 {
+    f64::from(lists).sqrt().round().clamp(1.0, 4096.0) as u32
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DenseRebuildSpec<'a> {
     pub embedding_fingerprint: &'a str,
@@ -141,6 +164,17 @@ pub fn finalize_dense_rebuild(
         });
     }
 
+    // `index_lists == 0` means auto: scale the partition count to the indexed-vector count so the ANN
+    // index stays well-partitioned as the corpus grows (instead of the old fixed 32). An explicit
+    // non-zero `--index-lists` is honored verbatim. `default_probes` is derived from the lists actually
+    // built and persisted for the query path (Fix #2).
+    let effective_lists = if spec.index_lists == 0 {
+        recommended_ivfflat_lists(embeddings)
+    } else {
+        spec.index_lists
+    };
+    let default_probes = recommended_probes(effective_lists);
+
     transaction
         .execute(
             "UPDATE chunks SET embedding_fingerprint = $1;",
@@ -156,7 +190,7 @@ pub fn finalize_dense_rebuild(
              ANALYZE chunks; \
              ANALYZE chunk_embeddings;",
             index_name = DENSE_VECTOR_INDEX_NAME,
-            lists = spec.index_lists
+            lists = effective_lists
         ))
         .map_err(StorageError::PostgresClient)?;
 
@@ -171,7 +205,8 @@ pub fn finalize_dense_rebuild(
             "name": DENSE_VECTOR_INDEX_NAME,
             "method": "ivfflat",
             "operator_class": "vector_l2_ops",
-            "lists": spec.index_lists
+            "lists": effective_lists,
+            "default_probes": default_probes
         },
         "coverage": {
             "chunks": chunks,
@@ -196,7 +231,7 @@ pub fn finalize_dense_rebuild(
         embeddings,
         embedding_fingerprint: spec.embedding_fingerprint.to_owned(),
         index_name: DENSE_VECTOR_INDEX_NAME.to_owned(),
-        index_lists: spec.index_lists,
+        index_lists: effective_lists,
     })
 }
 
@@ -231,17 +266,17 @@ fn validate_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageError> 
             ),
         });
     }
-    if spec.index_lists == 0 {
-        return Err(StorageError::DenseRebuild {
-            message: "index_lists must be at least 1".to_owned(),
-        });
-    }
+    // `index_lists == 0` is valid: it requests auto-scaling at finalize time (see
+    // `recommended_ivfflat_lists`). Any explicit value is honored as-is.
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DENSE_VECTOR_DIMENSION, DenseRebuildSpec, validate_dense_spec};
+    use super::{
+        DENSE_VECTOR_DIMENSION, DenseRebuildSpec, recommended_ivfflat_lists, recommended_probes,
+        validate_dense_spec,
+    };
 
     #[test]
     fn dense_spec_validation_rejects_invalid_inputs() {
@@ -262,16 +297,41 @@ mod tests {
         };
         assert!(validate_dense_spec(&invalid_dimension).is_err());
 
-        let invalid_lists = DenseRebuildSpec {
+        // `index_lists == 0` is now valid: it requests auto-scaling at finalize time.
+        let auto_lists = DenseRebuildSpec {
             index_lists: 0,
             ..valid
         };
-        assert!(validate_dense_spec(&invalid_lists).is_err());
+        assert!(validate_dense_spec(&auto_lists).is_ok());
 
         let inconsistent_fingerprint = DenseRebuildSpec {
             embedding_fingerprint: "other:1024:normalize:true",
             ..valid
         };
         assert!(validate_dense_spec(&inconsistent_fingerprint).is_err());
+    }
+
+    #[test]
+    fn recommended_ivfflat_lists_follows_pgvector_heuristic() {
+        // Degenerate / tiny corpora never drop below a single partition.
+        assert_eq!(recommended_ivfflat_lists(0), 1);
+        assert_eq!(recommended_ivfflat_lists(-5), 1);
+        assert_eq!(recommended_ivfflat_lists(1), 1);
+        assert_eq!(recommended_ivfflat_lists(500), 1);
+        // rows/1000 up to 1M (rounded).
+        assert_eq!(recommended_ivfflat_lists(1_500), 2);
+        assert_eq!(recommended_ivfflat_lists(32_000), 32);
+        assert_eq!(recommended_ivfflat_lists(1_000_000), 1_000);
+        // sqrt(rows) beyond 1M — the production corpus lands near the bear-measured 2168.
+        assert_eq!(recommended_ivfflat_lists(4_701_354), 2168);
+    }
+
+    #[test]
+    fn recommended_probes_is_sqrt_lists_clamped() {
+        assert_eq!(recommended_probes(0), 1);
+        assert_eq!(recommended_probes(1), 1);
+        assert_eq!(recommended_probes(2168), 47);
+        // Clamped to the `--probes` ceiling even for an extreme list count.
+        assert_eq!(recommended_probes(u32::MAX), 4096);
     }
 }

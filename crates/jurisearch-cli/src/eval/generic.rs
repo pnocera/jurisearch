@@ -573,7 +573,10 @@ pub(crate) fn eval_run_payload(
         "retrieval_options": {
             "rrf_lexical_weight": options.rrf_lexical_weight.unwrap_or(env_lexical),
             "rrf_dense_weight": options.rrf_dense_weight.unwrap_or(env_dense),
-            "ivfflat_probes": options.ivfflat_probes.unwrap_or(4),
+            // Report only what the eval requested: `null` means no per-request override, so retrieval
+            // used the index manifest's recommended probes (else the fixed fallback). Echoing a literal
+            // `4` here would misreport runs against a corpus-sized index whose default is much higher.
+            "ivfflat_probes": options.ivfflat_probes,
         },
         "pool": { "total_pairs": total_pool },
         "metrics": Value::Object(metrics_out),

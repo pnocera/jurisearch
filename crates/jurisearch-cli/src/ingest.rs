@@ -184,11 +184,7 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
                     "ingest embed-chunks --limit must be at least 1 when provided",
                 ));
             }
-            if index_lists == 0 {
-                return emit_error(ErrorObject::bad_input(
-                    "ingest embed-chunks --index-lists must be at least 1",
-                ));
-            }
+            // `--index-lists 0` is valid: it means auto-scale the ivfflat lists to the corpus size.
             if batch_size == 0 {
                 return emit_error(ErrorObject::bad_input(
                     "ingest embed-chunks --batch-size must be at least 1",
@@ -256,11 +252,7 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
                     "ingest embed-zone-units --limit must be at least 1 when provided",
                 ));
             }
-            if index_lists == 0 {
-                return emit_error(ErrorObject::bad_input(
-                    "ingest embed-zone-units --index-lists must be at least 1",
-                ));
-            }
+            // `--index-lists 0` is valid: it means auto-scale the ivfflat lists to the corpus size.
             if batch_size == 0 {
                 return emit_error(ErrorObject::bad_input(
                     "ingest embed-zone-units --batch-size must be at least 1",

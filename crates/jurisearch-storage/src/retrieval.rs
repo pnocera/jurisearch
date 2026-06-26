@@ -39,13 +39,23 @@ mod tests {
     // T1.3: the helpers extracted to pub(crate) for the zone retrieval path must behave identically to
     // the prior inline logic (the isolation invariant — no change to default retrieval).
     #[test]
-    fn effective_probes_defaults_to_four_else_override() {
-        assert_eq!(effective_probes(&RetrievalOptions::default()), 4);
+    fn effective_probes_prefers_override_then_stored_then_fixed_default() {
+        // No override, no stored recommendation → the conservative fixed fallback.
         assert_eq!(
-            effective_probes(&RetrievalOptions {
-                ivfflat_probes: Some(13),
-                ..RetrievalOptions::default()
-            }),
+            effective_probes(&RetrievalOptions::default(), None),
+            DEFAULT_IVFFLAT_PROBES
+        );
+        // No override, but a manifest recommendation → the corpus-sized stored value.
+        assert_eq!(effective_probes(&RetrievalOptions::default(), Some(47)), 47);
+        // An explicit `--probes` override always wins over the stored recommendation.
+        assert_eq!(
+            effective_probes(
+                &RetrievalOptions {
+                    ivfflat_probes: Some(13),
+                    ..RetrievalOptions::default()
+                },
+                Some(47)
+            ),
             13
         );
     }

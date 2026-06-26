@@ -172,19 +172,23 @@ pub(crate) fn effective_rrf_weights(options: &RetrievalOptions) -> (f64, f64) {
     )
 }
 
-/// Effective ivfflat probes for a request: per-request override else the default 4. Shared with the
-/// zone retrieval path.
-pub(crate) fn effective_probes(options: &RetrievalOptions) -> u32 {
-    options.ivfflat_probes.unwrap_or(4)
+/// Conservative fixed fallback for `ivfflat.probes` when a request gives no explicit `--probes` and the
+/// index manifest carries no built-time recommendation (older indexes built before Fix #2).
+pub(crate) const DEFAULT_IVFFLAT_PROBES: u32 = 4;
+
+/// Effective ivfflat probes for a request: an explicit per-request `--probes` override wins, else the
+/// index's built-time recommendation (`stored_default`, read from the manifest by the caller), else the
+/// conservative fixed fallback. Shared with the zone retrieval path.
+pub(crate) fn effective_probes(options: &RetrievalOptions, stored_default: Option<u32>) -> u32 {
+    options
+        .ivfflat_probes
+        .or(stored_default)
+        .unwrap_or(DEFAULT_IVFFLAT_PROBES)
 }
 
 impl HybridCandidateQuery<'_> {
     pub(super) fn effective_rrf_weights(&self) -> (f64, f64) {
         effective_rrf_weights(&self.options)
-    }
-
-    pub(super) fn effective_probes(&self) -> u32 {
-        effective_probes(&self.options)
     }
 }
 
