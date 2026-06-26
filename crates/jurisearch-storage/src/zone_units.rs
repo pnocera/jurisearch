@@ -682,7 +682,12 @@ fn validate_zone_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageEr
 /// (enrichment attempts by source/status, derived units by zone, embedding coverage), never inflating
 /// the corpus claim. Counts run over the small zone/overlay tables only (no 1.1M-row resolver scan).
 pub fn zone_retrieval_coverage_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
-    postgres.execute_sql(
+    // Client read role (plan P2): this backs the zone-retrieval gate (`retrieval/zone.rs`) and the
+    // `status` block, both of which must reflect the SERVED corpus. The zone/overlay tables
+    // (`decision_zones`/`zone_units`/`zone_unit_embeddings`/`documents`) are replicated, so they resolve
+    // to the active generation; the global `index_manifest` read falls through to `public`. Without
+    // this the zone gate would split-brain (zone search reads the generation, the coverage reads public).
+    postgres.execute_read_sql(
         r#"
 SELECT jsonb_build_object(
     'scope', 'official_cour_de_cassation_zones (cass+inca)',
@@ -739,7 +744,9 @@ fn zone_enrichable_sources_in_list() -> String {
 /// `{ "by_source": [{source, total, resolver_reachable, skipped_no_pourvoi}], "resolver_reachable_total" }`.
 pub fn zone_resolver_reachable_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
     let source_list = zone_enrichable_sources_in_list();
-    postgres.execute_sql(&format!(
+    // Client read role (plan P2): the `status` resolver-reachable denominator scans `documents`
+    // (replicated), so on a client it must reflect the served generation, not stale `public`.
+    postgres.execute_read_sql(&format!(
         r#"
 WITH reach AS (
     SELECT d.source AS source,

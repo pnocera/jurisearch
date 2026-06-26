@@ -33,7 +33,7 @@ pub fn resolve_legi_citation_json(
         .unwrap_or_default();
     let limit = query.limit.max(1);
 
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 WITH resolved AS (
     SELECT

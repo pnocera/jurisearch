@@ -92,13 +92,22 @@ pub(crate) fn enrich_decision_from_judilibre(
     postgres: &ManagedPostgres,
     document_id: &str,
 ) -> Result<Option<Value>, ErrorObject> {
+    // Resolve the local resolution metadata through the CLIENT READ ROLE (active generation), not the
+    // raw write connection's default `public`. On a generation-backed client whose `public` is empty,
+    // resolving the pourvoi/ECLI/source_uid against `public` would fail and `fetch --part --online`
+    // would wrongly cache the decision as unsupported (the r4 split-brain). The producer-style writes in
+    // the core still go to the caller-owned `public` connection below.
+    let meta: Value = serde_json::from_str(
+        &decision_resolution_metadata_json(postgres, document_id).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
     let mut db = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
     let piste = PisteClient::new(OfficialApiConfig::from_env());
     // On-demand single-decision enrichment (the client-facing `fetch --part --online` path): not a
     // producer capture run, so no outbox emission. Scheduled producer capture goes through the batch
     // `enrich-zones` command, which threads an OutboxContext.
-    enrich_decision_from_judilibre_with_client(&mut db, &piste, document_id, None)
+    enrich_decision_from_judilibre_with_client(&mut db, &piste, document_id, &meta, None)
 }
 
 /// Thread-safe enrichment core: takes a caller-owned `postgres::Client` and `PisteClient` (no
@@ -108,13 +117,14 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
     db: &mut C,
     piste: &PisteClient,
     document_id: &str,
+    resolution_meta: &Value,
     outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<Option<Value>, ErrorObject> {
-    // Local resolution metadata: a parser-valid pourvoi, the decision date (= valid_from), source_uid.
-    let meta: Value = serde_json::from_str(
-        &decision_resolution_metadata_with_client(db, document_id).map_err(storage_error_object)?,
-    )
-    .map_err(|error| dependency_unavailable(error.to_string()))?;
+    // Local resolution metadata (parser-valid pourvoi, decision date = valid_from, source_uid) is
+    // resolved by the CALLER and passed in: the client-facing wrapper resolves it through the read role
+    // (active generation), while the producer backfill resolves it on its own `public` connection. The
+    // writes below stay on the caller-owned `db`.
+    let meta = resolution_meta;
 
     let source_uid = meta["source_uid"].as_str().unwrap_or_default();
     let ecli = meta["ecli"].as_str();

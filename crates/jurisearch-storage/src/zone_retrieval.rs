@@ -291,5 +291,5 @@ SELECT jsonb_build_object(
 )::text;
 "#
     );
-    postgres.execute_sql(&sql)
+    postgres.execute_read_sql(&sql)
 }

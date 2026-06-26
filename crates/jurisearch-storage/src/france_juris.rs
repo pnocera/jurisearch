@@ -51,15 +51,18 @@ pub fn france_juris_gold_json(
     postgres: &ManagedPostgres,
     limits: FranceJurisGoldLimits,
 ) -> Result<String, StorageError> {
-    let judicial = postgres.execute_sql(&retrieval_sql(
+    // Gold is extracted from the served corpus data (documents/chunks), so it MUST read through the
+    // client read role — on a client whose corpus lives in an active generation, reading `public`
+    // would yield stale/empty qrels that silently diverge from what retrieval actually searches.
+    let judicial = postgres.execute_read_sql(&retrieval_sql(
         "'cass','capp','inca'",
         limits.judicial_retrieval,
     ))?;
     let administrative =
-        postgres.execute_sql(&retrieval_sql("'jade'", limits.administrative_retrieval))?;
-    let ecli = postgres.execute_sql(&ecli_sql(limits.ecli))?;
-    let pourvoi = postgres.execute_sql(&pourvoi_sql(limits.pourvoi))?;
-    let cetatext = postgres.execute_sql(&cetatext_sql(limits.cetatext))?;
+        postgres.execute_read_sql(&retrieval_sql("'jade'", limits.administrative_retrieval))?;
+    let ecli = postgres.execute_read_sql(&ecli_sql(limits.ecli))?;
+    let pourvoi = postgres.execute_read_sql(&pourvoi_sql(limits.pourvoi))?;
+    let cetatext = postgres.execute_read_sql(&cetatext_sql(limits.cetatext))?;
     Ok(format!(
         "{{\"judicial_retrieval\":{},\"administrative_retrieval\":{},\"decision_citation\":{{\"ecli\":{},\"pourvoi\":{},\"cetatext\":{}}}}}",
         judicial.trim(),
@@ -203,10 +206,13 @@ pub fn france_juris_zone_gold_json(
     postgres: &ManagedPostgres,
     limits: FranceJurisZoneGoldLimits,
 ) -> Result<String, StorageError> {
+    // Read through the client read role: zone gold comes from the served `zone_units` (active
+    // generation on a client), never stale `public`.
     let motivations =
-        postgres.execute_sql(&zone_retrieval_sql("motivations", limits.motivations))?;
-    let moyens = postgres.execute_sql(&zone_retrieval_sql("moyens", limits.moyens))?;
-    let dispositif = postgres.execute_sql(&zone_retrieval_sql("dispositif", limits.dispositif))?;
+        postgres.execute_read_sql(&zone_retrieval_sql("motivations", limits.motivations))?;
+    let moyens = postgres.execute_read_sql(&zone_retrieval_sql("moyens", limits.moyens))?;
+    let dispositif =
+        postgres.execute_read_sql(&zone_retrieval_sql("dispositif", limits.dispositif))?;
     Ok(format!(
         "{{\"motivations\":{},\"moyens\":{},\"dispositif\":{}}}",
         motivations.trim(),
@@ -266,7 +272,10 @@ FROM (
 /// per-source completed `source_version`s, and the document/chunk/embedding counts) — far cheaper than
 /// a full replay snapshot, and distinct for a merged corpus (where the directory basename is not).
 pub fn france_juris_index_revision(postgres: &ManagedPostgres) -> Result<String, StorageError> {
-    let digest = postgres.execute_sql(
+    // Read role: the document/chunk/embedding counts must reflect the served generation; the global
+    // `index_manifest`/`ingest_run` reads fall back to `public` (not replicated per-generation), so a
+    // single read-role search path is correct for the whole digest.
+    let digest = postgres.execute_read_sql(
         r#"
 SELECT md5(jsonb_build_object(
     'schema', (SELECT value FROM index_manifest WHERE key = 'schema'),

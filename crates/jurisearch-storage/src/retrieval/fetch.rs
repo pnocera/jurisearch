@@ -18,7 +18,7 @@ pub fn fetch_documents_json(
         .collect::<Vec<_>>()
         .join(", ");
 
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 WITH requested(document_id, ordinal) AS (
     VALUES {requested_values}

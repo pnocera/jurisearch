@@ -1,6 +1,13 @@
 //! Query-readiness + projection/embedding coverage metrics and the readiness cache.
+//!
+//! Coverage is a **client-read-role** operation (plan P2): the projection/embedding queries run under
+//! the same resolved `search_path` as [`crate::runtime::ManagedPostgres::execute_read_sql`] so they
+//! measure the **active generation** tables, not stale `public`. The cache is scoped to the active
+//! read topology by [`active_read_signature`], so a readiness report computed against `public` or a
+//! now-retired generation can never authorize the current active generation.
 
 use super::*;
+use crate::runtime::sql_identifier;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IngestReadinessReport {
@@ -8,11 +15,70 @@ pub struct IngestReadinessReport {
     pub embedding_coverage: CoverageMetric,
 }
 
+/// The cached readiness report plus the read-topology signature it was computed against. A cache hit
+/// is honoured only when the embedded `signature` still equals the current [`active_read_signature`],
+/// so a generation switch (or a stale `public` report) forces a recompute rather than authorizing the
+/// wrong tables.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedReadiness {
+    signature: String,
+    report: IngestReadinessReport,
+}
+
+/// A compact signature of the active read topology, used to scope the readiness cache. Each installed
+/// corpus contributes `corpus:active_generation:sequence` (ordered by corpus); an empty `corpus_state`
+/// (producer / fresh client) yields `public`. Same `corpus_state` → same signature, so producer-side
+/// behaviour is unchanged (`public`).
+fn active_read_signature<C: GenericClient>(client: &mut C) -> Result<String, StorageError> {
+    let row = client
+        .query_one(
+            "SELECT coalesce( \
+                 string_agg(corpus || ':' || active_generation || ':' || sequence::text, ',' \
+                            ORDER BY corpus), \
+                 'public') \
+             FROM jurisearch_control.corpus_state;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    Ok(row.get(0))
+}
+
+/// Set `client`'s `search_path` to the client read role for the installed corpora — the active
+/// generation's physical schema(s) then `public` — so the coverage queries measure the active
+/// generation. Mirrors [`crate::runtime::ManagedPostgres::execute_read_sql`]: 0 corpora → `public`;
+/// 1 → `jurisearch_server_<gen>, public`; >1 → `jurisearch_server, public`. Returns the read signature.
+pub(super) fn apply_read_search_path<C: GenericClient>(
+    client: &mut C,
+) -> Result<String, StorageError> {
+    let rows = client
+        .query(
+            "SELECT active_generation FROM jurisearch_control.corpus_state ORDER BY corpus;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let path = match rows.len() {
+        0 => "public".to_owned(),
+        1 => {
+            let generation: String = rows[0].get("active_generation");
+            format!(
+                "{}, public",
+                sql_identifier(&format!("jurisearch_server_{generation}"))
+            )
+        }
+        _ => format!("{}, public", sql_identifier("jurisearch_server")),
+    };
+    client
+        .batch_execute(&format!("SET search_path TO {path};"))
+        .map_err(StorageError::PostgresClient)?;
+    active_read_signature(client)
+}
+
 pub fn load_ingest_readiness(
     postgres: &ManagedPostgres,
 ) -> Result<IngestReadinessReport, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    apply_read_search_path(&mut client)?;
     load_readiness_metrics(&mut client)
 }
 
@@ -21,6 +87,7 @@ pub fn load_ingest_projection_coverage(
 ) -> Result<CoverageMetric, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    apply_read_search_path(&mut client)?;
     load_projection_coverage(&mut client)
 }
 
@@ -29,6 +96,7 @@ pub fn load_ingest_embedding_coverage(
 ) -> Result<CoverageMetric, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    apply_read_search_path(&mut client)?;
     load_embedding_coverage(&mut client)
 }
 
@@ -53,6 +121,7 @@ pub fn load_cached_query_readiness(
 ) -> Result<Option<IngestReadinessReport>, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    let signature = active_read_signature(&mut client)?;
     let Some(row) = client
         .query_opt(
             "SELECT value::text FROM index_manifest WHERE key = $1;",
@@ -62,7 +131,14 @@ pub fn load_cached_query_readiness(
     else {
         return Ok(None);
     };
-    Ok(serde_json::from_str::<IngestReadinessReport>(&row.get::<_, String>(0)).ok())
+    // Honour the cache only for the read topology it was computed against (a `public`/retired-gen
+    // report must not authorize the current active generation).
+    Ok(
+        serde_json::from_str::<CachedReadiness>(&row.get::<_, String>(0))
+            .ok()
+            .filter(|cached| cached.signature == signature)
+            .map(|cached| cached.report),
+    )
 }
 
 /// Cache a fully-ready readiness report so subsequent query-readiness checks skip the full-corpus
@@ -72,9 +148,14 @@ pub fn store_query_readiness(
     postgres: &ManagedPostgres,
     report: &IngestReadinessReport,
 ) -> Result<(), StorageError> {
-    let value = serde_json::to_string(report).map_err(StorageError::Json)?;
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    let signature = active_read_signature(&mut client)?;
+    let value = serde_json::to_string(&CachedReadiness {
+        signature,
+        report: report.clone(),
+    })
+    .map_err(StorageError::Json)?;
     client
         .execute(
             "INSERT INTO index_manifest(key, value, updated_at) \
@@ -118,6 +199,10 @@ pub fn load_or_compute_query_readiness(
 ) -> Result<(IngestReadinessReport, bool), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    // Resolve the client read role: point `search_path` at the active generation (so coverage measures
+    // the generation, not stale `public`) and obtain the signature that scopes the cache. `index_manifest`
+    // is global and resolves through the `public` fallback regardless.
+    let signature = apply_read_search_path(&mut client)?;
 
     if let Some(row) = client
         .query_opt(
@@ -125,9 +210,10 @@ pub fn load_or_compute_query_readiness(
             &[&QUERY_READINESS_MANIFEST_KEY],
         )
         .map_err(StorageError::PostgresClient)?
-        && let Ok(cached) = serde_json::from_str::<IngestReadinessReport>(&row.get::<_, String>(0))
+        && let Ok(cached) = serde_json::from_str::<CachedReadiness>(&row.get::<_, String>(0))
+        && cached.signature == signature
     {
-        return Ok((cached, true));
+        return Ok((cached.report, true));
     }
 
     let report = IngestReadinessReport {
@@ -137,7 +223,11 @@ pub fn load_or_compute_query_readiness(
     let fully_ready = coverage_is_complete(&report.projection_coverage)
         && coverage_is_complete(&report.embedding_coverage);
     if fully_ready {
-        let value = serde_json::to_string(&report).map_err(StorageError::Json)?;
+        let value = serde_json::to_string(&CachedReadiness {
+            signature,
+            report: report.clone(),
+        })
+        .map_err(StorageError::Json)?;
         client
             .execute(
                 "INSERT INTO index_manifest(key, value, updated_at) \

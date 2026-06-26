@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 19;
+pub const CURRENT_SCHEMA_VERSION: i32 = 20;
 
 struct Migration {
     version: i32,
@@ -858,6 +858,86 @@ ON package_change_log (ingest_run_id);
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 19), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 20,
+        name: "client_storage_topology",
+        // Plan P2 "client storage topology" (design §4, §7.2): the client-side namespaces + control
+        // schema. The CLIENT serves replicated data from per-corpus PHYSICAL generation schemas
+        // (`jurisearch_server_<corpus>_gNNNN`, created dynamically by the `generations` module, NOT
+        // here) fronted by stable `jurisearch_server` views; this migration creates the global,
+        // never-swapped namespaces and the control cursor/registry.
+        //
+        // DDL classification (the §4.2 / codex P2 boundary): the replicated *data* tables are emitted
+        // per-generation (qualified) by the `generations` module; `jurisearch_control`,
+        // `jurisearch_app`, `jurisearch_server` (views), and the global `package_change_log` /
+        // `index_manifest` / `schema_migrations` / `ingest_*` live in `public`/control and are NEVER
+        // per-generation. The PRODUCER keeps writing its authoritative working set in `public`
+        // (design: producer mutable, client applies generations).
+        sql: r#"
+CREATE SCHEMA IF NOT EXISTS jurisearch_server;
+CREATE SCHEMA IF NOT EXISTS jurisearch_control;
+CREATE SCHEMA IF NOT EXISTS jurisearch_app;
+
+-- The single authority on client position, one row per installed corpus (design §7.2). The ONLY
+-- writer is the cursor-authority module (conception §4.2).
+CREATE TABLE IF NOT EXISTS jurisearch_control.corpus_state (
+    corpus                text PRIMARY KEY,
+    active_generation     text NOT NULL,
+    sequence              bigint NOT NULL,
+    baseline_id           text NOT NULL,
+    schema_version        integer NOT NULL,
+    embedding_fingerprint text NOT NULL,
+    builder_versions      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    last_package_id       text,
+    last_package_digest   text,
+    applied_at            timestamptz NOT NULL DEFAULT now()
+);
+
+-- Tracks every per-corpus physical generation for rollback + async cleanup (design §7.2).
+CREATE TABLE IF NOT EXISTS jurisearch_control.generation_registry (
+    corpus              text NOT NULL,
+    generation          text NOT NULL,
+    physical_schema     text NOT NULL,
+    state               text NOT NULL CHECK (state IN ('building','active','retired','failed')),
+    source_baseline_id  text,
+    source_package_id   text,
+    validation_digest   text,
+    created_at          timestamptz NOT NULL DEFAULT now(),
+    activated_at        timestamptz,
+    retired_at          timestamptz,
+    PRIMARY KEY (corpus, generation)
+);
+
+-- At most one ACTIVE generation per corpus (the stable views point at exactly one).
+CREATE UNIQUE INDEX IF NOT EXISTS generation_registry_one_active_per_corpus
+ON jurisearch_control.generation_registry (corpus) WHERE state = 'active';
+
+CREATE INDEX IF NOT EXISTS generation_registry_state_idx
+ON jurisearch_control.generation_registry (state);
+
+-- Empty stable views for every replicated relation, so a freshly-migrated client (no active
+-- generation yet) has a complete `jurisearch_server` namespace returning zero rows of the correct
+-- shape — never a "relation does not exist" and never stale public data. `generations::
+-- rebuild_server_views` repoints these to the active generation(s) on activation.
+CREATE OR REPLACE VIEW jurisearch_server.documents AS SELECT * FROM public.documents WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.chunks AS SELECT * FROM public.chunks WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.chunk_embeddings AS SELECT * FROM public.chunk_embeddings WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.graph_edges AS SELECT * FROM public.graph_edges WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.legi_metadata_roots AS SELECT * FROM public.legi_metadata_roots WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.zone_units AS SELECT * FROM public.zone_units WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.zone_unit_embeddings AS SELECT * FROM public.zone_unit_embeddings WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.decision_zones AS SELECT * FROM public.decision_zones WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.decision_legislation_citations AS SELECT * FROM public.decision_legislation_citations WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.legislation_citation_resolutions AS SELECT * FROM public.legislation_citation_resolutions WHERE false;
+CREATE OR REPLACE VIEW jurisearch_server.official_api_responses AS SELECT * FROM public.official_api_responses WHERE false;
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 20), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

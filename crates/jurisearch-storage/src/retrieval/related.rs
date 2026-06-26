@@ -98,7 +98,7 @@ resolved AS (
         ),
     };
 
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 WITH {resolved_cte}
 SELECT jsonb_build_object(

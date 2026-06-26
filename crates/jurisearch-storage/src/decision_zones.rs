@@ -17,7 +17,11 @@ pub fn decision_zones_json(
     document_id: &str,
 ) -> Result<String, StorageError> {
     let id = sql_string_literal(document_id);
-    postgres.execute_sql(&format!(
+    // Client read role (plan P2): `fetch --part` reads the replicated `decision_zones` overlay, so on a
+    // client it must resolve to the ACTIVE generation (consistent with the document fetch), not stale
+    // `public`. (The network-fed cache write-back below stays on `public`; an online `fetch --part`
+    // returns the live resolution directly, so the write-back is only a cross-call cache optimization.)
+    postgres.execute_read_sql(&format!(
         r#"
 SELECT coalesce((
     SELECT jsonb_build_object(
@@ -53,7 +57,9 @@ pub fn decision_resolution_metadata_json(
     document_id: &str,
 ) -> Result<String, StorageError> {
     let id = sql_string_literal(document_id);
-    postgres.execute_sql(&format!(
+    // Client read role (plan P2): reads `documents` (replicated) for a decision's Judilibre-resolution
+    // metadata, so it follows the active generation like the rest of the read path.
+    postgres.execute_read_sql(&format!(
         r#"
 SELECT coalesce((
     SELECT jsonb_build_object(

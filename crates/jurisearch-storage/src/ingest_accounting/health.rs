@@ -40,6 +40,10 @@ pub fn load_ingest_health_with_replay_snapshot_mode(
 ) -> Result<IngestHealthReport, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+    // Client read role (plan P2): the embedded projection/embedding coverage must measure the active
+    // generation, not stale `public`. The global `ingest_*`/`index_manifest` reads below fall through
+    // to `public` (the generation schema only holds replicated data tables), so this is safe for them.
+    apply_read_search_path(&mut client)?;
     let latest = client
         .query_opt(
             "SELECT run_id, status, manifest::text \

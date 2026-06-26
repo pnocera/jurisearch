@@ -9,7 +9,7 @@ pub fn document_versions_json(
     document_id: &str,
 ) -> Result<String, StorageError> {
     let id = sql_string_literal(document_id);
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 WITH {family}
 SELECT jsonb_build_object(
@@ -43,7 +43,7 @@ pub fn document_diff_json(
     let id = sql_string_literal(document_id);
     let from_lit = sql_string_literal(from);
     let to_lit = sql_string_literal(to);
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 WITH {family},
 from_version AS (

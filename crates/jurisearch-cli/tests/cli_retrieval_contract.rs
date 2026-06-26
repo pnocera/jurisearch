@@ -310,6 +310,291 @@ fn fetch_returns_documents_from_existing_index() -> Result<(), StorageError> {
 }
 
 #[test]
+fn fetch_passes_readiness_and_reads_the_active_generation_not_stale_public()
+-> Result<(), StorageError> {
+    // r2 BLOCKER fix (CLI-level): the real CLI query path (open_query_index -> ensure_query_readiness
+    // -> fetch) must GATE on, and READ from, the ACTIVE generation. Prove it end-to-end by emptying
+    // `public` after activation: a client whose corpus lives only in the generation must still pass the
+    // readiness gate and return the document — impossible if any read/readiness step still hit `public`.
+    use jurisearch_storage::generations::{
+        ActivationStamps, activate_generation, create_generation_from_public,
+    };
+    let Some(pg_config) = discover_pg_config("CLI fetch generation")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-fetch-gen.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let document_id = "legi:LEGIARTI000006419320@1804-02-21";
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        // A fully query-ready corpus in public: 1 article + its embedded chunk (fingerprint matches).
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', 'Article 1240', \
+                 'Tout fait quelconque de l''homme oblige a reparer le dommage.', \
+                 '1804-02-21', 'sha256:article-1240', '{\"official\":true}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'responsabilite civile faute reparation dommage article 1240', \
+                 'Code civil > Article 1240\nresponsabilite civile faute', \
+                 'sha256:article-1240', 'chunker:v0', 'bge-m3:1024:normalize:true');",
+        )?;
+        let vector = (0..1024).map(|_| "0.01").collect::<Vec<_>>().join(",");
+        postgres.execute_sql(&format!(
+            "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             VALUES ('chunk:1240:0','bge-m3:1024:normalize:true','[{vector}]'::vector,'bge-m3',1024);"
+        ))?;
+
+        // Cut + activate a generation from public, then EMPTY public — only the generation holds it now.
+        let generation =
+            create_generation_from_public(&postgres, "core", 1, Some("core-cli-g0001"))?;
+        activate_generation(
+            &postgres,
+            "core",
+            &generation,
+            &ActivationStamps {
+                sequence: 1,
+                baseline_id: "core-cli-g0001",
+                schema_version: 20,
+                embedding_fingerprint: "bge-m3:1024:normalize:true",
+                builder_versions: &serde_json::Value::Null,
+                last_package_id: None,
+                last_package_digest: None,
+            },
+            None,
+        )?;
+        postgres.execute_sql(
+            "DELETE FROM public.chunk_embeddings; DELETE FROM public.chunks; \
+             DELETE FROM public.documents;",
+        )?;
+    }
+
+    // The CLI binary opens its own managed PG at root: the readiness gate AND the fetch read must both
+    // resolve to the active generation (public is empty), so the document is returned.
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["fetch", document_id])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["documents"][0]["document_id"], document_id,
+        "fetch read the active generation despite empty public"
+    );
+    assert_eq!(
+        json["documents"][0]["chunks"][0]["chunk_id"], "chunk:1240:0",
+        "the generation's chunk is returned"
+    );
+    Ok(())
+}
+
+#[test]
+fn fetch_part_online_resolves_judilibre_metadata_from_the_active_generation()
+-> Result<(), StorageError> {
+    // r4 BLOCKER fix: the `fetch --part --online` cache-miss path resolves the decision's
+    // pourvoi/ECLI/source_uid through the CLIENT READ ROLE (active generation), not the raw write
+    // connection's default `public`. We make `public` STALE — the decision row exists but its
+    // canonical_json is stripped of case_numbers, so a public-resolved pourvoi would be null — while the
+    // generation carries the full record. With the fix the online path resolves the pourvoi from the
+    // generation, reaches the mocked Judilibre search/decision endpoints, and returns the official zone;
+    // without it the pourvoi is null and no official zone is produced. (We keep the row in
+    // `public.documents` rather than deleting it because `decision_zones.document_id` REFERENCES
+    // documents(document_id) — the cache write-back, which stays on `public` per the P2 boundary, needs
+    // the public row. r4 itself framed the split-brain as "public is empty *or stale*".)
+    use jurisearch_storage::generations::{
+        ActivationStamps, activate_generation, create_generation_from_public,
+    };
+    let Some(pg_config) = discover_pg_config("CLI fetch-part online generation")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-part-online-gen.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, valid_from, \
+                 source_payload_hash, canonical_json) \
+             VALUES ('cass:DEC1','cass','decision','JURITEXT000000000001','Cass','Arret', \
+               'Corps de la decision.', '2024-01-01','sha256:dec1', \
+               '{\"ecli\":\"ECLI:FR:CCASS:2024:C100001\",\"case_numbers\":[\"22-21.812\"]}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+                 chunk_builder_version) \
+             VALUES ('cass:DEC1#0','cass:DEC1',0,'Corps de la decision.','ctx','sha256:c','c1');",
+        )?;
+
+        let generation =
+            create_generation_from_public(&postgres, "core", 1, Some("core-part-g0001"))?;
+        activate_generation(
+            &postgres,
+            "core",
+            &generation,
+            &ActivationStamps {
+                sequence: 1,
+                baseline_id: "core-part-g0001",
+                schema_version: 20,
+                embedding_fingerprint: "bge-m3:1024:normalize:true",
+                builder_versions: &serde_json::Value::Null,
+                last_package_id: None,
+                last_package_digest: None,
+            },
+            None,
+        )?;
+        // Make public STALE: strip the case_numbers so a public-resolved pourvoi would be null.
+        postgres.execute_sql(
+            "UPDATE public.documents SET canonical_json = '{}'::jsonb WHERE document_id='cass:DEC1';",
+        )?;
+    }
+
+    // Judilibre uses a `KeyId` header (no OAuth), so the online path makes exactly two GETs: /search
+    // then /decision. The /search being reached at all proves the pourvoi was resolved (from the
+    // generation, since public's was stripped).
+    let judilibre_base_url = spawn_server(2, |request| {
+        if request.contains("/cassation/judilibre/v1.0/search") {
+            assert!(
+                request.contains("22-21"),
+                "search reached with the generation-resolved pourvoi: {request}"
+            );
+            ok_json(
+                r#"{"results":[{"id":"prov-1","numbers":["22-21.812"],"decision_date":"2024-01-01"}]}"#,
+            )
+        } else {
+            assert!(request.contains("/cassation/judilibre/v1.0/decision"));
+            assert!(request.contains("id=prov-1"));
+            ok_json(
+                r#"{"text":"Motivation officielle de la decision Cassation.","decision_date":"2024-01-01","update_date":"2024-02-01","zones":{"motivations":[{"start":0,"end":21}]}}"#,
+            )
+        }
+    });
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .env("JURISEARCH_PISTE_ENV", "sandbox")
+        .env("JURISEARCH_PISTE_API_BASE_URL", &judilibre_base_url)
+        .env("JURISEARCH_PISTE_JUDILIBRE_KEY_ID", "test-key")
+        .env("JURISEARCH_PISTE_MAX_RETRIES", "0")
+        .args(["fetch", "cass:DEC1", "--part", "motivations", "--online"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let part = &json["documents"][0]["part"];
+    assert_eq!(
+        part["zone_provenance"], "judilibre",
+        "online fetch --part resolved the official Judilibre zone via the active generation: {json}"
+    );
+    assert!(
+        part["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Motivation officielle"),
+        "the official motivations fragment is returned: {json}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cite_resolves_identifiers_against_the_active_generation_not_stale_public()
+-> Result<(), StorageError> {
+    // r3 BLOCKER fix (CLI-level): `jurisearch cite` (open_query_index -> ensure_query_readiness ->
+    // citation_lookup) must resolve identifiers against the ACTIVE generation, not stale/empty `public`.
+    // Prove it by emptying `public` after activation: the cite must still match the served generation.
+    use jurisearch_storage::generations::{
+        ActivationStamps, activate_generation, create_generation_from_public,
+    };
+    let Some(pg_config) = discover_pg_config("CLI cite generation")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cli-cite-gen.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+
+    {
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+        postgres.execute_sql(
+            "INSERT INTO documents \
+                (document_id, source, kind, source_uid, citation, title, body, \
+                 valid_from, valid_to, valid_to_raw, source_payload_hash, canonical_json) \
+             VALUES \
+                ('legi:LEGIARTI000006419320@1804-02-21', 'legi', 'article', \
+                 'LEGIARTI000006419320', 'Code civil article 1240', 'Article 1240', \
+                 'Responsabilite civile courante.', '1804-02-21', NULL, '2999-01-01', \
+                 'sha256:civil-1240', '{\"official\":true}'); \
+             INSERT INTO chunks \
+                (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES \
+                ('chunk:civil-1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
+                 'Responsabilite civile courante.', 'Code civil > Article 1240', \
+                 'sha256:civil-1240', 'chunker:v0', NULL);",
+        )?;
+
+        let generation =
+            create_generation_from_public(&postgres, "core", 1, Some("core-cite-g0001"))?;
+        activate_generation(
+            &postgres,
+            "core",
+            &generation,
+            &ActivationStamps {
+                sequence: 1,
+                baseline_id: "core-cite-g0001",
+                schema_version: 20,
+                embedding_fingerprint: "bge-m3:1024:normalize:true",
+                builder_versions: &serde_json::Value::Null,
+                last_package_id: None,
+                last_package_digest: None,
+            },
+            None,
+        )?;
+        postgres.execute_sql("DELETE FROM public.chunks; DELETE FROM public.documents;")?;
+    }
+
+    let output = Command::cargo_bin("jurisearch")
+        .unwrap()
+        .env("JURISEARCH_INDEX_DIR", root.path())
+        .args(["cite", "LEGIARTI000006419320", "--as-of", "2024-01-01"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        json["state"], "exact",
+        "cite resolved against the active generation despite empty public: {json}"
+    );
+    assert_eq!(
+        json["matches"][0]["document_id"],
+        "legi:LEGIARTI000006419320@1804-02-21"
+    );
+    Ok(())
+}
+
+#[test]
 fn cite_resolves_local_statutory_citations_and_strict_states() -> Result<(), StorageError> {
     let Some(pg_config) = discover_pg_config("CLI cite existing index")? else {
         return Ok(());

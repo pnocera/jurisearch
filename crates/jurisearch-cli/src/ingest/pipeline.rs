@@ -159,8 +159,19 @@ pub(crate) fn enrich_zone_page_concurrently(
                     group
                         .into_iter()
                         .map(|doc_id| {
+                            // Producer backfill: resolve the local metadata on this worker's own
+                            // (`public`) connection — the producer's authoritative working set — and pass
+                            // it into the enrichment core, which writes on the same connection.
+                            let meta =
+                                match decision_resolution_metadata_with_client(&mut db, doc_id) {
+                                    Ok(json) => match serde_json::from_str::<Value>(&json) {
+                                        Ok(meta) => meta,
+                                        Err(_) => return ZoneEnrichOutcome::Error,
+                                    },
+                                    Err(_) => return ZoneEnrichOutcome::Error,
+                                };
                             match enrich_decision_from_judilibre_with_client(
-                                &mut db, &piste, doc_id, outbox,
+                                &mut db, &piste, doc_id, &meta, outbox,
                             ) {
                                 Ok(Some(_)) => ZoneEnrichOutcome::Official,
                                 Ok(None) => ZoneEnrichOutcome::Fallback,

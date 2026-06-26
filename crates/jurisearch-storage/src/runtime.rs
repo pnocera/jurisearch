@@ -238,6 +238,51 @@ impl ManagedPostgres {
         psql(&self.pg_config, self.port, &self.database, sql)
     }
 
+    /// Run `sql` with a `search_path` set to `schemas` (each quoted) for this (fresh) `psql` session
+    /// only (plan P2). The client read role resolves the active generation per query and sets the
+    /// path here, so it can never go stale after a generation switch (unlike `ALTER DATABASE SET
+    /// search_path`, which the design rules out, §4.3). Each schema name is quoted with
+    /// [`sql_identifier`] so a corpus/generation-derived name cannot break out of the statement.
+    pub fn execute_sql_with_search_path(
+        &self,
+        schemas: &[&str],
+        sql: &str,
+    ) -> Result<String, StorageError> {
+        let path = schemas
+            .iter()
+            .map(|schema| sql_identifier(schema))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.execute_sql(&format!("SET search_path TO {path};\n{sql}"))
+    }
+
+    /// Run a **read** through the client read-role search path (plan P2; the production retrieval path
+    /// uses this so unqualified `documents`/`chunks`/… resolve to the right physical tables):
+    /// * no installed corpus (producer or fresh client) → `public` (the authoritative working set);
+    /// * exactly one installed corpus → that corpus's **active physical generation** then `public`, so
+    ///   BM25/IVFFlat index scans hit the indexed generation tables;
+    /// * more than one installed corpus → the `jurisearch_server` UNION views then `public` (correct
+    ///   for non-indexed reads; multi-corpus hot indexed search needs per-corpus `UNION ALL` arms — a
+    ///   documented follow-up, not yet reachable since only `core` is installed).
+    ///
+    /// Resolved per call (a fresh `psql` session), so it can never be stale after a generation switch.
+    pub fn execute_read_sql(&self, sql: &str) -> Result<String, StorageError> {
+        let generations = self.execute_sql(
+            "SELECT coalesce(string_agg('jurisearch_server_' || active_generation, ',' \
+                 ORDER BY corpus), '') FROM jurisearch_control.corpus_state;",
+        )?;
+        let active: Vec<&str> = generations
+            .trim()
+            .split(',')
+            .filter(|schema| !schema.is_empty())
+            .collect();
+        match active.len() {
+            0 => self.execute_sql_with_search_path(&["public"], sql),
+            1 => self.execute_sql_with_search_path(&[active[0], "public"], sql),
+            _ => self.execute_sql_with_search_path(&["jurisearch_server", "public"], sql),
+        }
+    }
+
     pub fn stop(&self) -> Result<(), StorageError> {
         let output = Command::new(self.pg_config.bindir.join("pg_ctl"))
             .arg("-D")
@@ -856,6 +901,8 @@ pub enum StorageError {
     IngestAccounting { message: String },
     #[error("change-log outbox failed: {message}")]
     Outbox { message: String },
+    #[error("generation topology failed: {message}")]
+    Generations { message: String },
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("postgres client error: {0}")]

@@ -47,9 +47,12 @@ pub fn france_legi_gold_json(
     postgres: &ManagedPostgres,
     limits: FranceLegiGoldLimits,
 ) -> Result<String, StorageError> {
-    let known_item = postgres.execute_sql(&known_item_sql(limits.known_item))?;
-    let temporal = postgres.execute_sql(&temporal_sql(limits.temporal))?;
-    let cross_reference = postgres.execute_sql(&cross_reference_sql(limits.cross_reference))?;
+    // Read role: LEGI gold is extracted from the served legislation documents (active generation on a
+    // client), so it must follow the same resolved search path as retrieval, never stale `public`.
+    let known_item = postgres.execute_read_sql(&known_item_sql(limits.known_item))?;
+    let temporal = postgres.execute_read_sql(&temporal_sql(limits.temporal))?;
+    let cross_reference =
+        postgres.execute_read_sql(&cross_reference_sql(limits.cross_reference))?;
     Ok(format!(
         "{{\"known_item\":{},\"temporal\":{},\"cross_reference\":{}}}",
         known_item.trim(),

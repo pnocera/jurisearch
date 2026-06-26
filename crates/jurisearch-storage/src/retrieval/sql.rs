@@ -22,7 +22,7 @@ pub(crate) fn manifest_default_probes(
     postgres: &ManagedPostgres,
     key: &str,
 ) -> Result<Option<u32>, StorageError> {
-    let raw = postgres.execute_sql(&format!(
+    let raw = postgres.execute_read_sql(&format!(
         "SELECT value->'vector_index'->>'default_probes' FROM index_manifest WHERE key = {};",
         sql_string_literal(key)
     ))?;

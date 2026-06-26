@@ -5,7 +5,7 @@ use super::*;
 /// Corpus/graph/embedding counts for `stats` — replaces ad-hoc psql for introspection. The counts
 /// are exact (sequential scans over large tables), so this is an introspection command, not a hot path.
 pub fn corpus_stats_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
-    postgres.execute_sql(
+    postgres.execute_read_sql(
         r#"
 SELECT jsonb_build_object(
     'documents', (SELECT count(*) FROM documents),
@@ -26,7 +26,7 @@ SELECT jsonb_build_object(
 /// provenance so judicial (cass/capp/inca) vs administrative (jade) jurisprudence coverage and
 /// freshness are visible alongside legi. Sources without a completed run simply do not appear.
 pub fn corpus_source_coverage_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
-    postgres.execute_sql(
+    postgres.execute_read_sql(
         r#"
 SELECT COALESCE((
     SELECT jsonb_object_agg(source, summary)
@@ -65,7 +65,7 @@ pub fn inspect_document_json(
     document_id: &str,
 ) -> Result<String, StorageError> {
     let id = sql_string_literal(document_id);
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 SELECT jsonb_build_object(
     'document', (SELECT to_jsonb(d) FROM documents d WHERE d.document_id = {id}),

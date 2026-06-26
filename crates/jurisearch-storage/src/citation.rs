@@ -100,7 +100,13 @@ pub fn citation_lookup_json(
         }
     };
 
-    postgres.execute_sql(&format!(
+    // Client read role (plan P2): identifier resolution reads the replicated corpus tables
+    // (`documents`, `legi_metadata_roots`) — including the cloned GIN/partial indexes — so it must
+    // resolve to the ACTIVE generation, exactly like fetch/search. (`jurisearch_normalized_case_numbers`
+    // and any other functions/operators fall through to `public` under the `generation, public` path.)
+    // Without this, `cite` would split-brain: readiness/fetch read the generation while `cite` matches
+    // identifiers against stale/empty `public`.
+    postgres.execute_read_sql(&format!(
         r#"
 WITH matches AS (
 {union_sql}

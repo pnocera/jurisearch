@@ -22,7 +22,7 @@ pub fn context_documents_json(
     };
     let sibling_limit = DEFAULT_CONTEXT_SIBLING_LIMIT;
 
-    postgres.execute_sql(&format!(
+    postgres.execute_read_sql(&format!(
         r#"
 WITH target_raw AS (
     SELECT

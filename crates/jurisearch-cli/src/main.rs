@@ -49,7 +49,8 @@ use jurisearch_storage::{
     },
     citation::{CitationLookupQuery, citation_lookup_json},
     decision_zones::{
-        UpsertDecisionZones, decision_resolution_metadata_with_client, decision_zones_json,
+        UpsertDecisionZones, decision_resolution_metadata_json,
+        decision_resolution_metadata_with_client, decision_zones_json,
         upsert_decision_zones_with_client,
     },
     dense::{

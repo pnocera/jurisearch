@@ -4,6 +4,7 @@ pub mod decision_zones;
 pub mod dense;
 pub mod france_juris;
 pub mod france_legi;
+pub mod generations;
 pub mod ingest_accounting;
 pub mod legislation_citations;
 pub mod migrations;

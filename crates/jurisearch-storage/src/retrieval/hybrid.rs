@@ -134,5 +134,5 @@ SELECT jsonb_build_object(
             )
         }
     };
-    postgres.execute_sql(&sql)
+    postgres.execute_read_sql(&sql)
 }
