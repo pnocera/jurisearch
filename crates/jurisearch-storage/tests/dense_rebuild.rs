@@ -68,7 +68,7 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
         reembeddable: true,
         index_lists: 1,
     };
-    let incomplete = finalize_dense_rebuild(&postgres, &spec).unwrap_err();
+    let incomplete = finalize_dense_rebuild(&postgres, &spec, None).unwrap_err();
     assert!(matches!(incomplete, StorageError::DenseRebuild { .. }));
 
     postgres.execute_sql(&format!(
@@ -80,7 +80,7 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
         other_vector = other_vector,
     ))?;
 
-    let report = finalize_dense_rebuild(&postgres, &spec)?;
+    let report = finalize_dense_rebuild(&postgres, &spec, None)?;
     assert_eq!(report.chunks, 2);
     assert_eq!(report.embeddings, 2);
     assert_eq!(report.index_name, DENSE_VECTOR_INDEX_NAME);
@@ -125,6 +125,7 @@ fn dense_rebuild_requires_full_coverage_then_writes_index_and_manifest() -> Resu
             index_lists: 0,
             ..spec
         },
+        None,
     )?;
     assert_eq!(auto_report.index_lists, 1);
     let auto_manifest: serde_json::Value = serde_json::from_str(
@@ -182,6 +183,7 @@ fn insert_chunk_embeddings_upserts_batch_and_guards_fingerprint() -> Result<(), 
             row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT),
             row("chunk:b", &vector_b, EMBEDDING_FINGERPRINT),
         ],
+        None,
     )?;
     assert_eq!(inserted, 2);
     let count = postgres.execute_sql(
@@ -194,7 +196,8 @@ fn insert_chunk_embeddings_upserts_batch_and_guards_fingerprint() -> Result<(), 
     assert_eq!(
         insert_chunk_embeddings(
             &postgres,
-            &[row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT)]
+            &[row("chunk:a", &vector_a, EMBEDDING_FINGERPRINT)],
+            None
         )?,
         1
     );
@@ -204,14 +207,18 @@ fn insert_chunk_embeddings_upserts_batch_and_guards_fingerprint() -> Result<(), 
     let missing = insert_chunk_embeddings(
         &postgres,
         &[row("chunk:missing", &vector_a, EMBEDDING_FINGERPRINT)],
+        None,
     )
     .unwrap_err();
     assert!(matches!(missing, StorageError::Projection { .. }));
 
     // Guard: a conflicting fingerprint on an already-fingerprinted chunk fails.
-    let conflict =
-        insert_chunk_embeddings(&postgres, &[row("chunk:a", &vector_a, "other-fingerprint")])
-            .unwrap_err();
+    let conflict = insert_chunk_embeddings(
+        &postgres,
+        &[row("chunk:a", &vector_a, "other-fingerprint")],
+        None,
+    )
+    .unwrap_err();
     assert!(matches!(conflict, StorageError::Projection { .. }));
 
     Ok(())

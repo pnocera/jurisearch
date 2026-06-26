@@ -43,6 +43,11 @@ pub(crate) fn enrich_zones_payload(
     }
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    let run_id = crate::ingest::producer_run_id("enrich-zones");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
 
     let mut considered: u64 = 0;
     let mut official: u64 = 0;
@@ -84,7 +89,9 @@ pub(crate) fn enrich_zones_payload(
         if doc_ids.is_empty() {
             break;
         }
-        for outcome in enrich_zone_page_concurrently(&postgres, &doc_ids, concurrency) {
+        for outcome in
+            enrich_zone_page_concurrently(&postgres, &doc_ids, concurrency, Some(&outbox))
+        {
             considered += 1;
             match outcome {
                 ZoneEnrichOutcome::Official => official += 1,
@@ -127,6 +134,7 @@ pub(crate) fn enrich_zone_page_concurrently(
     postgres: &ManagedPostgres,
     doc_ids: &[String],
     concurrency: usize,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Vec<ZoneEnrichOutcome> {
     let workers = concurrency.max(1).min(doc_ids.len().max(1));
     let connection_string = postgres.connection_string();
@@ -152,7 +160,7 @@ pub(crate) fn enrich_zone_page_concurrently(
                         .into_iter()
                         .map(|doc_id| {
                             match enrich_decision_from_judilibre_with_client(
-                                &mut db, &piste, doc_id,
+                                &mut db, &piste, doc_id, outbox,
                             ) {
                                 Ok(Some(_)) => ZoneEnrichOutcome::Official,
                                 Ok(None) => ZoneEnrichOutcome::Fallback,
@@ -230,6 +238,11 @@ pub(crate) fn build_zone_units_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    let run_id = crate::ingest::producer_run_id("build-zone-units");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
 
     let mut decisions: u64 = 0;
     let mut units_written: u64 = 0;
@@ -267,7 +280,7 @@ pub(crate) fn build_zone_units_payload(
             let source = candidate["source"].as_str().unwrap_or_default();
             let text_hash = candidate["text_hash"].as_str().unwrap_or_default();
             let rows = derive_zone_unit_rows(document_id, source, text_hash, &candidate["zones"]);
-            replace_zone_units_for_document(&postgres, document_id, &rows)
+            replace_zone_units_for_document(&postgres, document_id, &rows, Some(&outbox))
                 .map_err(storage_error_object)?;
             decisions += 1;
             units_written += rows.len() as u64;
@@ -311,6 +324,11 @@ pub(crate) fn embed_zone_units_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    let run_id = crate::ingest::producer_run_id("embed-zone-units");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
     let loaded_embedding = loaded_embedding_config();
     let embedding_config = loaded_embedding.config;
     ensure_embedding_runtime_ready(&embedding_config, false)?;
@@ -370,6 +388,7 @@ pub(crate) fn embed_zone_units_payload(
             &embedding_config,
             batch_size,
             pool_concurrency,
+            Some(&outbox),
         )?
     } else {
         let mut run = EmbeddingPoolRun {
@@ -398,6 +417,7 @@ pub(crate) fn embed_zone_units_payload(
                 &embedding_config,
                 batch_size,
                 pool_concurrency,
+                Some(&outbox),
             )?;
             run.chunks_considered += page_run.chunks_considered;
             run.embeddings_inserted += page_run.embeddings_inserted;
@@ -421,6 +441,7 @@ pub(crate) fn embed_zone_units_payload(
             reembeddable: embedding_config.reembeddable,
             index_lists,
         },
+        Some(&outbox),
     )
     .map_err(storage_error_object)?;
 
@@ -451,6 +472,11 @@ pub(crate) fn embed_chunks_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
+    let run_id = crate::ingest::producer_run_id("embed-chunks");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
     // Re-embedding changes embedding coverage; drop the readiness cache up front so the next query
     // recomputes (it is repopulated only when the index is fully ready again).
     invalidate_cached_query_readiness(&postgres).map_err(storage_error_object)?;
@@ -507,6 +533,7 @@ pub(crate) fn embed_chunks_payload(
             &embedding_config,
             batch_size,
             pool_concurrency,
+            Some(&outbox),
         )?
     } else {
         // Production path: stream pending chunks in bounded pages so peak memory is one page, not
@@ -541,6 +568,7 @@ pub(crate) fn embed_chunks_payload(
                 &embedding_config,
                 batch_size,
                 pool_concurrency,
+                Some(&outbox),
             )?;
             run.chunks_considered += page_run.chunks_considered;
             run.embeddings_inserted += page_run.embeddings_inserted;
@@ -563,6 +591,7 @@ pub(crate) fn embed_chunks_payload(
             reembeddable: embedding_config.reembeddable,
             index_lists,
         },
+        Some(&outbox),
     )
     .map_err(storage_error_object)?;
     let replay_snapshot = maybe_refresh_replay_snapshot(&postgres)?;

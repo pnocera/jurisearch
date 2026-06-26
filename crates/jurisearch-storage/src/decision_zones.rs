@@ -134,13 +134,18 @@ pub fn upsert_decision_zones(
 ) -> Result<(), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
-    upsert_decision_zones_with_client(&mut client, row)
+    // Bare convenience wrapper (tests): no outbox emission; production threads an OutboxContext.
+    upsert_decision_zones_with_client(&mut client, row, None)
 }
 
-/// Upsert a cached zone row (parameterized; safe for jsonb/text values).
+/// Upsert a cached zone row (parameterized; safe for jsonb/text values). When `outbox` is `Some`,
+/// emits a document-scoped `replace_set` for the `decision_zones` overlay — and, when this write
+/// invalidates the materialized `zone_units` (the branch below), a matching `zone_units`
+/// `replace_set` (now empty) — all in the same transaction (§5.3, INV-2).
 pub fn upsert_decision_zones_with_client<C: GenericClient>(
     client: &mut C,
     row: &UpsertDecisionZones<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<(), StorageError> {
     let zones = row.zones_json.to_string();
     let raw = row.raw_json.to_string();
@@ -197,13 +202,52 @@ ON CONFLICT (document_id) DO UPDATE SET
     // for this decision so retrieval never serves official zones the cache has just invalidated
     // (zone_unit_embeddings cascade from zone_units). A fresh `ok`+hash row keeps its units; an `ok`
     // content change is handled by re-derivation via the text_hash/builder-version staleness check.
-    if row.status != "ok" || row.text_hash.is_none() {
+    let cleared_zone_units = if row.status != "ok" || row.text_hash.is_none() {
         client
             .execute(
                 "DELETE FROM zone_units WHERE document_id = $1;",
                 &[&row.document_id],
             )
             .map_err(StorageError::PostgresClient)?;
+        true
+    } else {
+        false
+    };
+
+    // Outbox (§5.3, plan P1): the enrichment overlay is a document-scoped replace_set; if the write
+    // also invalidated the materialized zone_units, that derived set was replaced (to empty) too.
+    if let Some(ctx) = outbox {
+        let corpus: String = client
+            .query_one(
+                "SELECT corpus FROM documents WHERE document_id = $1;",
+                &[&row.document_id],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get("corpus");
+        crate::outbox::emit_change(
+            client,
+            ctx,
+            &crate::outbox::OutboxEvent::scope(
+                &corpus,
+                "decision_zones",
+                jurisearch_package::event::EventKind::ReplaceSet,
+                crate::outbox::scope_kind::DOCUMENT,
+                row.document_id,
+            ),
+        )?;
+        if cleared_zone_units {
+            crate::outbox::emit_change(
+                client,
+                ctx,
+                &crate::outbox::OutboxEvent::scope(
+                    &corpus,
+                    "zone_units",
+                    jurisearch_package::event::EventKind::ReplaceSet,
+                    crate::outbox::scope_kind::DOCUMENT,
+                    row.document_id,
+                ),
+            )?;
+        }
     }
     Ok(())
 }

@@ -75,6 +75,7 @@ pub struct InsertCitationOccurrence<'a> {
 pub fn insert_citation_occurrence_with_client<C: postgres::GenericClient>(
     client: &mut C,
     occurrence: &InsertCitationOccurrence<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<bool, StorageError> {
     let occurrence_id = format!(
         "{}#{}#{}",
@@ -106,6 +107,31 @@ pub fn insert_citation_occurrence_with_client<C: postgres::GenericClient>(
             ],
         )
         .map_err(StorageError::PostgresClient)?;
+
+    // Outbox (§5.1, plan P1): a new occurrence is a document-scoped `upsert`; its apply order trails
+    // `official_api_responses` (it FKs `source_response_id`). Only on an actual insert.
+    if affected > 0
+        && let Some(ctx) = outbox
+    {
+        let corpus: String = client
+            .query_one(
+                "SELECT corpus FROM documents WHERE document_id = $1;",
+                &[&occurrence.decision_document_id],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get("corpus");
+        crate::outbox::emit_change(
+            client,
+            ctx,
+            &crate::outbox::OutboxEvent::scope(
+                &corpus,
+                "decision_legislation_citations",
+                jurisearch_package::event::EventKind::Upsert,
+                crate::outbox::scope_kind::DOCUMENT,
+                occurrence.decision_document_id,
+            ),
+        )?;
+    }
     Ok(affected > 0)
 }
 
@@ -118,6 +144,7 @@ pub fn upsert_citation_resolution_pending_with_client<C: postgres::GenericClient
     code_name_norm: &str,
     canonical_query: &str,
     decision_document_id: &str,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<(), StorageError> {
     // Resolutions are keyed `(corpus, citation_key)` (per-corpus replicated data, INV-4), so the
     // corpus comes from THIS occurrence's decision (`decision_document_id` → `documents.corpus`,
@@ -125,7 +152,7 @@ pub fn upsert_citation_resolution_pending_with_client<C: postgres::GenericClient
     // `ON CONFLICT (corpus, citation_key)` means a later corpus citing the same article creates its
     // OWN resolution rather than silently inheriting the first corpus's attribution. The NOT NULL
     // corpus column FAILS LOUDLY if the decision is unknown (no runtime fallback).
-    client
+    let affected = client
         .execute(
             "INSERT INTO legislation_citation_resolutions (\
                  corpus, citation_key, article_number_norm, code_name_norm, canonical_query) \
@@ -140,22 +167,86 @@ pub fn upsert_citation_resolution_pending_with_client<C: postgres::GenericClient
             ],
         )
         .map_err(StorageError::PostgresClient)?;
+
+    // Outbox (§5.1, plan P1): a newly-created resolution is a `citation_resolution`-scoped `upsert`.
+    if affected > 0
+        && let Some(ctx) = outbox
+    {
+        let corpus: String = client
+            .query_one(
+                "SELECT corpus FROM documents WHERE document_id = $1;",
+                &[&decision_document_id],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get("corpus");
+        crate::outbox::emit_change(
+            client,
+            ctx,
+            &crate::outbox::OutboxEvent::scope(
+                &corpus,
+                "legislation_citation_resolutions",
+                jurisearch_package::event::EventKind::Upsert,
+                crate::outbox::scope_kind::CITATION_RESOLUTION,
+                citation_key,
+            ),
+        )?;
+    }
     Ok(())
 }
 
 /// Recompute `occurrence_count` on every resolution from the occurrence table (collect finalize).
-pub fn finalize_citation_occurrence_counts(postgres: &ManagedPostgres) -> Result<(), StorageError> {
+///
+/// `occurrence_count` is a replicated, non-volatile column, so this is a real `legislation_citation_
+/// resolutions` mutation: the UPDATE only touches rows whose count actually changed (`IS DISTINCT
+/// FROM`), and — in the same transaction — emits one `citation_resolution`-scoped `upsert` outbox row
+/// per changed resolution (§5.1, P1). Without this, a new occurrence of an already-known citation key
+/// (whose pending-upsert hit `ON CONFLICT DO NOTHING` and emitted nothing) would change the
+/// authoritative count with no ledger entry.
+pub fn finalize_citation_occurrence_counts(
+    postgres: &ManagedPostgres,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<(), StorageError> {
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
     // Count occurrences per (corpus, citation_key): an occurrence's corpus is its decision's corpus.
-    postgres
-        .execute_sql(
+    let changed = tx
+        .query(
             "UPDATE legislation_citation_resolutions r \
-             SET occurrence_count = (\
-                 SELECT count(*) FROM decision_legislation_citations c \
-                 JOIN documents d ON d.document_id = c.decision_document_id \
-                 WHERE c.citation_key = r.citation_key AND d.corpus = r.corpus), \
-                 updated_at = now();",
+             SET occurrence_count = computed.n, updated_at = now() \
+             FROM (\
+                 SELECT res.corpus, res.citation_key, (\
+                     SELECT count(*) FROM decision_legislation_citations c \
+                     JOIN documents d ON d.document_id = c.decision_document_id \
+                     WHERE c.citation_key = res.citation_key AND d.corpus = res.corpus\
+                 ) AS n \
+                 FROM legislation_citation_resolutions res\
+             ) computed \
+             WHERE r.corpus = computed.corpus AND r.citation_key = computed.citation_key \
+               AND r.occurrence_count IS DISTINCT FROM computed.n \
+             RETURNING r.corpus, r.citation_key;",
+            &[],
         )
-        .map(|_| ())
+        .map_err(StorageError::PostgresClient)?;
+    if let Some(ctx) = outbox {
+        for row in &changed {
+            let corpus: String = row.get("corpus");
+            let citation_key: String = row.get("citation_key");
+            crate::outbox::emit_change(
+                &mut tx,
+                ctx,
+                &crate::outbox::OutboxEvent::scope(
+                    &corpus,
+                    "legislation_citation_resolutions",
+                    jurisearch_package::event::EventKind::Upsert,
+                    crate::outbox::scope_kind::CITATION_RESOLUTION,
+                    &citation_key,
+                ),
+            )?;
+        }
+    }
+    tx.commit().map_err(StorageError::PostgresClient)?;
+    Ok(())
 }
 
 /// Page unique citation resolutions still needing a Legifrance call (`pending`, or `upstream_error`
@@ -214,6 +305,7 @@ SELECT jsonb_build_object(
 }
 
 /// Record the result of a Legifrance call for one `(corpus, citation_key)` resolution.
+#[allow(clippy::too_many_arguments)]
 pub fn update_citation_resolution_with_client<C: postgres::GenericClient>(
     client: &mut C,
     corpus: &str,
@@ -222,6 +314,7 @@ pub fn update_citation_resolution_with_client<C: postgres::GenericClient>(
     legifrance_response_id: Option<i64>,
     legifrance_request_fingerprint: Option<&str>,
     error: Option<&str>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<(), StorageError> {
     client
         .execute(
@@ -239,6 +332,22 @@ pub fn update_citation_resolution_with_client<C: postgres::GenericClient>(
             ],
         )
         .map_err(StorageError::PostgresClient)?;
+
+    // Outbox (§5.1, plan P1): the resolution's Legifrance result is an in-place `upsert` of the
+    // (corpus, citation_key) row.
+    if let Some(ctx) = outbox {
+        crate::outbox::emit_change(
+            client,
+            ctx,
+            &crate::outbox::OutboxEvent::scope(
+                corpus,
+                "legislation_citation_resolutions",
+                jurisearch_package::event::EventKind::Upsert,
+                crate::outbox::scope_kind::CITATION_RESOLUTION,
+                citation_key,
+            ),
+        )?;
+    }
     Ok(())
 }
 

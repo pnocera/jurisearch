@@ -100,7 +100,7 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
     let schema = postgres.execute_sql(
         "SELECT (value->>'schema_version') FROM index_manifest WHERE key = 'schema';",
     )?;
-    assert_eq!(schema.trim(), "18");
+    assert_eq!(schema.trim(), "19");
 
     let zones = r#"{"motivations":[{"start":0,"end":5,"text":"motif un"},{"start":6,"end":10,"text":"motif deux"}],"moyens":[{"start":0,"end":4,"text":"moyen"}],"dispositif":[]}"#;
     seed_decision(
@@ -155,7 +155,7 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
             builder_version: BUILDER,
         },
     ];
-    replace_zone_units_for_document(&postgres, "cass:JURITEXT0001", &rows)?;
+    replace_zone_units_for_document(&postgres, "cass:JURITEXT0001", &rows, None)?;
     let unit_count = postgres.execute_sql("SELECT count(*)::text FROM zone_units;")?;
     assert_eq!(unit_count.trim(), "3");
 
@@ -194,7 +194,7 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
         index_lists: 1,
     };
     assert!(matches!(
-        finalize_zone_dense_rebuild(&postgres, &spec).unwrap_err(),
+        finalize_zone_dense_rebuild(&postgres, &spec, None).unwrap_err(),
         StorageError::DenseRebuild { .. }
     ));
 
@@ -211,9 +211,9 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
             dimension: 1024,
         })
         .collect();
-    assert_eq!(insert_zone_unit_embeddings(&postgres, &inserts)?, 3);
+    assert_eq!(insert_zone_unit_embeddings(&postgres, &inserts, None)?, 3);
 
-    let report = finalize_zone_dense_rebuild(&postgres, &spec)?;
+    let report = finalize_zone_dense_rebuild(&postgres, &spec, None)?;
     assert_eq!(report.zone_units, 3);
     assert_eq!(report.embeddings, 3);
     assert_eq!(report.index_name, ZONE_UNIT_VECTOR_INDEX_NAME);
@@ -240,6 +240,7 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
             index_lists: 0,
             ..spec
         },
+        None,
     )?;
     assert_eq!(auto_report.index_lists, 1);
     let auto_manifest: serde_json::Value = serde_json::from_str(
@@ -319,7 +320,7 @@ fn zone_gold_strips_identifiers_dedupes_and_honors_caps() -> Result<(), StorageE
             builder_version: BUILDER,
         },
     ];
-    replace_zone_units_for_document(&postgres, "cass:GOLD1", &rows)?;
+    replace_zone_units_for_document(&postgres, "cass:GOLD1", &rows, None)?;
 
     // moyens cap 0 -> the moyens zone is skipped even though a fragment exists.
     let gold: serde_json::Value = serde_json::from_str(&france_juris_zone_gold_json(
@@ -437,7 +438,7 @@ fn zone_candidates_json_scopes_to_zone_with_official_provenance() -> Result<(), 
             builder_version: BUILDER,
         },
     ];
-    replace_zone_units_for_document(&postgres, "cass:Q1", &rows)?;
+    replace_zone_units_for_document(&postgres, "cass:Q1", &rows, None)?;
 
     let base = ZoneCandidateQuery {
         query_text: "responsabilite",
@@ -770,7 +771,8 @@ fn replace_zone_units_rejects_foreign_document_rows() -> Result<(), StorageError
         text_hash: "h",
         builder_version: BUILDER,
     };
-    let err = replace_zone_units_for_document(&postgres, "cass:DOCA", &[foreign]).unwrap_err();
+    let err =
+        replace_zone_units_for_document(&postgres, "cass:DOCA", &[foreign], None).unwrap_err();
     assert!(matches!(err, StorageError::Projection { .. }));
     let count = postgres.execute_sql("SELECT count(*)::text FROM zone_units;")?;
     assert_eq!(count.trim(), "0", "no units written on a rejected replace");
@@ -802,7 +804,7 @@ fn non_derivable_refresh_invalidates_materialized_units() -> Result<(), StorageE
         text_hash: "h",
         builder_version: BUILDER,
     };
-    replace_zone_units_for_document(&postgres, "cass:INVAL", &[row])?;
+    replace_zone_units_for_document(&postgres, "cass:INVAL", &[row], None)?;
     let vector = vector_literal(0);
     insert_zone_unit_embeddings(
         &postgres,
@@ -813,6 +815,7 @@ fn non_derivable_refresh_invalidates_materialized_units() -> Result<(), StorageE
             model: "bge-m3",
             dimension: 1024,
         }],
+        None,
     )?;
     assert_eq!(
         postgres

@@ -24,7 +24,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
     let schema = postgres.execute_sql(
         "SELECT (value->>'schema_version') FROM index_manifest WHERE key = 'schema';",
     )?;
-    assert_eq!(schema.trim(), "18");
+    assert_eq!(schema.trim(), "19");
 
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
@@ -68,6 +68,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
             run_id: None,
             code_version: Some("test:0"),
         },
+        None,
     )?;
     assert!(id > 0, "archive insert returns a serial response_id");
 
@@ -98,6 +99,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
             run_id: None,
             code_version: Some("test:0"),
         },
+        None,
     )?;
     assert!(local_id > id, "append-only: each insert gets a new id");
 
@@ -140,6 +142,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
             run_id: None,
             code_version: Some("test:0"),
         },
+        None,
     )?;
     let judilibre_rows = postgres.execute_sql(
         "SELECT count(*)::text FROM official_api_responses WHERE provider='judilibre';",

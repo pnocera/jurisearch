@@ -323,6 +323,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             section_source_uids: Vec::new(),
             text_source_uids: Vec::new(),
         },
+        None,
     )?;
     assert_eq!(backfill.documents_updated, 2);
     assert_eq!(backfill.embeddings_invalidated, 1);
@@ -336,6 +337,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             section_source_uids: Vec::new(),
             text_source_uids: Vec::new(),
         },
+        None,
     )?;
     assert_eq!(repeated_backfill.documents_updated, 0);
     assert_eq!(repeated_backfill.embeddings_invalidated, 0);
@@ -387,6 +389,7 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             section_source_uids: Vec::new(),
             text_source_uids: vec!["LEGITEXT000006070721".to_owned()],
         },
+        None,
     )?;
     assert_eq!(text_struct_backfill.documents_updated, 1);
     assert_eq!(text_struct_backfill.embeddings_invalidated, 0);
@@ -430,10 +433,11 @@ fn persists_legi_metadata_roots_with_stable_keys() -> Result<(), StorageError> {
             section_source_uids: Vec::new(),
             text_source_uids: vec!["LEGITEXT000006070721".to_owned()],
         },
+        None,
     )?;
     assert_eq!(repeated_text_struct_backfill.documents_updated, 0);
     assert_eq!(repeated_text_struct_backfill.embeddings_invalidated, 0);
-    let full_backfill = backfill_legi_article_hierarchy_from_metadata(&postgres)?;
+    let full_backfill = backfill_legi_article_hierarchy_from_metadata(&postgres, None)?;
     assert_eq!(full_backfill.documents_updated, 1);
     assert_eq!(full_backfill.embeddings_invalidated, 0);
     assert_eq!(

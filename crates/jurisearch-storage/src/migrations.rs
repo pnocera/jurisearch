@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 18;
+pub const CURRENT_SCHEMA_VERSION: i32 = 19;
 
 struct Migration {
     version: i32,
@@ -812,6 +812,52 @@ ALTER TABLE legislation_citation_resolutions
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 18), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 19,
+        name: "package_change_log_outbox",
+        // Plan P1 "the outbox" (design §5.1): a semantic change ledger written transactionally at the
+        // projection boundaries, so incremental package diffs are computable without a uniform
+        // `updated_at` (C7) and without snapshot diffing or logical decoding as the primary path.
+        //
+        // `change_seq` is a GLOBAL build/audit ordering across all corpora — NOT the per-corpus package
+        // sequence (that is assigned at build time from the catalog). The ledger records the SCOPE
+        // touched (not necessarily full row bodies); the builder rematerialises payloads from the
+        // authoritative tables at build time. `op` carries the three event-kind semantics.
+        sql: r#"
+CREATE TABLE IF NOT EXISTS package_change_log (
+    change_seq            bigserial PRIMARY KEY,
+    corpus                text NOT NULL,
+    ingest_run_id         text NOT NULL,
+    table_name            text NOT NULL,
+    op                    text NOT NULL CHECK (op IN ('upsert','delete','replace_set')),
+    scope_kind            text NOT NULL,
+    scope_key             text NOT NULL,
+    row_pk                jsonb NOT NULL DEFAULT '{}'::jsonb,
+    row_hash              text,
+    before_hash           text,
+    after_hash            text,
+    payload               jsonb,
+    builder_versions      jsonb NOT NULL DEFAULT '{}'::jsonb,
+    embedding_fingerprint text,
+    schema_version        integer NOT NULL,
+    created_at            timestamptz NOT NULL DEFAULT now()
+);
+
+-- The read API filters by corpus and orders/bounds by change_seq.
+CREATE INDEX IF NOT EXISTS package_change_log_corpus_seq_idx
+ON package_change_log (corpus, change_seq);
+
+-- Audit by ingest run.
+CREATE INDEX IF NOT EXISTS package_change_log_run_idx
+ON package_change_log (ingest_run_id);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 19), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

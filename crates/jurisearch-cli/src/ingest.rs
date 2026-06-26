@@ -432,6 +432,13 @@ pub(crate) fn default_legi_run_id() -> String {
     format!("legi-{}", unique_run_suffix())
 }
 
+/// A producer run id for a non-archive mutation command (embedding, zone derivation/embedding, zone
+/// enrichment, citation collect/enrich, hierarchy backfill) — the `package_change_log.ingest_run_id`
+/// for every outbox row it emits (design §5.1; "the run that produced this mutation").
+pub(crate) fn producer_run_id(command: &str) -> String {
+    format!("{command}-{}", unique_run_suffix())
+}
+
 /// Whether maintenance commands should skip the (expensive, full-table MD5) replay-snapshot refresh
 /// at their command boundary. Default false: the refresh keeps `status` cheap via the cached
 /// signature. Setting `JURISEARCH_SKIP_REPLAY_SNAPSHOT` skips it (hundreds of seconds on a large

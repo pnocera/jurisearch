@@ -1,6 +1,9 @@
 //! LEGI document projection + prepared statements.
 
 use super::*;
+use crate::outbox::{OutboxContext, OutboxEvent, emit_change, scope_kind};
+use jurisearch_package::corpus_for_source;
+use jurisearch_package::event::EventKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CanonicalInsertReport {
@@ -19,10 +22,13 @@ pub fn insert_legi_documents(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    // Bare convenience wrapper (tests / single-call paths): no outbox emission. Production ingest
+    // uses the `_with_statements` batch path with an `OutboxContext` so mutations are captured.
     let report = insert_legi_documents_with_client(
         &mut transaction,
         documents,
         chunk_embedding_fingerprint,
+        None,
     )?;
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(report)
@@ -119,6 +125,7 @@ pub fn insert_legi_documents_with_statements<C: GenericClient>(
     statements: &LegiProjectionStatements,
     documents: &[CanonicalDocument],
     chunk_embedding_fingerprint: Option<&str>,
+    outbox: Option<&OutboxContext<'_>>,
 ) -> Result<CanonicalInsertReport, StorageError> {
     // Cheap Arc-backed clones so the existing `&statement` execute calls below are unchanged.
     let document_statement = statements.document.clone();
@@ -198,6 +205,30 @@ pub fn insert_legi_documents_with_statements<C: GenericClient>(
             insert_graph_edge(client, &edge_statement, edge)?;
             publisher_edges += 1;
         }
+
+        // Outbox (§5.1, plan P1): one `upsert` per document scope, covering its chunks + graph
+        // edges, in this same transaction. The P4 builder treats a document scope as a base upsert
+        // plus a document-scoped replace of the derived child set (§5.3), so no per-chunk row here.
+        if let Some(ctx) = outbox {
+            let corpus =
+                corpus_for_source(&document.source).map_err(|error| StorageError::Projection {
+                    message: format!(
+                        "outbox corpus attribution for `{}`: {error}",
+                        document.document_id
+                    ),
+                })?;
+            emit_change(
+                client,
+                ctx,
+                &OutboxEvent::scope(
+                    corpus.as_str(),
+                    "documents",
+                    EventKind::Upsert,
+                    scope_kind::DOCUMENT,
+                    &document.document_id,
+                ),
+            )?;
+        }
     }
 
     Ok(CanonicalInsertReport {
@@ -214,6 +245,7 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
     client: &mut C,
     documents: &[CanonicalDocument],
     chunk_embedding_fingerprint: Option<&str>,
+    outbox: Option<&OutboxContext<'_>>,
 ) -> Result<CanonicalInsertReport, StorageError> {
     let statements = prepare_legi_projection_statements(client)?;
     insert_legi_documents_with_statements(
@@ -221,5 +253,6 @@ pub fn insert_legi_documents_with_client<C: GenericClient>(
         &statements,
         documents,
         chunk_embedding_fingerprint,
+        outbox,
     )
 }

@@ -120,10 +120,15 @@ pub struct ZoneUnitRow<'a> {
 /// Replace ALL of a decision's `zone_units` with `rows`, in one transaction (idempotent derivation: a
 /// re-derive deletes the decision's prior units and reinserts the current set). An empty `rows` just
 /// clears them (e.g. a decision whose zones became empty). Embeddings cascade-delete with their units.
+///
+/// When `outbox` is `Some`, emits exactly **one** `replace_set` outbox row for the document scope in
+/// the same transaction (§5.3, INV-2) — never per-row deletes — so the derived set replaces cleanly
+/// on apply.
 pub fn replace_zone_units_for_document(
     postgres: &ManagedPostgres,
     document_id: &str,
     rows: &[ZoneUnitRow<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<(), StorageError> {
     // Defensive: every row must belong to the document being replaced — otherwise a caller bug could
     // clear document A's units and insert document B's in one transaction (the units' own UNIQUE is on
@@ -181,6 +186,30 @@ pub fn replace_zone_units_for_document(
             )
             .map_err(StorageError::PostgresClient)?;
     }
+
+    // Outbox (§5.3, INV-2): one document-scoped `replace_set` for the zone-unit set, in this txn.
+    // Corpus is resolved from the owning document (zone_units are decision-derived).
+    if let Some(ctx) = outbox {
+        let corpus: String = transaction
+            .query_one(
+                "SELECT corpus FROM documents WHERE document_id = $1;",
+                &[&document_id],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get("corpus");
+        crate::outbox::emit_change(
+            &mut transaction,
+            ctx,
+            &crate::outbox::OutboxEvent::scope(
+                &corpus,
+                "zone_units",
+                jurisearch_package::event::EventKind::ReplaceSet,
+                crate::outbox::scope_kind::DOCUMENT,
+                document_id,
+            ),
+        )?;
+    }
+
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(())
 }
@@ -319,6 +348,7 @@ pub fn load_zone_unit_embedding_inputs(
 pub fn insert_zone_unit_embeddings(
     postgres: &ManagedPostgres,
     embeddings: &[ZoneUnitEmbeddingInsert<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<usize, StorageError> {
     if embeddings.is_empty() {
         return Ok(0);
@@ -415,6 +445,41 @@ pub fn insert_zone_unit_embeddings(
             &[],
         )
         .map_err(StorageError::PostgresClient)?;
+
+    // Outbox (§5.1, plan P1): one `upsert` per distinct document whose zone-unit embeddings changed
+    // (scope = document, not per zone-unit), in the same transaction (the stage table is still live).
+    // The insert also stamps `zone_units.embedding_fingerprint` (a replicated parent column), so a
+    // paired document-scoped `zone_units` upsert is emitted too — else the parent change is uncaptured.
+    if let Some(ctx) = outbox {
+        let rows = transaction
+            .query(
+                "SELECT DISTINCT d.document_id, d.corpus \
+                 FROM stage_zone_unit_embeddings s \
+                 JOIN zone_units z ON z.zone_unit_id = s.zone_unit_id \
+                 JOIN documents d ON d.document_id = z.document_id \
+                 ORDER BY d.document_id;",
+                &[],
+            )
+            .map_err(StorageError::PostgresClient)?;
+        for row in rows {
+            let document_id: String = row.get("document_id");
+            let corpus: String = row.get("corpus");
+            for table in ["zone_units", "zone_unit_embeddings"] {
+                crate::outbox::emit_change(
+                    &mut transaction,
+                    ctx,
+                    &crate::outbox::OutboxEvent::scope(
+                        &corpus,
+                        table,
+                        jurisearch_package::event::EventKind::Upsert,
+                        crate::outbox::scope_kind::DOCUMENT,
+                        &document_id,
+                    ),
+                )?;
+            }
+        }
+    }
+
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(embeddings.len())
 }
@@ -435,6 +500,7 @@ pub struct ZoneDenseRebuildReport {
 pub fn finalize_zone_dense_rebuild(
     postgres: &ManagedPostgres,
     spec: &DenseRebuildSpec<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<ZoneDenseRebuildReport, StorageError> {
     validate_zone_dense_spec(spec)?;
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
@@ -489,12 +555,49 @@ pub fn finalize_zone_dense_rebuild(
     };
     let default_probes = crate::dense::recommended_probes(effective_lists);
 
-    transaction
-        .execute(
-            "UPDATE zone_units SET embedding_fingerprint = $1;",
+    // Stamp only the zone_units whose parent fingerprint changes, and emit one document-scoped
+    // `zone_units` upsert per affected document in this transaction (§5.1, P1) — `embedding_
+    // fingerprint` is replicated. The insert writer usually stamped these already (no-op here).
+    let stamped = transaction
+        .query(
+            "UPDATE zone_units SET embedding_fingerprint = $1 \
+             WHERE embedding_fingerprint IS DISTINCT FROM $1 \
+             RETURNING document_id;",
             &[&spec.embedding_fingerprint],
         )
         .map_err(StorageError::PostgresClient)?;
+    if let Some(ctx) = outbox {
+        let documents: Vec<String> = stamped
+            .iter()
+            .map(|row| row.get::<_, String>("document_id"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !documents.is_empty() {
+            let corpus_rows = transaction
+                .query(
+                    "SELECT document_id, corpus FROM documents \
+                     WHERE document_id = ANY($1) ORDER BY document_id;",
+                    &[&documents],
+                )
+                .map_err(StorageError::PostgresClient)?;
+            for row in corpus_rows {
+                let document_id: String = row.get("document_id");
+                let corpus: String = row.get("corpus");
+                crate::outbox::emit_change(
+                    &mut transaction,
+                    ctx,
+                    &crate::outbox::OutboxEvent::scope(
+                        &corpus,
+                        "zone_units",
+                        jurisearch_package::event::EventKind::Upsert,
+                        crate::outbox::scope_kind::DOCUMENT,
+                        &document_id,
+                    ),
+                )?;
+            }
+        }
+    }
     transaction
         .batch_execute(&format!(
             "DROP INDEX IF EXISTS {index_name}; \

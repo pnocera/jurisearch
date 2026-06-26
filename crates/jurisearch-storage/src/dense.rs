@@ -116,6 +116,7 @@ pub fn load_chunk_embedding_inputs(
 pub fn finalize_dense_rebuild(
     postgres: &ManagedPostgres,
     spec: &DenseRebuildSpec<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<DenseRebuildReport, StorageError> {
     validate_dense_spec(spec)?;
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
@@ -175,12 +176,50 @@ pub fn finalize_dense_rebuild(
     };
     let default_probes = recommended_probes(effective_lists);
 
-    transaction
-        .execute(
-            "UPDATE chunks SET embedding_fingerprint = $1;",
+    // Stamp only the chunks whose parent fingerprint actually changes, and emit one document-scoped
+    // `chunks` upsert per affected document in this transaction (§5.1, P1): `embedding_fingerprint`
+    // is a replicated column, so a finalize that changes it must be captured. In the common path the
+    // insert writer already stamped these rows, so this updates nothing and emits nothing.
+    let stamped = transaction
+        .query(
+            "UPDATE chunks SET embedding_fingerprint = $1 \
+             WHERE embedding_fingerprint IS DISTINCT FROM $1 \
+             RETURNING document_id;",
             &[&spec.embedding_fingerprint],
         )
         .map_err(StorageError::PostgresClient)?;
+    if let Some(ctx) = outbox {
+        let documents: Vec<String> = stamped
+            .iter()
+            .map(|row| row.get::<_, String>("document_id"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if !documents.is_empty() {
+            let corpus_rows = transaction
+                .query(
+                    "SELECT document_id, corpus FROM documents \
+                     WHERE document_id = ANY($1) ORDER BY document_id;",
+                    &[&documents],
+                )
+                .map_err(StorageError::PostgresClient)?;
+            for row in corpus_rows {
+                let document_id: String = row.get("document_id");
+                let corpus: String = row.get("corpus");
+                crate::outbox::emit_change(
+                    &mut transaction,
+                    ctx,
+                    &crate::outbox::OutboxEvent::scope(
+                        &corpus,
+                        "chunks",
+                        jurisearch_package::event::EventKind::Upsert,
+                        crate::outbox::scope_kind::DOCUMENT,
+                        &document_id,
+                    ),
+                )?;
+            }
+        }
+    }
     transaction
         .batch_execute(&format!(
             "DROP INDEX IF EXISTS {index_name}; \

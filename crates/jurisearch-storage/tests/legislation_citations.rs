@@ -63,6 +63,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
                 run_id: None,
                 code_version: Some("test"),
             },
+            None,
         )?;
 
         // Record the occurrence + deduped pending resolution (citation_key identical for both decisions).
@@ -84,6 +85,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
                 raw_title: "Article 609 du code de procédure civile.",
                 extraction_method: "visa_title_regex",
             },
+            None,
         )?;
         upsert_citation_resolution_pending_with_client(
             &mut client,
@@ -92,6 +94,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
             "code de procédure civile",
             "609 code de procédure civile",
             doc,
+            None,
         )?;
     }
 
@@ -125,6 +128,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
             run_id: None,
             code_version: Some("test"),
         },
+        None,
     )?;
 
     // Every archived response (2 judilibre /decision via subject_document_id + 1 legifrance via
@@ -164,7 +168,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
         2
     );
 
-    finalize_citation_occurrence_counts(&postgres)?;
+    finalize_citation_occurrence_counts(&postgres, None)?;
 
     // Deduped: 2 occurrences, 1 unique resolution with occurrence_count=2.
     let coverage: serde_json::Value =
@@ -190,6 +194,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
         Some(
             "legifrance-search:sha256:0000000000000000000000000000000000000000000000000000000000000000",
         ),
+        None,
         None,
     )?;
     let still_pending: serde_json::Value = serde_json::from_str(

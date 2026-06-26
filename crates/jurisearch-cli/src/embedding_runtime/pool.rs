@@ -320,6 +320,7 @@ where
 
 /// Embed chunk inputs across the pool and upsert into `chunk_embeddings` (thin wrapper over the generic
 /// driver; behaviour unchanged).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn embed_and_insert_chunks_with_pool(
     postgres: &ManagedPostgres,
     inputs: Vec<ChunkEmbeddingInput>,
@@ -328,12 +329,15 @@ pub(crate) fn embed_and_insert_chunks_with_pool(
     embedding_config: &EmbeddingConfig,
     batch_size: usize,
     pool_concurrency: usize,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<EmbeddingPoolRun, ErrorObject> {
     embed_and_insert_with_pool(
         inputs,
         endpoint_configs,
         batch_size,
         pool_concurrency,
+        // `insert_batch` is invoked on the main thread (not the embedding workers), so capturing the
+        // borrowed OutboxContext here is sound.
         |embeddings| {
             let inserts = embeddings
                 .iter()
@@ -345,7 +349,7 @@ pub(crate) fn embed_and_insert_chunks_with_pool(
                     dimension: embedding_config.dimension,
                 })
                 .collect::<Vec<_>>();
-            insert_chunk_embeddings(postgres, &inserts).map_err(storage_error_object)
+            insert_chunk_embeddings(postgres, &inserts, outbox).map_err(storage_error_object)
         },
     )
 }
@@ -353,6 +357,7 @@ pub(crate) fn embed_and_insert_chunks_with_pool(
 /// Embed zone-unit inputs across the SAME pool and upsert into `zone_unit_embeddings` (parallel to the
 /// chunk wrapper; the only difference is the storage target). `OwnedChunkEmbedding.chunk_id` carries the
 /// `zone_unit_id` here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn embed_and_insert_zone_units_with_pool(
     postgres: &ManagedPostgres,
     inputs: Vec<ChunkEmbeddingInput>,
@@ -361,6 +366,7 @@ pub(crate) fn embed_and_insert_zone_units_with_pool(
     embedding_config: &EmbeddingConfig,
     batch_size: usize,
     pool_concurrency: usize,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<EmbeddingPoolRun, ErrorObject> {
     embed_and_insert_with_pool(
         inputs,
@@ -378,7 +384,7 @@ pub(crate) fn embed_and_insert_zone_units_with_pool(
                     dimension: embedding_config.dimension,
                 })
                 .collect::<Vec<_>>();
-            insert_zone_unit_embeddings(postgres, &inserts).map_err(storage_error_object)
+            insert_zone_unit_embeddings(postgres, &inserts, outbox).map_err(storage_error_object)
         },
     )
 }

@@ -106,7 +106,7 @@ fn real_legi_canonical_subset_is_searchable_and_fetchable() -> Result<(), Box<dy
         })
         .collect::<Vec<_>>();
     assert_eq!(
-        insert_chunk_embeddings(&postgres, &embeddings)?,
+        insert_chunk_embeddings(&postgres, &embeddings, None)?,
         embeddings.len()
     );
 

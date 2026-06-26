@@ -183,6 +183,11 @@ pub(crate) fn collect_legislation_citations_payload(
     let postgres = open_index(index_dir.as_path())?;
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    let run_id = crate::ingest::producer_run_id("collect-legislation-citations");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
 
     let mut decisions_scanned: u64 = 0;
     let mut occurrences_inserted: u64 = 0;
@@ -229,37 +234,44 @@ pub(crate) fn collect_legislation_citations_payload(
                     parse_failures += 1;
                     continue;
                 };
-                let inserted = insert_citation_occurrence_with_client(
-                    &mut client,
-                    &InsertCitationOccurrence {
-                        decision_document_id: document_id,
-                        decision_source_uid: source_uid,
-                        source_response_id: response_id,
-                        visa_index: i32::try_from(visa_index).unwrap_or(i32::MAX),
-                        citation_key: &citation.citation_key,
-                        article_number_raw: Some(&citation.article_number_raw),
-                        article_number_norm: &citation.article_number_norm,
-                        code_name_raw: Some(&citation.code_name_raw),
-                        code_name_norm: &citation.code_name_norm,
-                        canonical_query: &citation.canonical_query,
-                        legifrance_url: citation.legifrance_url.as_deref(),
-                        raw_title: title,
-                        extraction_method: citation.extraction_method,
-                    },
-                )
-                .map_err(storage_error_object)?;
+                // The occurrence and its deduped pending resolution (and both outbox emits) commit
+                // together, so an occurrence is never recorded without its resolution row or ledger.
+                let inserted = in_outbox_txn(&mut client, |tx| {
+                    let inserted = insert_citation_occurrence_with_client(
+                        tx,
+                        &InsertCitationOccurrence {
+                            decision_document_id: document_id,
+                            decision_source_uid: source_uid,
+                            source_response_id: response_id,
+                            visa_index: i32::try_from(visa_index).unwrap_or(i32::MAX),
+                            citation_key: &citation.citation_key,
+                            article_number_raw: Some(&citation.article_number_raw),
+                            article_number_norm: &citation.article_number_norm,
+                            code_name_raw: Some(&citation.code_name_raw),
+                            code_name_norm: &citation.code_name_norm,
+                            canonical_query: &citation.canonical_query,
+                            legifrance_url: citation.legifrance_url.as_deref(),
+                            raw_title: title,
+                            extraction_method: citation.extraction_method,
+                        },
+                        Some(&outbox),
+                    )
+                    .map_err(storage_error_object)?;
+                    upsert_citation_resolution_pending_with_client(
+                        tx,
+                        &citation.citation_key,
+                        &citation.article_number_norm,
+                        &citation.code_name_norm,
+                        &citation.canonical_query,
+                        document_id,
+                        Some(&outbox),
+                    )
+                    .map_err(storage_error_object)?;
+                    Ok(inserted)
+                })?;
                 if inserted {
                     occurrences_inserted += 1;
                 }
-                upsert_citation_resolution_pending_with_client(
-                    &mut client,
-                    &citation.citation_key,
-                    &citation.article_number_norm,
-                    &citation.code_name_norm,
-                    &citation.canonical_query,
-                    document_id,
-                )
-                .map_err(storage_error_object)?;
             }
         }
         cursor = page["next_cursor"].as_str().map(str::to_owned);
@@ -267,7 +279,7 @@ pub(crate) fn collect_legislation_citations_payload(
             break;
         }
     }
-    finalize_citation_occurrence_counts(&postgres).map_err(storage_error_object)?;
+    finalize_citation_occurrence_counts(&postgres, Some(&outbox)).map_err(storage_error_object)?;
     let coverage: Value = serde_json::from_str(
         &legislation_citations_coverage_json(&postgres).map_err(storage_error_object)?,
     )
@@ -300,6 +312,11 @@ pub(crate) fn enrich_legislation_citations_payload(
     let postgres = open_index(index_dir.as_path())?;
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    let run_id = crate::ingest::producer_run_id("enrich-legislation-citations");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
     let mut piste = PisteClient::new(OfficialApiConfig::from_env());
     let api_environment = piste.api_environment();
 
@@ -341,18 +358,8 @@ pub(crate) fn enrich_legislation_citations_payload(
             };
             considered += 1;
             let body = legifrance_code_search_body(canonical_query);
+            // The Legifrance HTTP call happens BEFORE the transaction (never hold a txn over I/O).
             let exchange = piste.legifrance_search_exchange(&body);
-            // The Legifrance lookup has no subject document; it belongs to this resolution's corpus.
-            let response_id = archive_exchange(
-                &mut client,
-                &exchange,
-                api_environment,
-                None,
-                None,
-                None,
-                Some(citation_key),
-                Some(corpus),
-            )?;
             let (status, error) = match exchange.outcome {
                 OfficialApiOutcome::Ok => {
                     let has_results = exchange
@@ -376,16 +383,34 @@ pub(crate) fn enrich_legislation_citations_payload(
                     ("upstream_error", exchange.error.as_deref())
                 }
             };
-            update_citation_resolution_with_client(
-                &mut client,
-                corpus,
-                citation_key,
-                status,
-                Some(response_id),
-                Some(&exchange.request_fingerprint),
-                error,
-            )
-            .map_err(storage_error_object)?;
+            // Archive the Legifrance response AND record the resolution result + both outbox emits in
+            // ONE transaction, so the resolution's `legifrance_response_id` can never reference an
+            // archive row that did not commit, and neither mutation is left without its ledger row.
+            in_outbox_txn(&mut client, |tx| {
+                // The Legifrance lookup has no subject document; it belongs to this corpus.
+                let response_id = archive_exchange(
+                    tx,
+                    &exchange,
+                    api_environment,
+                    None,
+                    None,
+                    None,
+                    Some(citation_key),
+                    Some(corpus),
+                    Some(&outbox),
+                )?;
+                update_citation_resolution_with_client(
+                    tx,
+                    corpus,
+                    citation_key,
+                    status,
+                    Some(response_id),
+                    Some(&exchange.request_fingerprint),
+                    error,
+                    Some(&outbox),
+                )
+                .map_err(storage_error_object)
+            })?;
         }
         cursor = page["next_cursor"].as_str().map(str::to_owned);
         if cursor.is_none() {

@@ -430,11 +430,16 @@ pub(crate) fn process_juri_archive_member<C: postgres::GenericClient>(
                     compatibility,
                 },
             )?;
+            let outbox = jurisearch_storage::outbox::OutboxContext::new(
+                run_id,
+                jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+            );
             let report = insert_decision_documents_with_statements(
                 client,
                 projection_statements,
                 &[decision],
                 None,
+                Some(&outbox),
             )?;
             update_ingest_member_status_with_client(
                 client,

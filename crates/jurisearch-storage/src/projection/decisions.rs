@@ -26,10 +26,13 @@ pub fn insert_decision_documents(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
+    // Bare convenience wrapper (tests / single-call): no outbox emission; production juri ingest uses
+    // the `_with_statements` batch path with an `OutboxContext`.
     let report = insert_decision_documents_with_client(
         &mut transaction,
         decisions,
         chunk_embedding_fingerprint,
+        None,
     )?;
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(report)
@@ -41,6 +44,7 @@ pub fn insert_decision_documents_with_client<C: GenericClient>(
     client: &mut C,
     decisions: &[CanonicalDecision],
     chunk_embedding_fingerprint: Option<&str>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<CanonicalInsertReport, StorageError> {
     let statements = prepare_document_projection_statements(client)?;
     insert_decision_documents_with_statements(
@@ -48,6 +52,7 @@ pub fn insert_decision_documents_with_client<C: GenericClient>(
         &statements,
         decisions,
         chunk_embedding_fingerprint,
+        outbox,
     )
 }
 
@@ -57,7 +62,12 @@ pub fn insert_decision_documents_with_statements<C: GenericClient>(
     statements: &DocumentProjectionStatements,
     decisions: &[CanonicalDecision],
     chunk_embedding_fingerprint: Option<&str>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<CanonicalInsertReport, StorageError> {
+    use crate::outbox::{OutboxEvent, emit_change, scope_kind};
+    use jurisearch_package::corpus_for_source;
+    use jurisearch_package::event::EventKind;
+
     let document_statement = statements.document.clone();
     let chunk_statement = statements.chunk.clone();
     let edge_statement = statements.edge.clone();
@@ -144,6 +154,28 @@ pub fn insert_decision_documents_with_statements<C: GenericClient>(
         for edge in &decision.inferred_edges {
             insert_graph_edge(client, &edge_statement, edge)?;
             inferred_edges += 1;
+        }
+
+        // Outbox (§5.1, plan P1): one `upsert` per decision document scope, same transaction.
+        if let Some(ctx) = outbox {
+            let corpus =
+                corpus_for_source(&decision.source).map_err(|error| StorageError::Projection {
+                    message: format!(
+                        "outbox corpus attribution for `{}`: {error}",
+                        decision.document_id
+                    ),
+                })?;
+            emit_change(
+                client,
+                ctx,
+                &OutboxEvent::scope(
+                    corpus.as_str(),
+                    "documents",
+                    EventKind::Upsert,
+                    scope_kind::DOCUMENT,
+                    &decision.document_id,
+                ),
+            )?;
         }
     }
 

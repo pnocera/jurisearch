@@ -1306,6 +1306,7 @@ fn zone_search_positive_authority_weight_disables_paging_and_carries_metadata()
                 text_hash: "h",
                 builder_version: "zone-units:v1",
             }],
+            None,
         )?;
     }
     let on: Value = serde_json::from_slice(

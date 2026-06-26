@@ -244,6 +244,34 @@ fn ingest_legi_archives_records_accounting_and_quarantines_failures()
         postgres.execute_sql("SELECT count(*)::text FROM documents;")?,
         "1"
     );
+
+    // P1 outbox (§5.1): the ingest captured its mutations in package_change_log — the document
+    // upsert, the three metadata-root upserts, and the hierarchy-backfill chunk_embeddings
+    // replace_set — every row attributed to corpus 'core', schema 19, and this ingest run.
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT string_agg(op || ':' || scope_kind || ':' || table_name, ',' \
+                 ORDER BY op, scope_kind, table_name) \
+             FROM (SELECT DISTINCT op, scope_kind, table_name FROM package_change_log) s;",
+        )?,
+        "replace_set:document:chunk_embeddings,upsert:document:documents,\
+         upsert:legi_metadata_root:legi_metadata_roots"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text FROM package_change_log \
+             WHERE corpus <> 'core' OR schema_version <> 19 OR ingest_run_id <> 'run-cli';",
+        )?,
+        "0",
+        "every outbox row is corpus core, schema 19, attributed to the ingest run"
+    );
+    assert_eq!(
+        postgres.execute_sql(
+            "SELECT count(*)::text FROM package_change_log \
+             WHERE table_name = 'legi_metadata_roots';",
+        )?,
+        "3"
+    );
     assert_eq!(
         postgres.execute_sql(
             "SELECT string_agg(status || ':' || member_count::text, ',' ORDER BY status) \

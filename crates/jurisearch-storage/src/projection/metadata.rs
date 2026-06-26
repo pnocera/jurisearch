@@ -21,7 +21,8 @@ pub fn insert_legi_metadata_roots(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
-    let report = insert_legi_metadata_roots_with_client(&mut transaction, roots)?;
+    // Bare convenience wrapper (tests): no outbox emission; production threads an OutboxContext.
+    let report = insert_legi_metadata_roots_with_client(&mut transaction, roots, None)?;
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(report)
 }
@@ -29,7 +30,16 @@ pub fn insert_legi_metadata_roots(
 pub fn insert_legi_metadata_roots_with_client<C: GenericClient>(
     client: &mut C,
     roots: &[LegiMetadataRoot<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<LegiMetadataInsertReport, StorageError> {
+    use crate::outbox::{OutboxEvent, emit_change, scope_kind};
+    use jurisearch_package::event::EventKind;
+    // LEGI metadata roots belong to the `core` corpus (LEGI-only source).
+    let corpus = jurisearch_package::corpus_for_source("legi").map_err(|error| {
+        StorageError::Projection {
+            message: format!("outbox corpus attribution for legi metadata: {error}"),
+        }
+    })?;
     let statement = client
         .prepare(
             "INSERT INTO legi_metadata_roots \
@@ -79,6 +89,21 @@ pub fn insert_legi_metadata_roots_with_client<C: GenericClient>(
                 ],
             )
             .map_err(StorageError::PostgresClient)?;
+
+        // Outbox (§5.1, plan P1): one `upsert` per metadata root, same transaction.
+        if let Some(ctx) = outbox {
+            emit_change(
+                client,
+                ctx,
+                &OutboxEvent::scope(
+                    corpus.as_str(),
+                    "legi_metadata_roots",
+                    EventKind::Upsert,
+                    scope_kind::LEGI_METADATA_ROOT,
+                    &row.metadata_key,
+                ),
+            )?;
+        }
     }
 
     Ok(LegiMetadataInsertReport {

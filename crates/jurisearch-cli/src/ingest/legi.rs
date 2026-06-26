@@ -238,7 +238,15 @@ pub(crate) fn ingest_legi_archives_payload(
             scoped_backfill
         };
         if full_resume_backfill || !backfill_scope.is_empty() {
-            match backfill_legi_article_hierarchy_from_metadata_scoped(&postgres, &backfill_scope) {
+            let outbox = jurisearch_storage::outbox::OutboxContext::new(
+                &run_id,
+                jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+            );
+            match backfill_legi_article_hierarchy_from_metadata_scoped(
+                &postgres,
+                &backfill_scope,
+                Some(&outbox),
+            ) {
                 Ok(report) => {
                     counters.hierarchy_backfilled_documents = report.documents_updated;
                     counters.hierarchy_backfill_invalidated_embeddings =
@@ -486,11 +494,16 @@ pub(crate) fn process_legi_archive_member<C: postgres::GenericClient>(
                     compatibility,
                 },
             )?;
+            let outbox = jurisearch_storage::outbox::OutboxContext::new(
+                run_id,
+                jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+            );
             let report = insert_legi_documents_with_statements(
                 client,
                 projection_statements,
                 &[document],
                 None,
+                Some(&outbox),
             )?;
             update_ingest_member_status_with_client(
                 client,
@@ -635,7 +648,11 @@ pub(crate) fn process_legi_metadata_root<C: postgres::GenericClient>(
     date_anchor: Option<&str>,
     metadata_root: LegiMetadataRoot<'_>,
 ) -> Result<(), StorageError> {
-    let report = insert_legi_metadata_roots_with_client(client, &[metadata_root])?;
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
+    let report = insert_legi_metadata_roots_with_client(client, &[metadata_root], Some(&outbox))?;
     *counters
         .parsed_metadata_roots
         .entry(root.to_owned())
@@ -774,8 +791,13 @@ pub(crate) fn backfill_legi_hierarchy_payload(
     // index no longer query-ready; drop the readiness cache up front so a stale "ready" entry can
     // never let a subsequent search skip the live coverage check.
     invalidate_cached_query_readiness(&postgres).map_err(storage_error_object)?;
-    let report =
-        backfill_legi_article_hierarchy_from_metadata(&postgres).map_err(storage_error_object)?;
+    let run_id = crate::ingest::producer_run_id("backfill-legi-hierarchy");
+    let outbox = jurisearch_storage::outbox::OutboxContext::new(
+        &run_id,
+        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
+    );
+    let report = backfill_legi_article_hierarchy_from_metadata(&postgres, Some(&outbox))
+        .map_err(storage_error_object)?;
     let replay_snapshot = maybe_refresh_replay_snapshot(&postgres)?;
 
     Ok(json!({

@@ -854,6 +854,8 @@ pub enum StorageError {
     Retrieval { message: String },
     #[error("ingest accounting failed: {message}")]
     IngestAccounting { message: String },
+    #[error("change-log outbox failed: {message}")]
+    Outbox { message: String },
     #[error("json serialization failed: {0}")]
     Json(#[from] serde_json::Error),
     #[error("postgres client error: {0}")]

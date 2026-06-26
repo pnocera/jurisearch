@@ -26,10 +26,12 @@ impl LegiHierarchyBackfillScope {
 
 pub fn backfill_legi_article_hierarchy_from_metadata(
     postgres: &ManagedPostgres,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<LegiHierarchyBackfillReport, StorageError> {
     backfill_legi_article_hierarchy_from_metadata_scoped(
         postgres,
         &LegiHierarchyBackfillScope::default(),
+        outbox,
     )
 }
 
@@ -39,6 +41,7 @@ pub fn backfill_legi_article_hierarchy_from_metadata(
 pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
     postgres: &ManagedPostgres,
     scope: &LegiHierarchyBackfillScope,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<LegiHierarchyBackfillReport, StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
@@ -242,6 +245,41 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
         transaction
             .execute(&update_chunks, &[document_id, canonical_json])
             .map_err(StorageError::PostgresClient)?;
+
+        // Outbox (§5.1/§5.3, plan P1): the document + its chunk bodies changed (`upsert`), and the
+        // chunk-embedding set was invalidated to empty (`replace_set`, per Codex — a derived-set
+        // replacement, not a base delete). Same transaction.
+        if let Some(ctx) = outbox {
+            let corpus: String = transaction
+                .query_one(
+                    "SELECT corpus FROM documents WHERE document_id = $1;",
+                    &[document_id],
+                )
+                .map_err(StorageError::PostgresClient)?
+                .get("corpus");
+            crate::outbox::emit_change(
+                &mut transaction,
+                ctx,
+                &crate::outbox::OutboxEvent::scope(
+                    &corpus,
+                    "documents",
+                    jurisearch_package::event::EventKind::Upsert,
+                    crate::outbox::scope_kind::DOCUMENT,
+                    document_id,
+                ),
+            )?;
+            crate::outbox::emit_change(
+                &mut transaction,
+                ctx,
+                &crate::outbox::OutboxEvent::scope(
+                    &corpus,
+                    "chunk_embeddings",
+                    jurisearch_package::event::EventKind::ReplaceSet,
+                    crate::outbox::scope_kind::DOCUMENT,
+                    document_id,
+                ),
+            )?;
+        }
     }
 
     transaction.commit().map_err(StorageError::PostgresClient)?;

@@ -40,10 +40,12 @@ pub struct InsertOfficialApiResponse<'a> {
 }
 
 /// Append one exchange to `official_api_responses`, returning its `response_id` (used to link a
-/// `/decision` archive row to the citations later extracted from it, in v17).
+/// `/decision` archive row to the citations later extracted from it, in v17). When `outbox` is
+/// `Some`, emits one `upsert` outbox row for the archived exchange in the same transaction (§5.1).
 pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
     client: &mut C,
     row: &InsertOfficialApiResponse<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<i64, StorageError> {
     // jsonb columns are passed as text + cast in SQL (mirrors the other parameterized writers).
     let request_json =
@@ -76,7 +78,7 @@ pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
                  error, run_id, code_version, corpus) \
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text::jsonb,$12,$13,$14,$15,$16::text::jsonb,$17,$18,$19,$20, \
                  COALESCE($21, (SELECT d.corpus FROM documents d WHERE d.document_id = $5))) \
-             RETURNING response_id;",
+             RETURNING response_id, corpus;",
             &[
                 &row.provider,
                 &row.api_environment,
@@ -102,5 +104,24 @@ pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
             ],
         )
         .map_err(StorageError::PostgresClient)?;
-    Ok(inserted.get::<_, i64>("response_id"))
+    let response_id: i64 = inserted.get("response_id");
+
+    // Outbox (§5.1, plan P1): one `upsert` per archived exchange, keyed by the producer response_id
+    // (carried verbatim to the client — the §5.2 surrogate-key exception). Same transaction.
+    if let Some(ctx) = outbox {
+        let corpus: String = inserted.get("corpus");
+        let response_id_text = response_id.to_string();
+        crate::outbox::emit_change(
+            client,
+            ctx,
+            &crate::outbox::OutboxEvent::scope(
+                &corpus,
+                "official_api_responses",
+                jurisearch_package::event::EventKind::Upsert,
+                crate::outbox::scope_kind::OFFICIAL_API_RESPONSE,
+                &response_id_text,
+            ),
+        )?;
+    }
+    Ok(response_id)
 }

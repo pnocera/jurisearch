@@ -95,7 +95,10 @@ pub(crate) fn enrich_decision_from_judilibre(
     let mut db = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
     let piste = PisteClient::new(OfficialApiConfig::from_env());
-    enrich_decision_from_judilibre_with_client(&mut db, &piste, document_id)
+    // On-demand single-decision enrichment (the client-facing `fetch --part --online` path): not a
+    // producer capture run, so no outbox emission. Scheduled producer capture goes through the batch
+    // `enrich-zones` command, which threads an OutboxContext.
+    enrich_decision_from_judilibre_with_client(&mut db, &piste, document_id, None)
 }
 
 /// Thread-safe enrichment core: takes a caller-owned `postgres::Client` and `PisteClient` (no
@@ -105,6 +108,7 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
     db: &mut C,
     piste: &PisteClient,
     document_id: &str,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<Option<Value>, ErrorObject> {
     // Local resolution metadata: a parser-valid pourvoi, the decision date (= valid_from), source_uid.
     let meta: Value = serde_json::from_str(
@@ -116,19 +120,39 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
     let ecli = meta["ecli"].as_str();
     let decision_date = meta["decision_date"].as_str();
     let api_environment = piste.api_environment();
+    // Each producer write below + its outbox emit run in one transaction (P1 §5.1: emit is
+    // rollback-coupled to the mutation). HTTP happens OUTSIDE the transactions.
+    let cache = |db: &mut C, status: &str, error: Option<&str>| -> Result<(), ErrorObject> {
+        in_outbox_txn(db, |tx| {
+            cache_zone_status_with_client(
+                tx,
+                document_id,
+                source_uid,
+                ecli,
+                decision_date,
+                status,
+                error,
+                outbox,
+            )
+        })
+    };
+
     let Some(pourvoi) = meta["pourvoi"].as_str() else {
         // No parser-valid pourvoi -> cannot even request Judilibre. Archive a durable 'local' accounting
-        // row (so every touched decision is recorded) and cache as unsupported.
-        archive_local_unsupported(db, document_id, source_uid, api_environment)?;
-        cache_zone_status_with_client(
-            db,
-            document_id,
-            source_uid,
-            ecli,
-            decision_date,
-            "unsupported",
-            None,
-        )?;
+        // row (so every touched decision is recorded) and cache as unsupported — one transaction.
+        in_outbox_txn(db, |tx| {
+            archive_local_unsupported(tx, document_id, source_uid, api_environment, outbox)?;
+            cache_zone_status_with_client(
+                tx,
+                document_id,
+                source_uid,
+                ecli,
+                decision_date,
+                "unsupported",
+                None,
+                outbox,
+            )
+        })?;
         return Ok(None);
     };
 
@@ -144,26 +168,22 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         ("operator", "exact"),
         ("page_size", "10"),
     ]);
-    archive_exchange(
-        db,
-        &search_exchange,
-        api_environment,
-        Some(document_id),
-        Some(source_uid),
-        None,
-        None,
-        None,
-    )?;
+    in_outbox_txn(db, |tx| {
+        archive_exchange(
+            tx,
+            &search_exchange,
+            api_environment,
+            Some(document_id),
+            Some(source_uid),
+            None,
+            None,
+            None,
+            outbox,
+        )
+        .map(|_| ())
+    })?;
     if search_exchange.outcome != OfficialApiOutcome::Ok {
-        cache_zone_status_with_client(
-            db,
-            document_id,
-            source_uid,
-            ecli,
-            decision_date,
-            "upstream_error",
-            search_exchange.error.as_deref(),
-        )?;
+        cache(db, "upstream_error", search_exchange.error.as_deref())?;
         return Ok(None);
     }
     let provider_id = search_exchange
@@ -171,49 +191,33 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         .as_ref()
         .and_then(|search| find_matching_judilibre_id(search, &normalized_pourvoi, decision_date));
     let Some(provider_id) = provider_id else {
-        cache_zone_status_with_client(
-            db,
-            document_id,
-            source_uid,
-            ecli,
-            decision_date,
-            "not_found",
-            None,
-        )?;
+        cache(db, "not_found", None)?;
         return Ok(None);
     };
 
     // Fetch the full decision; archive the raw /decision response either way.
     let decision_exchange = piste.judilibre_decision_exchange(&provider_id, None);
-    archive_exchange(
-        db,
-        &decision_exchange,
-        api_environment,
-        Some(document_id),
-        Some(source_uid),
-        Some(provider_id.as_str()),
-        None,
-        None,
-    )?;
+    in_outbox_txn(db, |tx| {
+        archive_exchange(
+            tx,
+            &decision_exchange,
+            api_environment,
+            Some(document_id),
+            Some(source_uid),
+            Some(provider_id.as_str()),
+            None,
+            None,
+            outbox,
+        )
+        .map(|_| ())
+    })?;
     if decision_exchange.outcome != OfficialApiOutcome::Ok {
-        cache_zone_status_with_client(
-            db,
-            document_id,
-            source_uid,
-            ecli,
-            decision_date,
-            "upstream_error",
-            decision_exchange.error.as_deref(),
-        )?;
+        cache(db, "upstream_error", decision_exchange.error.as_deref())?;
         return Ok(None);
     }
     let Some(decision) = decision_exchange.response_json.as_ref() else {
-        cache_zone_status_with_client(
+        cache(
             db,
-            document_id,
-            source_uid,
-            ecli,
-            decision_date,
             "upstream_error",
             Some("decision response missing JSON body"),
         )?;
@@ -243,7 +247,9 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         error: None,
         ttl_seconds: Some(ttl_days.max(0) * 86_400),
     };
-    upsert_decision_zones_with_client(db, &row).map_err(storage_error_object)?;
+    in_outbox_txn(db, |tx| {
+        upsert_decision_zones_with_client(tx, &row, outbox).map_err(storage_error_object)
+    })?;
     if status != "ok" {
         return Ok(None);
     }
@@ -359,6 +365,7 @@ pub(crate) fn zone_text_hash(decision: &Value, zones_json: &Value, provider_id: 
 /// Cache a non-`ok` zone status (unsupported / not_found / upstream_error) so repeat fetches do not
 /// re-hit the API. Negative results get the negative TTL; upstream errors are not cached long.
 /// Client-based core so backfill workers reuse their own connection.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cache_zone_status_with_client<C: postgres::GenericClient>(
     db: &mut C,
     document_id: &str,
@@ -367,6 +374,7 @@ pub(crate) fn cache_zone_status_with_client<C: postgres::GenericClient>(
     decision_date: Option<&str>,
     status: &str,
     error: Option<&str>,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<(), ErrorObject> {
     let ttl_seconds = match status {
         // Transient failures get a SHORT explicit TTL so they suppress hammering but retry soon (never
@@ -393,7 +401,7 @@ pub(crate) fn cache_zone_status_with_client<C: postgres::GenericClient>(
         error,
         ttl_seconds,
     };
-    upsert_decision_zones_with_client(db, &row).map_err(storage_error_object)
+    upsert_decision_zones_with_client(db, &row, outbox).map_err(storage_error_object)
 }
 
 pub(crate) fn env_i64(name: &str, default: i64) -> i64 {

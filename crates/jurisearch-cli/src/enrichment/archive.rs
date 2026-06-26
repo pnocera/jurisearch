@@ -2,6 +2,28 @@
 
 use crate::*;
 
+/// Run a unit of producer mutations + their outbox emits inside ONE transaction on `db`, committing
+/// only if every write *and* its `emit_change` succeed (P1 §5.1: the emit must be rollback-coupled to
+/// the mutation). The scheduled enrichment/citation commands hold a plain auto-commit
+/// `postgres::Client` per worker; without this, a mutation could commit while its later outbox insert
+/// fails, leaving a silent diff gap. `db.transaction()` is a real transaction for a `Client` and a
+/// savepoint when already inside one, so this is safe in every calling context.
+pub(crate) fn in_outbox_txn<C, T>(
+    db: &mut C,
+    unit: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<T, ErrorObject>,
+) -> Result<T, ErrorObject>
+where
+    C: postgres::GenericClient,
+{
+    let mut tx = db
+        .transaction()
+        .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    let out = unit(&mut tx)?;
+    tx.commit()
+        .map_err(|error| storage_error_object(StorageError::PostgresClient(error)))?;
+    Ok(out)
+}
+
 /// Resolve a Cassation decision on Judilibre by pourvoi (+ date), fetch its zones, normalize and cache
 /// them, and return the cached row. Errors are cached and yield `Ok(None)` (never fail `fetch`). Thin
 /// wrapper that opens its own DB client + `PisteClient` and delegates to the thread-safe core, so the
@@ -35,6 +57,7 @@ pub(crate) fn archive_exchange<C: postgres::GenericClient>(
     provider_object_id: Option<&str>,
     citation_key: Option<&str>,
     corpus: Option<&str>,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<i64, ErrorObject> {
     let response_body_sha256 = sha256_hex(&exchange.response_body);
     insert_official_api_response_with_client(
@@ -64,6 +87,7 @@ pub(crate) fn archive_exchange<C: postgres::GenericClient>(
             // Legifrance citation lookup passes its resolution's corpus explicitly (no subject doc).
             corpus,
         },
+        outbox,
     )
     .map_err(storage_error_object)
 }
@@ -75,6 +99,7 @@ pub(crate) fn archive_local_unsupported<C: postgres::GenericClient>(
     document_id: &str,
     source_uid: &str,
     api_environment: &str,
+    outbox: Option<&jurisearch_storage::outbox::OutboxContext<'_>>,
 ) -> Result<(), ErrorObject> {
     let empty = json!({});
     insert_official_api_response_with_client(
@@ -103,6 +128,7 @@ pub(crate) fn archive_local_unsupported<C: postgres::GenericClient>(
             // Corpus derives from the subject decision document.
             corpus: None,
         },
+        outbox,
     )
     .map(|_| ())
     .map_err(storage_error_object)

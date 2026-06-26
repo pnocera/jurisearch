@@ -133,7 +133,7 @@ fn decisions_project_search_and_fetch() -> Result<(), StorageError> {
         });
     }
     assert_eq!(
-        insert_chunk_embeddings(&postgres, &embeddings)?,
+        insert_chunk_embeddings(&postgres, &embeddings, None)?,
         embeddings.len()
     );
 
@@ -283,7 +283,7 @@ fn decision_search_metadata_filters() -> Result<(), StorageError> {
             dimension: 1024,
         })
         .collect();
-    insert_chunk_embeddings(&postgres, &embeddings)?;
+    insert_chunk_embeddings(&postgres, &embeddings, None)?;
 
     let search = |filters: DecisionFilters| -> Vec<String> {
         let response = hybrid_candidates_json(

@@ -14,6 +14,7 @@ pub struct ChunkEmbeddingInsert<'a> {
 pub fn insert_chunk_embeddings(
     postgres: &ManagedPostgres,
     embeddings: &[ChunkEmbeddingInsert<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<usize, StorageError> {
     if embeddings.is_empty() {
         return Ok(0);
@@ -126,6 +127,41 @@ pub fn insert_chunk_embeddings(
             &[],
         )
         .map_err(StorageError::PostgresClient)?;
+
+    // Outbox (§5.1, plan P1): the embedding set is derived per document, so emit one `upsert` per
+    // distinct document covered by this batch (not per chunk — §5.1 records scopes, not row bodies),
+    // in the same transaction. The staged table is still live (ON COMMIT DROP). The embedding insert
+    // also stamps `chunks.embedding_fingerprint` (a replicated parent column), so a paired
+    // document-scoped `chunks` upsert is emitted too, or the parent fingerprint change goes uncaptured.
+    if let Some(ctx) = outbox {
+        let rows = transaction
+            .query(
+                "SELECT DISTINCT d.document_id, d.corpus \
+                 FROM stage_chunk_embeddings s \
+                 JOIN chunks c ON c.chunk_id = s.chunk_id \
+                 JOIN documents d ON d.document_id = c.document_id \
+                 ORDER BY d.document_id;",
+                &[],
+            )
+            .map_err(StorageError::PostgresClient)?;
+        for row in rows {
+            let document_id: String = row.get("document_id");
+            let corpus: String = row.get("corpus");
+            for table in ["chunks", "chunk_embeddings"] {
+                crate::outbox::emit_change(
+                    &mut transaction,
+                    ctx,
+                    &crate::outbox::OutboxEvent::scope(
+                        &corpus,
+                        table,
+                        jurisearch_package::event::EventKind::Upsert,
+                        crate::outbox::scope_kind::DOCUMENT,
+                        &document_id,
+                    ),
+                )?;
+            }
+        }
+    }
 
     transaction.commit().map_err(StorageError::PostgresClient)?;
     Ok(embeddings.len())
