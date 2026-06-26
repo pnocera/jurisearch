@@ -22,6 +22,10 @@ pub(crate) fn sha256_hex(data: &str) -> String {
 /// Append one captured official-API exchange to the durable `official_api_responses` archive (v16).
 /// Archive writes are hard errors: a decision is not "touched successfully" unless its raw upstream
 /// evidence was persisted (the user requirement: keep ALL API call results).
+// Each argument is a distinct, independently-optional archive dimension (subject ids, provider id,
+// citation key, explicit corpus); bundling them into a struct would only move the verbosity to the
+// call sites without improving clarity.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn archive_exchange<C: postgres::GenericClient>(
     db: &mut C,
     exchange: &OfficialApiExchange,
@@ -30,6 +34,7 @@ pub(crate) fn archive_exchange<C: postgres::GenericClient>(
     subject_source_uid: Option<&str>,
     provider_object_id: Option<&str>,
     citation_key: Option<&str>,
+    corpus: Option<&str>,
 ) -> Result<i64, ErrorObject> {
     let response_body_sha256 = sha256_hex(&exchange.response_body);
     insert_official_api_response_with_client(
@@ -55,6 +60,9 @@ pub(crate) fn archive_exchange<C: postgres::GenericClient>(
             error: exchange.error.as_deref(),
             run_id: None,
             code_version: Some(CLI_CODE_VERSION),
+            // `None` for a subject-document exchange (corpus derives from the document); the
+            // Legifrance citation lookup passes its resolution's corpus explicitly (no subject doc).
+            corpus,
         },
     )
     .map_err(storage_error_object)
@@ -92,6 +100,8 @@ pub(crate) fn archive_local_unsupported<C: postgres::GenericClient>(
             error: Some("no parser-valid pourvoi; not resolvable on Judilibre"),
             run_id: None,
             code_version: Some(CLI_CODE_VERSION),
+            // Corpus derives from the subject decision document.
+            corpus: None,
         },
     )
     .map(|_| ())

@@ -1,6 +1,6 @@
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 17;
+pub const CURRENT_SCHEMA_VERSION: i32 = 18;
 
 struct Migration {
     version: i32,
@@ -699,6 +699,124 @@ SET value = excluded.value,
     updated_at = excluded.updated_at;
 "#,
     },
+    Migration {
+        version: 18,
+        name: "corpus_attribution",
+        // Plan P0 "Corpus attribution": every replicated row resolves to exactly one corpus
+        // (design §4.1, §5.1). Most rows are attributed via the *owning document's* `source`:
+        // `documents.corpus` is a STORED generated column derived from `source`, and the
+        // document/decision-owned tables (chunks, embeddings, zone_units, decision_legislation_
+        // citations) inherit their corpus through their owning document at outbox-emit time (P1).
+        //
+        // Two replicated tables have NO guaranteed owning-document link and so need an *explicit*
+        // `corpus` column (the "explicit column where not [derivable from source]" half of P0):
+        //   - `official_api_responses`  — `subject_document_id` is nullable (Legifrance citation
+        //     lookups have none); corpus is derived from the subject document, else from the
+        //     citation's occurrences.
+        //   - `legislation_citation_resolutions` — keyed by a `citation_key` deduped across
+        //     decisions; corpus is a property of the citation's occurrences, not a single decision.
+        // For these, the storage *writers* derive corpus in-SQL from the authoritative links and the
+        // column is `NOT NULL`, so a genuinely unattributable row FAILS LOUDLY at insert. The
+        // backfill below additionally uses a single-corpus-DB fallback — a one-time bootstrap that is
+        // valid because, when the whole DB holds one corpus, an unlinked archive row can belong to
+        // no other (the runtime writers deliberately do NOT use this fallback).
+        //
+        // The `documents` `CASE` MUST stay in lock-step with `jurisearch_package::corpus::
+        // KNOWN_SOURCES`; `migration_18_case_matches_known_sources` enforces that. Every
+        // `*_corpus_attributed` CHECK makes an unmapped/unlinkable row FAIL LOUDLY.
+        sql: r#"
+ALTER TABLE documents
+    ADD COLUMN corpus text
+    GENERATED ALWAYS AS (
+        CASE source
+            WHEN 'legi' THEN 'core'
+            WHEN 'cass' THEN 'core'
+            WHEN 'capp' THEN 'core'
+            WHEN 'inca' THEN 'core'
+            WHEN 'jade' THEN 'core'
+        END
+    ) STORED;
+
+ALTER TABLE documents
+    ADD CONSTRAINT documents_corpus_attributed CHECK (corpus IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS documents_corpus_idx ON documents(corpus);
+
+-- official_api_responses: explicit corpus, backfilled from authoritative links.
+ALTER TABLE official_api_responses ADD COLUMN corpus text;
+
+-- (1) direct subject_document_id link
+UPDATE official_api_responses r
+SET corpus = d.corpus
+FROM documents d
+WHERE r.corpus IS NULL AND r.subject_document_id = d.document_id;
+
+-- (2) via the citation's occurrences (a /decision or Legifrance response tied to a citation_key),
+--     only when those occurrences resolve to exactly one corpus
+UPDATE official_api_responses r
+SET corpus = sub.corpus
+FROM (
+    SELECT c.citation_key AS citation_key, max(d.corpus) AS corpus
+    FROM decision_legislation_citations c
+    JOIN documents d ON d.document_id = c.decision_document_id
+    GROUP BY c.citation_key
+    HAVING count(DISTINCT d.corpus) = 1
+) sub
+WHERE r.corpus IS NULL AND r.citation_key = sub.citation_key;
+
+-- (3) single-corpus-DB bootstrap fallback (migration-only): in a one-corpus DB an unlinked archive
+--     row can belong to no other corpus
+UPDATE official_api_responses
+SET corpus = (SELECT min(corpus) FROM documents)
+WHERE corpus IS NULL
+  AND (SELECT count(DISTINCT corpus) FROM documents) = 1;
+
+ALTER TABLE official_api_responses ALTER COLUMN corpus SET NOT NULL;
+ALTER TABLE official_api_responses
+    ADD CONSTRAINT official_api_responses_corpus_attributed CHECK (corpus IS NOT NULL);
+CREATE INDEX IF NOT EXISTS official_api_responses_corpus_idx ON official_api_responses(corpus);
+
+-- legislation_citation_resolutions: explicit corpus, derived from its occurrences.
+ALTER TABLE legislation_citation_resolutions ADD COLUMN corpus text;
+
+UPDATE legislation_citation_resolutions res
+SET corpus = sub.corpus
+FROM (
+    SELECT c.citation_key AS citation_key, max(d.corpus) AS corpus
+    FROM decision_legislation_citations c
+    JOIN documents d ON d.document_id = c.decision_document_id
+    GROUP BY c.citation_key
+    HAVING count(DISTINCT d.corpus) = 1
+) sub
+WHERE res.corpus IS NULL AND res.citation_key = sub.citation_key;
+
+UPDATE legislation_citation_resolutions
+SET corpus = (SELECT min(corpus) FROM documents)
+WHERE corpus IS NULL
+  AND (SELECT count(DISTINCT corpus) FROM documents) = 1;
+
+ALTER TABLE legislation_citation_resolutions ALTER COLUMN corpus SET NOT NULL;
+ALTER TABLE legislation_citation_resolutions
+    ADD CONSTRAINT legislation_citation_resolutions_corpus_attributed CHECK (corpus IS NOT NULL);
+
+-- Re-key resolutions by (corpus, citation_key): a resolution (and its Legifrance archive) is
+-- replicated per-corpus data and per-corpus physical generations (INV-4) cannot share one global
+-- row, so the SAME legislation article cited from two corpora gets an INDEPENDENT resolution per
+-- corpus. This also removes the `ON CONFLICT (citation_key) DO NOTHING` cross-corpus blind spot:
+-- a later corpus's occurrence creates its own (corpus, citation_key) row rather than silently
+-- inheriting the first corpus's attribution.
+ALTER TABLE legislation_citation_resolutions
+    DROP CONSTRAINT legislation_citation_resolutions_pkey;
+ALTER TABLE legislation_citation_resolutions
+    ADD PRIMARY KEY (corpus, citation_key);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 18), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
 ];
 
 impl ManagedPostgres {
@@ -778,4 +896,87 @@ fn validate_migration_list() -> Result<(), StorageError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jurisearch_package::corpus::{KNOWN_SOURCES, corpus_for_source};
+
+    fn migration_sql(version: i32) -> &'static str {
+        MIGRATIONS
+            .iter()
+            .find(|m| m.version == version)
+            .map(|m| m.sql)
+            .unwrap_or_else(|| panic!("migration {version} not found"))
+    }
+
+    #[test]
+    fn migration_list_is_valid() {
+        validate_migration_list().expect("migration list must validate");
+    }
+
+    /// The v18 `documents.corpus` backfill `CASE` is the SQL projection of the single source of
+    /// truth `jurisearch_package::corpus::KNOWN_SOURCES`. This guards drift: a new source added to
+    /// the contract crate without extending the migration `CASE` (or vice versa) fails here, before
+    /// it can ship an unattributable row.
+    #[test]
+    fn migration_18_case_matches_known_sources() {
+        let sql = migration_sql(18);
+        // Every contract-known source maps to its corpus in the SQL CASE.
+        for (source, corpus) in KNOWN_SOURCES {
+            let clause = format!("WHEN '{source}' THEN '{corpus}'");
+            assert!(
+                sql.contains(&clause),
+                "migration 18 CASE is missing `{clause}` (out of sync with KNOWN_SOURCES)"
+            );
+            // …and the contract rule agrees on the same corpus.
+            assert_eq!(
+                corpus_for_source(source).unwrap().as_str(),
+                *corpus,
+                "KNOWN_SOURCES and corpus_for_source disagree for `{source}`"
+            );
+        }
+        // No *extra* WHEN clauses beyond the known sources (the migration cannot attribute a source
+        // the contract does not know about).
+        let when_clauses = sql.matches("WHEN '").count();
+        assert_eq!(
+            when_clauses,
+            KNOWN_SOURCES.len(),
+            "migration 18 CASE has {when_clauses} WHEN clauses but KNOWN_SOURCES has {} \
+             — they must match exactly",
+            KNOWN_SOURCES.len()
+        );
+    }
+
+    #[test]
+    fn migration_18_fails_loudly_on_unattributed_rows() {
+        let sql = migration_sql(18);
+        // Each replicated table that carries a `corpus` has a CHECK that makes an unmapped/unlinkable
+        // row abort the backfill / reject an insert (plan P0 "ambiguous rows fail loudly").
+        assert!(sql.contains("documents_corpus_attributed CHECK (corpus IS NOT NULL)"));
+        assert!(
+            sql.contains("official_api_responses_corpus_attributed CHECK (corpus IS NOT NULL)")
+        );
+        assert!(sql.contains(
+            "legislation_citation_resolutions_corpus_attributed CHECK (corpus IS NOT NULL)"
+        ));
+    }
+
+    #[test]
+    fn migration_18_attributes_non_document_owned_tables() {
+        let sql = migration_sql(18);
+        // The two tables without a guaranteed owning document get an explicit, NOT NULL corpus column
+        // (the "explicit column where not derivable from source" half of P0).
+        assert!(sql.contains("ALTER TABLE official_api_responses ADD COLUMN corpus text"));
+        assert!(
+            sql.contains("ALTER TABLE official_api_responses ALTER COLUMN corpus SET NOT NULL")
+        );
+        assert!(
+            sql.contains("ALTER TABLE legislation_citation_resolutions ADD COLUMN corpus text")
+        );
+        assert!(sql.contains(
+            "ALTER TABLE legislation_citation_resolutions ALTER COLUMN corpus SET NOT NULL"
+        ));
+    }
 }

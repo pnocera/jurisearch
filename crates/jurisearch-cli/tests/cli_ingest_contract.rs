@@ -1742,11 +1742,30 @@ fn enrich_legislation_citations_archives_missing_credential_attempt() -> Result<
             pg_config.clone(),
             root.path(),
         )?;
-        // Migrations must have reached v17 (the resolution table exists).
+        // Seed a realistic corpus-attribution chain (P0): document -> archived /decision ->
+        // occurrence -> resolution, so the citation 'legi-cite:test' resolves to corpus 'core' and
+        // the Legifrance archive write during enrich can derive its corpus from the occurrence.
         postgres.execute_sql(
-            "INSERT INTO legislation_citation_resolutions \
-                 (citation_key, article_number_norm, code_name_norm, canonical_query) \
-             VALUES ('legi-cite:test','609','code de procédure civile','609 code de procédure civile');",
+            "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
+               valid_from, source_payload_hash, canonical_json) \
+             VALUES ('cass:DEC1','cass','decision','cass:DEC1','Cass','Arret','corps','2024-01-01', \
+               'sha256:dec1','{}'); \
+             INSERT INTO official_api_responses \
+                 (provider, api_environment, endpoint, http_method, subject_document_id, \
+                  request_fingerprint, outcome, response_body_sha256, corpus) \
+             VALUES ('judilibre','production','/decision','GET','cass:DEC1','fp-dec1','ok','sha256:x','core'); \
+             INSERT INTO decision_legislation_citations \
+                 (citation_occurrence_id, decision_document_id, decision_source_uid, \
+                  source_response_id, visa_index, citation_key, article_number_norm, \
+                  code_name_norm, canonical_query, raw_title, extraction_method) \
+             SELECT 'occ1','cass:DEC1','cass:DEC1', r.response_id, 0, 'legi-cite:test','609', \
+                  'code de procédure civile','609 code de procédure civile', \
+                  'Article 609 du code de procédure civile.','visa_title_regex' \
+             FROM official_api_responses r WHERE r.subject_document_id='cass:DEC1' LIMIT 1; \
+             INSERT INTO legislation_citation_resolutions \
+                 (citation_key, article_number_norm, code_name_norm, canonical_query, corpus) \
+             VALUES ('legi-cite:test','609','code de procédure civile', \
+                 '609 code de procédure civile','core');",
         )?;
     }
 

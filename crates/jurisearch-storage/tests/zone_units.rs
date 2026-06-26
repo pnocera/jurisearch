@@ -96,11 +96,11 @@ fn zone_units_derive_embed_finalize_roundtrip() -> Result<(), StorageError> {
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
 
-    // Migrations must have reached v15 (zone tables present).
+    // Migrations must have reached the current head (zone tables present).
     let schema = postgres.execute_sql(
         "SELECT (value->>'schema_version') FROM index_manifest WHERE key = 'schema';",
     )?;
-    assert_eq!(schema.trim(), "17");
+    assert_eq!(schema.trim(), "18");
 
     let zones = r#"{"motivations":[{"start":0,"end":5,"text":"motif un"},{"start":6,"end":10,"text":"motif deux"}],"moyens":[{"start":0,"end":4,"text":"moyen"}],"dispositif":[]}"#;
     seed_decision(

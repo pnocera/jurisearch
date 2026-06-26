@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fs2.workspace = true
 jurisearch-ingest = { path = "../jurisearch-ingest" }
+jurisearch-package = { path = "../jurisearch-package" }
 postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true

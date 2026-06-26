@@ -1,0 +1,16 @@
+[package]
+name = "jurisearch-package"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Pure contract crate: types + serde + canonicalisation + Signer/Verifier traits.
+# No I/O, no DB, no concrete crypto. The single source of truth for the producer<->client
+# package/manifest agreement (conception §3 DRY). Depended on by storage, cli, and the service.
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

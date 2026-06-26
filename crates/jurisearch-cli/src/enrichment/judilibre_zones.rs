@@ -152,6 +152,7 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         Some(source_uid),
         None,
         None,
+        None,
     )?;
     if search_exchange.outcome != OfficialApiOutcome::Ok {
         cache_zone_status_with_client(
@@ -191,6 +192,7 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
         Some(document_id),
         Some(source_uid),
         Some(provider_id.as_str()),
+        None,
         None,
     )?;
     if decision_exchange.outcome != OfficialApiOutcome::Ok {

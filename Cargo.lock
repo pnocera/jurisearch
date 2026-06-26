@@ -912,11 +912,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-package"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "jurisearch-storage"
 version = "0.1.0"
 dependencies = [
  "fs2",
  "jurisearch-ingest",
+ "jurisearch-package",
  "postgres",
  "serde",
  "serde_json",

@@ -32,6 +32,11 @@ pub struct InsertOfficialApiResponse<'a> {
     pub error: Option<&'a str>,
     pub run_id: Option<&'a str>,
     pub code_version: Option<&'a str>,
+    /// Explicit corpus attribution (design §4.1; P0). `Some(corpus)` is used verbatim — required for
+    /// rows with **no** subject document, e.g. a Legifrance citation lookup, which belongs to the
+    /// resolution's corpus. `None` derives the corpus from `subject_document_id`'s document; if that
+    /// yields nothing the NOT NULL `corpus` column makes the insert FAIL LOUDLY (no silent default).
+    pub corpus: Option<&'a str>,
 }
 
 /// Append one exchange to `official_api_responses`, returning its `response_id` (used to link a
@@ -55,6 +60,12 @@ pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
         }
         None => None,
     };
+    // `corpus` is the explicit `row.corpus` when given (a Legifrance lookup uses its resolution's
+    // corpus), else derived from the subject document (design §4.1; P0). The column is NOT NULL with
+    // no fallback here, so a genuinely unattributable archive row FAILS LOUDLY at insert rather than
+    // entering the replicated set unattributed (the single-corpus bootstrap fallback lives only in
+    // the migration backfill, never the runtime writer). `citation_key`-based derivation is NOT used
+    // at runtime because, with per-corpus resolutions, a citation key can legitimately span corpora.
     let inserted = client
         .query_one(
             "INSERT INTO official_api_responses (\
@@ -62,8 +73,9 @@ pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
                  subject_document_id, subject_source_uid, provider_object_id, citation_key, \
                  request_fingerprint, request_url, request_json, request_body, \
                  outcome, http_status, response_body, response_json, response_body_sha256, \
-                 error, run_id, code_version) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text::jsonb,$12,$13,$14,$15,$16::text::jsonb,$17,$18,$19,$20) \
+                 error, run_id, code_version, corpus) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text::jsonb,$12,$13,$14,$15,$16::text::jsonb,$17,$18,$19,$20, \
+                 COALESCE($21, (SELECT d.corpus FROM documents d WHERE d.document_id = $5))) \
              RETURNING response_id;",
             &[
                 &row.provider,
@@ -86,6 +98,7 @@ pub fn insert_official_api_response_with_client<C: postgres::GenericClient>(
                 &row.error,
                 &row.run_id,
                 &row.code_version,
+                &row.corpus,
             ],
         )
         .map_err(StorageError::PostgresClient)?;

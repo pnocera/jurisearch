@@ -257,6 +257,7 @@ pub(crate) fn collect_legislation_citations_payload(
                     &citation.article_number_norm,
                     &citation.code_name_norm,
                     &citation.canonical_query,
+                    document_id,
                 )
                 .map_err(storage_error_object)?;
             }
@@ -331,7 +332,8 @@ pub(crate) fn enrich_legislation_citations_payload(
             break;
         };
         for citation in citations {
-            let (Some(citation_key), Some(canonical_query)) = (
+            let (Some(corpus), Some(citation_key), Some(canonical_query)) = (
+                citation["corpus"].as_str(),
                 citation["citation_key"].as_str(),
                 citation["canonical_query"].as_str(),
             ) else {
@@ -340,6 +342,7 @@ pub(crate) fn enrich_legislation_citations_payload(
             considered += 1;
             let body = legifrance_code_search_body(canonical_query);
             let exchange = piste.legifrance_search_exchange(&body);
+            // The Legifrance lookup has no subject document; it belongs to this resolution's corpus.
             let response_id = archive_exchange(
                 &mut client,
                 &exchange,
@@ -348,6 +351,7 @@ pub(crate) fn enrich_legislation_citations_payload(
                 None,
                 None,
                 Some(citation_key),
+                Some(corpus),
             )?;
             let (status, error) = match exchange.outcome {
                 OfficialApiOutcome::Ok => {
@@ -374,6 +378,7 @@ pub(crate) fn enrich_legislation_citations_payload(
             };
             update_citation_resolution_with_client(
                 &mut client,
+                corpus,
                 citation_key,
                 status,
                 Some(response_id),

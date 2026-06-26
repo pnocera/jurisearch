@@ -5,6 +5,7 @@ members = [
     "crates/jurisearch-embed",
     "crates/jurisearch-ingest",
     "crates/jurisearch-official-api",
+    "crates/jurisearch-package",
     "crates/jurisearch-storage",
 ]
 resolver = "3"

@@ -20,14 +20,25 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
 
-    // Migration reached v16 and created the archive table.
+    // Migrations reached the current head (v18 added corpus attribution to the archive).
     let schema = postgres.execute_sql(
         "SELECT (value->>'schema_version') FROM index_manifest WHERE key = 'schema';",
     )?;
-    assert_eq!(schema.trim(), "17");
+    assert_eq!(schema.trim(), "18");
 
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+
+    // The archive's corpus is derived from its subject document (P0 attribution), so the subject
+    // decisions must exist for the NOT NULL `corpus` to resolve (else the insert correctly fails loud).
+    for doc in ["cass:JURITEXT0001", "cass:NOPOURVOI"] {
+        postgres.execute_sql(&format!(
+            "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
+               valid_from, source_payload_hash, canonical_json) \
+             VALUES ('{doc}','cass','decision','{doc}','Cass','Arret','corps','2024-01-01', \
+               'sha256:{doc}','{{}}');"
+        ))?;
+    }
 
     // A successful Judilibre /decision exchange.
     let response = json!({"id": "abc", "zones": {"motivations": []}});
@@ -43,6 +54,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
             subject_source_uid: Some("cass:JURITEXT0001"),
             provider_object_id: Some("abc"),
             citation_key: None,
+            corpus: None,
             request_fingerprint: "id=abc&resolve_references=false",
             request_url: Some("https://api.example/decision?id=abc"),
             request_json: &request,
@@ -72,6 +84,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
             subject_source_uid: Some("cass:NOPOURVOI"),
             provider_object_id: None,
             citation_key: None,
+            corpus: None,
             request_fingerprint: "local:unsupported-no-pourvoi",
             request_url: None,
             request_json: &empty,
@@ -113,6 +126,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
             subject_source_uid: Some("cass:JURITEXT0001"),
             provider_object_id: Some("abc"),
             citation_key: None,
+            corpus: None,
             request_fingerprint: "id=abc&resolve_references=false",
             request_url: Some("https://api.example/decision?id=abc"),
             request_json: &request,

@@ -117,18 +117,26 @@ pub fn upsert_citation_resolution_pending_with_client<C: postgres::GenericClient
     article_number_norm: &str,
     code_name_norm: &str,
     canonical_query: &str,
+    decision_document_id: &str,
 ) -> Result<(), StorageError> {
+    // Resolutions are keyed `(corpus, citation_key)` (per-corpus replicated data, INV-4), so the
+    // corpus comes from THIS occurrence's decision (`decision_document_id` → `documents.corpus`,
+    // design §4.1; P0), not from "all occurrences of the key" (which may legitimately span corpora).
+    // `ON CONFLICT (corpus, citation_key)` means a later corpus citing the same article creates its
+    // OWN resolution rather than silently inheriting the first corpus's attribution. The NOT NULL
+    // corpus column FAILS LOUDLY if the decision is unknown (no runtime fallback).
     client
         .execute(
             "INSERT INTO legislation_citation_resolutions (\
-                 citation_key, article_number_norm, code_name_norm, canonical_query) \
-             VALUES ($1,$2,$3,$4) \
-             ON CONFLICT (citation_key) DO NOTHING;",
+                 corpus, citation_key, article_number_norm, code_name_norm, canonical_query) \
+             VALUES ((SELECT corpus FROM documents WHERE document_id = $5), $1, $2, $3, $4) \
+             ON CONFLICT (corpus, citation_key) DO NOTHING;",
             &[
                 &citation_key,
                 &article_number_norm,
                 &code_name_norm,
                 &canonical_query,
+                &decision_document_id,
             ],
         )
         .map_err(StorageError::PostgresClient)?;
@@ -137,20 +145,24 @@ pub fn upsert_citation_resolution_pending_with_client<C: postgres::GenericClient
 
 /// Recompute `occurrence_count` on every resolution from the occurrence table (collect finalize).
 pub fn finalize_citation_occurrence_counts(postgres: &ManagedPostgres) -> Result<(), StorageError> {
+    // Count occurrences per (corpus, citation_key): an occurrence's corpus is its decision's corpus.
     postgres
         .execute_sql(
             "UPDATE legislation_citation_resolutions r \
              SET occurrence_count = (\
                  SELECT count(*) FROM decision_legislation_citations c \
-                 WHERE c.citation_key = r.citation_key), \
+                 JOIN documents d ON d.document_id = c.decision_document_id \
+                 WHERE c.citation_key = r.citation_key AND d.corpus = r.corpus), \
                  updated_at = now();",
         )
         .map(|_| ())
 }
 
 /// Page unique citation resolutions still needing a Legifrance call (`pending`, or `upstream_error`
-/// when `retry_errors`). Keyset on `citation_key`. Returns
-/// `{ "citations": [{citation_key, article_number_norm, code_name_norm, canonical_query}], "next_cursor" }`.
+/// when `retry_errors`). Keyset on `(corpus, citation_key)` — resolutions are per-corpus, so each
+/// citation carries its `corpus` and the cursor encodes both (delimited by the ASCII unit separator
+/// `\x1f`, which appears in neither a corpus token nor a citation key). Returns
+/// `{ "citations": [{corpus, citation_key, article_number_norm, code_name_norm, canonical_query}], "next_cursor" }`.
 pub fn load_pending_citation_resolutions_json(
     postgres: &ManagedPostgres,
     after_cursor: Option<&str>,
@@ -158,7 +170,14 @@ pub fn load_pending_citation_resolutions_json(
     limit: u32,
 ) -> Result<String, StorageError> {
     let cursor_predicate = after_cursor
-        .map(|cursor| format!("AND citation_key > {}", sql_string_literal(cursor)))
+        .and_then(|cursor| cursor.split_once('\u{1f}'))
+        .map(|(corpus, citation_key)| {
+            format!(
+                "AND (corpus, citation_key) > ({}, {})",
+                sql_string_literal(corpus),
+                sql_string_literal(citation_key)
+            )
+        })
         .unwrap_or_default();
     let status_predicate = if retry_errors {
         "legifrance_status IN ('pending','upstream_error','parse_error')"
@@ -169,32 +188,35 @@ pub fn load_pending_citation_resolutions_json(
     postgres.execute_sql(&format!(
         r#"
 WITH page AS (
-    SELECT citation_key, article_number_norm, code_name_norm, canonical_query
+    SELECT corpus, citation_key, article_number_norm, code_name_norm, canonical_query
     FROM legislation_citation_resolutions
     WHERE {status_predicate}
       {cursor_predicate}
-    ORDER BY citation_key
+    ORDER BY corpus, citation_key
     LIMIT {limit}
 )
 SELECT jsonb_build_object(
     'citations', COALESCE((
         SELECT jsonb_agg(jsonb_build_object(
+            'corpus', corpus,
             'citation_key', citation_key,
             'article_number_norm', article_number_norm,
             'code_name_norm', code_name_norm,
             'canonical_query', canonical_query
-        ) ORDER BY citation_key)
+        ) ORDER BY corpus, citation_key)
         FROM page
     ), '[]'::jsonb),
-    'next_cursor', (SELECT max(citation_key) FROM page)
+    'next_cursor', (SELECT corpus || chr(31) || citation_key
+                    FROM page ORDER BY corpus DESC, citation_key DESC LIMIT 1)
 )::text;
 "#
     ))
 }
 
-/// Record the result of a Legifrance call for one citation_key.
+/// Record the result of a Legifrance call for one `(corpus, citation_key)` resolution.
 pub fn update_citation_resolution_with_client<C: postgres::GenericClient>(
     client: &mut C,
+    corpus: &str,
     citation_key: &str,
     legifrance_status: &str,
     legifrance_response_id: Option<i64>,
@@ -204,10 +226,11 @@ pub fn update_citation_resolution_with_client<C: postgres::GenericClient>(
     client
         .execute(
             "UPDATE legislation_citation_resolutions \
-             SET legifrance_status = $2, legifrance_response_id = $3, \
-                 legifrance_request_fingerprint = $4, error = $5, fetched_at = now(), updated_at = now() \
-             WHERE citation_key = $1;",
+             SET legifrance_status = $3, legifrance_response_id = $4, \
+                 legifrance_request_fingerprint = $5, error = $6, fetched_at = now(), updated_at = now() \
+             WHERE corpus = $1 AND citation_key = $2;",
             &[
+                &corpus,
                 &citation_key,
                 &legifrance_status,
                 &legifrance_response_id,

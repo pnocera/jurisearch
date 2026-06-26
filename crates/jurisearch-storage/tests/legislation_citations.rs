@@ -49,6 +49,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
                 subject_source_uid: Some(doc),
                 provider_object_id: Some(doc),
                 citation_key: None,
+                corpus: None,
                 request_fingerprint: "id",
                 request_url: None,
                 request_json: &json!({}),
@@ -90,8 +91,68 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
             "609",
             "code de procédure civile",
             "609 code de procédure civile",
+            doc,
         )?;
     }
+
+    // Corpus attribution (P0, BLOCKER-2 fix): a Legifrance archive row has NO subject document, only
+    // the deduped citation_key — it must still resolve to exactly one corpus via the citation's
+    // occurrences (the document-derived path).
+    let legifrance_response = json!({"results": []});
+    insert_official_api_response_with_client(
+        &mut client,
+        &InsertOfficialApiResponse {
+            provider: "legifrance",
+            api_environment: "production",
+            endpoint: "/search/code",
+            http_method: "POST",
+            subject_document_id: None,
+            subject_source_uid: None,
+            provider_object_id: None,
+            citation_key: Some("legi-cite:art609cpc"),
+            // No subject document: the Legifrance lookup belongs to its resolution's corpus.
+            corpus: Some("core"),
+            request_fingerprint: "legifrance-search",
+            request_url: None,
+            request_json: &json!({}),
+            request_body: None,
+            outcome: "ok",
+            http_status: Some(200),
+            response_body: &legifrance_response.to_string(),
+            response_json: Some(&legifrance_response),
+            response_body_sha256: "sha256:y",
+            error: None,
+            run_id: None,
+            code_version: Some("test"),
+        },
+    )?;
+
+    // Every archived response (2 judilibre /decision via subject_document_id + 1 legifrance via
+    // citation_key) and the deduped resolution all attribute to exactly one corpus = 'core'.
+    let archive_corpora = client
+        .query(
+            "SELECT DISTINCT corpus FROM official_api_responses ORDER BY corpus;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    assert_eq!(
+        archive_corpora.len(),
+        1,
+        "every official_api_responses row resolves to exactly one corpus"
+    );
+    assert_eq!(archive_corpora[0].get::<_, String>("corpus"), "core");
+
+    let resolution_corpus: String = client
+        .query_one(
+            "SELECT corpus FROM legislation_citation_resolutions WHERE citation_key = $1;",
+            &[&"legi-cite:art609cpc"],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .get("corpus");
+    assert_eq!(
+        resolution_corpus, "core",
+        "the deduped resolution resolves to exactly one corpus"
+    );
 
     // load_archived_decisions_with_visa_json returns both decisions with their visa.
     let archived: serde_json::Value = serde_json::from_str(
@@ -122,6 +183,7 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
 
     update_citation_resolution_with_client(
         &mut client,
+        "core",
         "legi-cite:art609cpc",
         "ok",
         None,
@@ -139,5 +201,57 @@ fn legislation_citation_collect_and_resolve_round_trip() -> Result<(), StorageEr
         0,
         "resolved citation is no longer pending"
     );
+    Ok(())
+}
+
+#[test]
+fn per_corpus_citation_resolutions_do_not_collide() -> Result<(), StorageError> {
+    // r2 BLOCKER fix: resolutions are keyed (corpus, citation_key). The SAME legislation article
+    // cited from two corpora gets an INDEPENDENT resolution per corpus (per-corpus replicated data,
+    // INV-4) — never a cross-corpus collision and never silent attribution to the first corpus seen.
+    // The old global `citation_key` PK would have rejected the second row as a duplicate.
+    let Some(pg_config) = discover_pg_config("per-corpus resolutions")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-percorpus-cites.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    postgres.execute_sql(
+        "INSERT INTO legislation_citation_resolutions \
+             (corpus, citation_key, article_number_norm, code_name_norm, canonical_query) \
+         VALUES \
+             ('core','legi-cite:shared','609','code de procédure civile','609 cpc'), \
+             ('inpi','legi-cite:shared','609','code de procédure civile','609 cpc');",
+    )?;
+
+    let corpora = postgres.execute_sql(
+        "SELECT corpus FROM legislation_citation_resolutions \
+         WHERE citation_key = 'legi-cite:shared' ORDER BY corpus;",
+    )?;
+    assert_eq!(
+        corpora.split_whitespace().collect::<Vec<_>>(),
+        vec!["core", "inpi"],
+        "the same citation_key resolves to one independent resolution per corpus"
+    );
+
+    // The composite-cursor pending pager returns both corpora's pending rows, each carrying its corpus.
+    let pending: serde_json::Value = serde_json::from_str(&load_pending_citation_resolutions_json(
+        &postgres, None, false, 100,
+    )?)
+    .expect("pending JSON");
+    let citations = pending["citations"].as_array().expect("citations");
+    assert_eq!(
+        citations.len(),
+        2,
+        "both per-corpus resolutions are pending"
+    );
+    let corpora: Vec<&str> = citations
+        .iter()
+        .map(|c| c["corpus"].as_str().expect("corpus present"))
+        .collect();
+    assert_eq!(corpora, vec!["core", "inpi"]);
     Ok(())
 }
