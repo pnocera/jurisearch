@@ -23,6 +23,7 @@ jurisearch-storage = { path = "../jurisearch-storage" }
 anyhow.workspace = true
 clap.workspace = true
 postgres.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

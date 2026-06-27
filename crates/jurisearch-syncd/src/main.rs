@@ -61,7 +61,11 @@ enum Command {
         uri_base: String,
     },
     /// Report the cursor authority's view of every installed corpus.
-    Status,
+    Status {
+        /// Emit machine-readable JSON (the management CLI's primary result) instead of human lines.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -168,21 +172,30 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Status => {
+        Command::Status { json } => {
             let statuses = corpus_status(&postgres)?;
-            if statuses.is_empty() {
-                println!("no corpus installed");
-            }
-            for status in statuses {
-                println!(
-                    "corpus={} generation={} sequence={} baseline={} schema={} last_package={}",
-                    status.corpus,
-                    status.active_generation,
-                    status.sequence,
-                    status.baseline_id,
-                    status.schema_version,
-                    status.last_package_id.as_deref().unwrap_or("-"),
-                );
+            if json {
+                // The management CLI's primary result goes to stdout as stable JSON.
+                println!("{}", serde_json::to_string_pretty(&statuses)?);
+            } else {
+                if statuses.is_empty() {
+                    println!("no corpus installed");
+                }
+                for status in statuses {
+                    println!(
+                        "corpus={} generation={} sequence={} baseline={} schema={} fingerprint={} \
+                         last_package={} last_digest={} applied_at={}",
+                        status.corpus,
+                        status.active_generation,
+                        status.sequence,
+                        status.baseline_id,
+                        status.schema_version,
+                        status.embedding_fingerprint,
+                        status.last_package_id.as_deref().unwrap_or("-"),
+                        status.last_package_digest.as_deref().unwrap_or("-"),
+                        status.applied_at.as_deref().unwrap_or("-"),
+                    );
+                }
             }
         }
     }

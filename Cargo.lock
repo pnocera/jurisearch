@@ -1095,6 +1095,7 @@ dependencies = [
  "jurisearch-package",
  "jurisearch-storage",
  "postgres",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
