@@ -125,7 +125,7 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
     let after_cursor = req
         .cursor
         .as_deref()
-        .map(|cursor| parse_search_cursor(cursor, CliGroupBy::Document))
+        .map(|cursor| parse_search_cursor(cursor, GroupBy::Document))
         .transpose()?;
     reject_multi_corpus_zone_cursor(&after_cursor)?;
     let normalized_query_text = parade_query_text(&req.query);
@@ -388,9 +388,8 @@ mod snapshot_consistency_tests {
     #[test]
     fn zone_search_rejects_a_multi_corpus_cursor() {
         // A real `mc:document:...` cursor parses to a MultiCorpus cursor (the id keeps its `:`)...
-        let parsed =
-            parse_search_cursor("mc:document:0.01639344:core:cass:D1", CliGroupBy::Document)
-                .expect("a well-formed mc: cursor parses");
+        let parsed = parse_search_cursor("mc:document:0.01639344:core:cass:D1", GroupBy::Document)
+            .expect("a well-formed mc: cursor parses");
         assert!(matches!(parsed, ParsedSearchCursor::MultiCorpus { .. }));
         // ...and the zone path rejects it loudly (the main hybrid path rejects it too).
         let error = reject_multi_corpus_zone_cursor(&Some(parsed))

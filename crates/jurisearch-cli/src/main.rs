@@ -17,7 +17,7 @@ use std::{
 
 use jurisearch_core::{
     SCHEMA_VERSION,
-    contract::{CitationState, LegalKind, OutputFormat, agent_help},
+    contract::{LegalKind, OutputFormat, agent_help},
     error::{ErrorCode, ErrorObject, ProcessExit},
     eval::{
         LegalRetrievalFixture, phase1_eval_fixture_summary, phase1_eval_fixtures,
@@ -89,10 +89,9 @@ use jurisearch_storage::{
         prepare_legi_projection_statements,
     },
     retrieval::{
-        CitationResolutionQuery, DecisionFilters, GroupBy, HybridCandidateQuery, RelatedRelation,
-        RetrievalCursor, RetrievalMode, RetrievalOptions, corpus_source_coverage_json,
-        corpus_stats_json, document_diff_json, document_versions_json, hybrid_candidates_json,
-        inspect_document_json, rrf_weights,
+        DecisionFilters, GroupBy, HybridCandidateQuery, RelatedRelation, RetrievalMode,
+        RetrievalOptions, corpus_source_coverage_json, corpus_stats_json, document_diff_json,
+        document_versions_json, hybrid_candidates_json, inspect_document_json, rrf_weights,
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},

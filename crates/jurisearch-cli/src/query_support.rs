@@ -4,18 +4,10 @@
 use jurisearch_core::error::ErrorObject;
 use jurisearch_storage::retrieval::RetrievalOptions;
 
-pub(crate) fn parade_query_text(query: &str) -> Option<String> {
-    let terms = query
-        .split(|character: char| !character.is_alphanumeric())
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        None
-    } else {
-        Some(terms.join(" "))
-    }
-}
+/// ParadeDB lexical-text normalization moved to `jurisearch-query` (work/09 P4-4B) so `build_search`
+/// and the site search handler share it; re-exported so the eval runners' `crate::parade_query_text`
+/// references resolve unchanged.
+pub(crate) use jurisearch_query::parade_query_text;
 
 /// Validate user-supplied tuning at the CLI/session boundary (before SQL): weights must be finite
 /// and >= 0; probes in [1, 4096]. Invalid input is a `bad_input` error, not a silent clamp.

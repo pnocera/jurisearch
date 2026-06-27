@@ -13,14 +13,30 @@
 //! embedder runtime, or ingest stack.
 
 pub mod builders;
+pub mod citation;
+pub mod cite;
+pub mod cursor;
 pub mod embedder;
 pub mod errors;
+pub mod search;
+pub mod text;
 
 pub use builders::{
     CompareInput, ContextInput, FetchInput, RelatedInput, build_compare, build_context,
     build_fetch, build_related,
 };
+pub use citation::{ParsedCitationTarget, parse_citation_target};
+pub use cite::{
+    CiteInput, annotate_valid_matches, build_cite, candidate_valid_on, citation_state_name,
+    classify_citation_state, enforce_strict_citation,
+};
+pub use cursor::{ParsedSearchCursor, parse_search_cursor, validate_cursor_score};
 pub use embedder::{QueryEmbedder, QueryEmbedding};
 pub use errors::{
     dependency_unavailable, index_unavailable, no_results, parse_storage_json, storage_error_object,
+};
+pub use search::{SearchDecisionFilters, SearchInput, build_search, search_pagination_value};
+pub use text::{
+    LegiCitationRouting, find_ascii_ci, is_iso_date, legi_citation_routing, parade_query_text,
+    rfind_ascii_ci,
 };

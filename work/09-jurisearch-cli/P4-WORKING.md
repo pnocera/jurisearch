@@ -76,3 +76,45 @@ status · fingerprint-mismatch tests THROUGH the site dispatcher.
   session intact. UNCOMMITTED until GO.
 - [ ] 4B (after 4A GO): worker/read pools, full op set, search/cite → jurisearch-query, shared embedder
   Send+Sync + concurrency limit, concurrent-client tests, real pool health, fingerprint-mismatch via dispatcher.
+
+## 4B binding adjustments — codex design GO-with-adjustments (qa/20260627-163057)
+
+**Q1 readiness gate — the "fourth cut" (NOT pure-(c)).** Do NOT recompute coverage on the read path, but
+do NOT drop readiness validation either. Open the snapshot FIRST, then validate the writer-owned
+`query_readiness` STAMP *inside that snapshot* (snapshot-bound, no write, no coverage recompute), in a
+site/read-gate helper called by the handlers BEFORE the builder. New storage helper
+`load_query_readiness_in_snapshot(&mut dyn ReadSnapshot) -> Result<IngestReadinessReport, StorageError>`:
+derive the signature from `snapshot.active_corpora()` (corpus:generation:sequence, corpus-ordered — byte-
+identical to `active_read_signature`), `SELECT value::text FROM public.index_manifest WHERE
+key='query_readiness'` via `read_text`, fail on public(empty)/missing/malformed/stale — mirrors
+`load_query_readiness_with_client`. MULTI-CORPUS: DEFER readiness-gated multi-corpus site serving (fail
+closed when >1 corpus, same as the single-corpus stamp contract); health REPORTS the gap but the read
+gate must not pretend aggregate readiness. Applies to ALL site query handlers (fetch/cite/search/related/
+context/compare) before their builder.
+
+**Q2 build_search/build_cite boundary.** Adapter-side (CLI + site each): empty-query/top_k==0/retrieval-
+option validation; zone routing (zone NOT moved this slice → site search rejects `zone`); cursor parsing
+into ParsedSearchCursor (boundary, before snapshot); as_of default; kind→contract/storage vocab; authority
+preconditions (--kind decision, first-page-only/no-cursor); lexical pre-tokenization + "at least one
+searchable token" precedence. Builder-side: takes pre-resolved `authority_weight: Option<f64>`; uses
+`jurisearch_core::contract::{LegalKind,OutputFormat}` + storage retrieval types, NEVER CLI enums; an OWNED
+query-crate DecisionFilters-like input (Option<String> fields) borrowed into storage `DecisionFilters<'_>`
+inside build_search; carries `OutputFormat` explicitly (builder writes the `format` field).
+build_search takes `Option<&dyn QueryEmbedder>` (None for bm25-only — preserves lazy from_env: bm25 must
+NOT construct the embedder/probe network). build_cite takes `online_requested: bool` (source_unavailable +
+the online:{requested,checked:false} block + malformed/decision notes are response construction); the real
+`apply_online_citation_confirmation` network probe STAYS in the CLI adapter AFTER build_cite (overwrites
+response["online"]); strict check stays adapter-side AFTER online (preserves the both-fail order: online
+error before strict error). SITE: REJECT `online:true` at the boundary (safest P4B contract).
+
+**Q3 concurrency.** Worker-count = read-connection bound (acceptable for 4B; name it `max_workers` /
+`max_read_connections`, NOT idle/pool stats — it's bounded fresh-connection creation, not a reuse pool).
+ServerContext grows an embedder ref; workers hold `Arc<ReadHandle>` + `Arc<dyn QueryEmbedder+Send+Sync>` +
+`Arc<SiteDispatcher>` and build a borrowed ServerContext per connection. Add `Send+Sync` to the service
+embedder trait object + a COMPILE-TIME assert that `PreparedQueryEmbedder`/`OpenAiCompatibleClient` are
+Send+Sync (else per-worker embedders). Bounded `sync_channel` of accepted sockets; keep read/write
+timeouts (a slow persistent client holds a worker). Blocking semaphore (Mutex+Condvar permit guard) caps
+in-flight embeds; no async.
+
+**Tests:** site search/cite parity; site rejects `online:true`; missing/stale readiness stamp rejection;
+embedder fingerprint mismatch THROUGH the site dispatcher; worker-bound behavior with a fake store counter.

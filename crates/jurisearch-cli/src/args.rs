@@ -429,6 +429,15 @@ pub(crate) struct ServeSiteArgs {
     /// The read role's password (omit on a trusted/`peer`-auth socket).
     #[arg(long)]
     pub(crate) db_password: Option<String>,
+    /// Bounded worker count: the hard upper bound on simultaneous connections AND read-role
+    /// connections (each request opens + drops one read snapshot). Connection acceptance blocks when
+    /// all workers are busy (backpressure).
+    #[arg(long, default_value_t = 8)]
+    pub(crate) workers: usize,
+    /// Bounded in-flight query embeddings against the local embedding endpoint. A dense/hybrid request
+    /// blocks for a permit; lexical-only requests never embed. Defaults to the worker count.
+    #[arg(long)]
+    pub(crate) max_concurrent_embeds: Option<usize>,
 }
 
 #[derive(Debug, Args)]

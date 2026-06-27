@@ -1,11 +1,28 @@
-//! search command: hybrid/bm25/dense retrieval, citation routing, pagination cursors.
+//! search command: hybrid/bm25/dense retrieval, citation routing, pagination cursors. The
+//! response-construction engine (intent routing, structured-citation resolution, authority re-rank, the
+//! response envelope) moved to `jurisearch_query::build_search` (work/09 P4-4B). This is the thin CLI
+//! adapter: boundary validation, zone routing, authority preconditions, cursor parsing, lexical
+//! pre-tokenization, the readiness gate, the index open, and the (lazy) query embedder. The
+//! boundary→`SearchInput` resolution ([`resolve_search_input`]) is shared with the site search handler.
 
-use jurisearch_storage::query::{QueryStore, ReadSnapshot};
-use jurisearch_storage::retrieval::{
-    hybrid_candidates_in_snapshot, resolve_legi_citation_in_snapshot,
+use std::cell::OnceCell;
+
+use jurisearch_query::{
+    QueryEmbedder, QueryEmbedding, SearchDecisionFilters, SearchInput, build_search,
 };
+use jurisearch_storage::query::QueryStore;
 
 use crate::*;
+
+// The pure search helpers now live in `jurisearch-query`; re-export the ones the zone path and eval
+// runners use so their `crate::{…}` references keep resolving.
+pub(crate) use jurisearch_query::{
+    ParsedSearchCursor, parse_search_cursor, search_pagination_value,
+};
+// `is_iso_date` / `legi_citation_routing` are exercised by the CLI routing unit tests (via `crate::*`);
+// the production routing that used them now lives in `build_search`, so they are test-only here.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use jurisearch_query::{is_iso_date, legi_citation_routing};
 
 pub(crate) fn emit_search(req: SearchRequest) -> anyhow::Result<()> {
     match search_payload(req) {
@@ -14,35 +31,25 @@ pub(crate) fn emit_search(req: SearchRequest) -> anyhow::Result<()> {
     }
 }
 
-/// The shared `pagination` block (cursor note + guidance) used by both the whole-decision search and
-/// the zone search, so the two surfaces stay consistent.
-pub(crate) fn search_pagination_value(
-    requested_top_k: u32,
-    after_cursor: Option<&str>,
-    returned: usize,
-    cursor_supported: bool,
-    next_cursor: Option<&str>,
-) -> Value {
-    let has_more = next_cursor.is_some();
-    json!({
-        "requested_top_k": requested_top_k,
-        "after_cursor": after_cursor,
-        "returned": returned,
-        "possibly_truncated": has_more,
-        "cursor_supported": cursor_supported,
-        "next_cursor": next_cursor,
-        "cursor_note": "Use next_cursor as --cursor on the CLI or cursor in session JSON to request the next page with the same query/filter inputs. Cursor paging walks the ranked relevance pool, not an exhaustive corpus scan.",
-        "guidance": if has_more {
-            Some("Use next_cursor as the next cursor value, or increase top_k (or --top-k on the CLI) to inspect a wider page.")
-        } else {
-            None
-        }
-    })
+pub(crate) fn search_payload(req: SearchRequest) -> Result<Value, ErrorObject> {
+    // Boundary validation shared by the one-shot and session paths (and the site handler), run BEFORE
+    // zone routing so a zone search is validated identically.
+    validate_search_common(&req)?;
+    // Explicit opt-in: --zone routes to the parallel official-zone subsystem (Cassation-only), which
+    // bypasses the chunk readiness gate and uses its own zone index. Absent --zone, behaviour is
+    // byte-identical to the whole-decision search below.
+    if let Some(zone) = req.zone {
+        return zone_search_payload(req, zone);
+    }
+    let input = resolve_search_input(&req)?;
+    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
+    let postgres = open_index(index_dir.as_path())?;
+    run_search_with_input(&postgres, &input, true, None)
 }
 
-pub(crate) fn search_payload(req: SearchRequest) -> Result<Value, ErrorObject> {
-    // Boundary validation shared by the one-shot and session paths (previously duplicated in
-    // dispatch::run and session::session_search_payload). The one-shot strings are canonical.
+/// The search validation common to the zone and whole-decision paths (and the site handler): a
+/// non-empty query, `top_k >= 1`, and well-formed retrieval-tuning options. Runs before zone routing.
+pub(crate) fn validate_search_common(req: &SearchRequest) -> Result<(), ErrorObject> {
     if req.query.trim().is_empty() {
         return Err(ErrorObject::bad_input("search query must not be empty"));
     }
@@ -50,12 +57,15 @@ pub(crate) fn search_payload(req: SearchRequest) -> Result<Value, ErrorObject> {
         return Err(ErrorObject::bad_input("search --top-k must be at least 1"));
     }
     validate_retrieval_options(&req.retrieval_options())?;
-    // Explicit opt-in: --zone routes to the parallel official-zone subsystem (Cassation-only), which
-    // bypasses the chunk readiness gate and uses its own zone index. Absent --zone, behaviour is
-    // byte-identical to the whole-decision search below.
-    if let Some(zone) = req.zone {
-        return zone_search_payload(req, zone);
-    }
+    Ok(())
+}
+
+/// Resolve a NON-ZONE search request into the side-effect-free builder's [`SearchInput`]: authority
+/// preconditions, mode/format, cursor parsing (boundary validation), lexical pre-tokenization with the
+/// "at least one searchable token" precedence, and the kind/as-of/filter resolution. Assumes
+/// [`validate_search_common`] already ran. Shared by the CLI one-shot path and the site search handler,
+/// so both apply byte-identical boundary rules; neither opens an index here.
+pub(crate) fn resolve_search_input(req: &SearchRequest) -> Result<SearchInput, ErrorObject> {
     // Authority routing (non-zone main path only — the zone path implies decisions and gates itself).
     // `0.0`/unset is inert (`effective_authority_weight` is None), so these rejections never fire OFF.
     if effective_authority_weight(&req.retrieval_options()).is_some() {
@@ -75,7 +85,7 @@ pub(crate) fn search_payload(req: SearchRequest) -> Result<Value, ErrorObject> {
     let after_cursor = req
         .cursor
         .as_deref()
-        .map(|cursor| parse_search_cursor(cursor, req.group_by))
+        .map(|cursor| parse_search_cursor(cursor, req.group_by.into()))
         .transpose()?;
     let normalized_query_text = parade_query_text(&req.query);
     let query_text = if retrieval_mode.uses_lexical() {
@@ -89,93 +99,118 @@ pub(crate) fn search_payload(req: SearchRequest) -> Result<Value, ErrorObject> {
     } else {
         req.query.trim().to_owned()
     };
-    let index_dir = require_existing_index_dir(req.index_dir.as_deref())?;
     let kind: LegalKind = req.kind.into();
-
-    let postgres = open_index(index_dir.as_path())?;
-    search_with_postgres(
-        &postgres,
-        &req,
+    Ok(make_search_input(
+        req,
         retrieval_mode,
         output_format,
-        after_cursor.as_ref(),
-        &query_text,
+        after_cursor,
+        query_text,
         kind,
-        true,
-        None,
-    )
+    ))
 }
 
-/// A citation-shaped query parsed for structured resolution: an `Article <n>` reference plus the
-/// as-of date that pins the version (from an `en vigueur au <date>` suffix, else the caller default).
-pub(crate) struct LegiCitationRouting {
-    /// The citation text with any `en vigueur au <date>` suffix stripped, used for the resolver's
-    /// exact-citation-match ranking (so a temporal query still matches the stored citation).
-    pub(crate) citation_query: String,
-    pub(crate) article_number: String,
-    pub(crate) code_hint: Option<String>,
-    pub(crate) as_of: String,
-}
-
-/// Classify a query for intent routing. Returns `Some` when the query is a citation-shaped LEGI
-/// lookup (contains an `Article <n>` reference, optionally with an `en vigueur au <date>` temporal
-/// suffix) — those route to structured citation resolution. `None` means a conceptual query that
-/// goes to hybrid semantic search. This classification is production-visible (the shared search
-/// path), so the gate measures the same routing users hit.
-pub(crate) fn legi_citation_routing(
-    query: &str,
-    default_as_of: &str,
-) -> Option<LegiCitationRouting> {
-    const EN_VIGUEUR: &str = " en vigueur au ";
-    let (article_part, as_of) = match find_ascii_ci(query, EN_VIGUEUR) {
-        Some(idx) => {
-            let after = query[idx + EN_VIGUEUR.len()..].trim();
-            let date = after.split_whitespace().next().unwrap_or(after);
-            let as_of = if is_iso_date(date) {
-                date.to_owned()
-            } else {
-                default_as_of.to_owned()
-            };
-            (query[..idx].trim(), as_of)
-        }
-        None => (query.trim(), default_as_of.to_owned()),
+/// Assemble the [`SearchInput`] from a request and its already-resolved retrieval parameters. Pure (no
+/// I/O); shared by [`resolve_search_input`] and the eval `search_with_postgres` entry.
+fn make_search_input(
+    req: &SearchRequest,
+    retrieval_mode: RetrievalMode,
+    output_format: OutputFormat,
+    after_cursor: Option<ParsedSearchCursor>,
+    query_text: String,
+    kind: LegalKind,
+) -> SearchInput {
+    let kind_filter = match kind {
+        LegalKind::Code => Some("article"),
+        LegalKind::Decision => Some("decision"),
+        LegalKind::All => None,
     };
-    const ARTICLE: &str = "article ";
-    let pos = rfind_ascii_ci(article_part, ARTICLE)?;
-    let article_number = article_part[pos + ARTICLE.len()..].trim();
-    if article_number.is_empty() {
-        return None;
+    SearchInput {
+        query: req.query.clone(),
+        query_text,
+        retrieval_mode,
+        group_by: req.group_by.into(),
+        output_format,
+        top_k: req.top_k,
+        cursor_input: req.cursor.clone(),
+        after_cursor,
+        as_of: req.as_of.clone().unwrap_or_else(today_utc),
+        kind_filter,
+        options: req.retrieval_options(),
+        decision_filters: SearchDecisionFilters {
+            jurisdiction: req.court.clone(),
+            formation: req.formation.clone(),
+            publication: req.publication.clone(),
+            decided_from: req.decided_from.clone(),
+            decided_to: req.decided_to.clone(),
+        },
+        authority_weight: effective_authority_weight(&req.retrieval_options()),
     }
-    let code_hint = article_part[..pos].trim();
-    Some(LegiCitationRouting {
-        citation_query: article_part.to_owned(),
-        article_number: article_number.to_owned(),
-        code_hint: (!code_hint.is_empty()).then(|| code_hint.to_owned()),
-        as_of,
-    })
 }
 
-pub(crate) fn is_iso_date(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() == 10
-        && bytes.iter().enumerate().all(|(index, &byte)| {
-            if index == 4 || index == 7 {
-                byte == b'-'
-            } else {
-                byte.is_ascii_digit()
-            }
-        })
+/// A `jurisearch_query::QueryEmbedder` that builds the heavy `PreparedQueryEmbedder` LAZILY (or reuses a
+/// batch caller's). `build_search` only calls `embed` on the hybrid candidate path, NOT for a
+/// structured-citation hit or a bm25 request — so wrapping the embedder this way preserves the prior
+/// behaviour where a citation-routed query (even in Hybrid mode) never constructs the embedder or probes
+/// the embedding endpoint. A `None` reused embedder builds one from the environment on first `embed`.
+struct LazyQueryEmbedder<'a> {
+    reused: Option<&'a PreparedQueryEmbedder>,
+    built: OnceCell<PreparedQueryEmbedder>,
 }
 
-/// Run one search against an already-open index. Split out from `search_payload` so an
-/// eval/batch path can `open_index` once and run many queries under a single Postgres lifecycle
-/// (avoiding per-query cold starts). Query/kind validation and index opening stay in
-/// `search_payload` to preserve error precedence (an unsearchable query reports `bad_input`
-/// before any index check).
-///
-/// Intent routing: a citation-shaped query (`Article <n>`, optionally `en vigueur au <date>`) in
-/// Hybrid mode resolves structurally (exact article + as-of validity window); conceptual queries
-/// and explicit bm25/dense modes use hybrid search. A `routing` object records the audit trail.
+impl<'a> LazyQueryEmbedder<'a> {
+    fn new(reused: Option<&'a PreparedQueryEmbedder>) -> Self {
+        Self {
+            reused,
+            built: OnceCell::new(),
+        }
+    }
+}
+
+impl QueryEmbedder for LazyQueryEmbedder<'_> {
+    fn embed(&self, text: &str) -> Result<QueryEmbedding, ErrorObject> {
+        if let Some(embedder) = self.reused {
+            return QueryEmbedder::embed(embedder, text);
+        }
+        if self.built.get().is_none() {
+            let built = PreparedQueryEmbedder::from_env()?;
+            // Single-threaded one-shot path; a redundant set (never happens here) would be ignored.
+            let _ = self.built.set(built);
+        }
+        QueryEmbedder::embed(self.built.get().expect("just built"), text)
+    }
+}
+
+/// Run a prepared search against an already-open managed index: the readiness gate (a pre-snapshot
+/// precondition, keyed off the request's retrieval mode), one read snapshot, and the side-effect-free
+/// builder with a lazily-constructed query embedder. Shared by the CLI one-shot path and the eval
+/// `search_with_postgres` entry. (The site service has its own snapshot-bound readiness gate + store.)
+fn run_search_with_input(
+    postgres: &ManagedPostgres,
+    input: &SearchInput,
+    verify_readiness: bool,
+    embedder: Option<&PreparedQueryEmbedder>,
+) -> Result<Value, ErrorObject> {
+    if verify_readiness {
+        let readiness_gate = if input.retrieval_mode.uses_dense() {
+            QueryReadinessGate::Search
+        } else {
+            QueryReadinessGate::SearchLexical
+        };
+        ensure_query_readiness(postgres, readiness_gate)?;
+    }
+    // work/09 P3B: the readiness gate is an adapter-side precondition (above, pre-snapshot); the request
+    // then runs all reads — structured-citation resolution AND the hybrid fallback — through ONE read
+    // snapshot, so a generation swap mid-request can never split the two reads across topologies.
+    let lazy = LazyQueryEmbedder::new(embedder);
+    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    build_search(input, &mut *snapshot, Some(&lazy as &dyn QueryEmbedder))
+}
+
+/// Run one search against an already-open index (the eval/batch entry). Split from `search_payload` so
+/// a batch path can `open_index` once and run many queries under a single Postgres lifecycle. Query/kind
+/// validation and index opening stay in `search_payload` (preserving error precedence). Builds the
+/// `SearchInput` from the caller's explicit parameters, then defers to [`run_search_with_input`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn search_with_postgres(
     postgres: &ManagedPostgres,
@@ -192,439 +227,13 @@ pub(crate) fn search_with_postgres(
     // A reused query embedder for batch callers. `None` builds a fresh one inline (one-shot path).
     embedder: Option<&PreparedQueryEmbedder>,
 ) -> Result<Value, ErrorObject> {
-    if verify_readiness {
-        let readiness_gate = if retrieval_mode.uses_dense() {
-            QueryReadinessGate::Search
-        } else {
-            QueryReadinessGate::SearchLexical
-        };
-        ensure_query_readiness(postgres, readiness_gate)?;
-    }
-    // work/09 P3B: the readiness gate is an adapter-side precondition (above, pre-snapshot); the request
-    // then runs all reads — structured-citation resolution AND the hybrid fallback — through ONE read
-    // snapshot, so a generation swap mid-request can never split the two reads across topologies.
-    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
-    let mut execution = SearchExecution::new(
-        &mut *snapshot,
+    let input = make_search_input(
         req,
         retrieval_mode,
-        query_text,
-        after_cursor,
+        output_format,
+        after_cursor.cloned(),
+        query_text.to_owned(),
         kind,
-        embedder,
     );
-    let routed = execution.run_structured_citation_or_fallback()?;
-    execution.apply_search_response_envelope(routed, output_format)
-}
-
-/// The candidate-execution context for one search against an already-open index: the borrowed
-/// inputs plus the request-derived limits/filters. Bundling them lets the routing, candidate
-/// execution, and response-shaping steps be small `&self` methods instead of one long function,
-/// without threading a dozen locals through each. Postgres stays concrete (no retriever trait).
-struct SearchExecution<'a> {
-    snapshot: &'a mut dyn ReadSnapshot,
-    req: &'a SearchRequest,
-    retrieval_mode: RetrievalMode,
-    query_text: &'a str,
-    after_cursor: Option<&'a ParsedSearchCursor>,
-    embedder: Option<&'a PreparedQueryEmbedder>,
-    as_of: String,
-    kind_filter: Option<&'static str>,
-    group_by: GroupBy,
-    lexical_limit: u32,
-    dense_limit: u32,
-    query_limit: u32,
-    /// Effective authority re-rank weight (A4): `Some(w>0.0)` enables the decision-only re-rank, widens
-    /// `query_limit`, projects `publication`, and forces first-page-only paging. `None` is the OFF path.
-    authority_weight: Option<f64>,
-    /// The per-grouping clamped window factor `W_eff = min(AUTHORITY_RERANK_WINDOW, pool_multiplier)`
-    /// used when authority is ON (`1` when OFF). Reported in the response's `authority` block.
-    window_factor: u32,
-}
-
-/// The routed candidate set plus its intent-routing audit labels, before response-envelope shaping.
-struct RoutedSearch {
-    response: Value,
-    query_type: &'static str,
-    chosen_backend: &'static str,
-    fallback_path: &'static str,
-}
-
-impl<'a> SearchExecution<'a> {
-    fn new(
-        snapshot: &'a mut dyn ReadSnapshot,
-        req: &'a SearchRequest,
-        retrieval_mode: RetrievalMode,
-        query_text: &'a str,
-        after_cursor: Option<&'a ParsedSearchCursor>,
-        kind: LegalKind,
-        embedder: Option<&'a PreparedQueryEmbedder>,
-    ) -> Self {
-        let as_of = req.as_of.clone().unwrap_or_else(today_utc);
-        let kind_filter = match kind {
-            LegalKind::Code => Some("article"),
-            LegalKind::Decision => Some("decision"),
-            LegalKind::All => None,
-        };
-        // Document grouping collapses many chunks per article, so overfetch a deeper pool to still
-        // yield up to top_k UNIQUE documents (reported smaller only when the pool is exhausted).
-        let group_by: GroupBy = req.group_by.into();
-        let pool_multiplier = match group_by {
-            GroupBy::Document => 20,
-            GroupBy::Chunk => 4,
-        };
-        let lexical_limit = req.top_k.saturating_mul(pool_multiplier);
-        let dense_limit = req.top_k.saturating_mul(pool_multiplier);
-        // Authority (A4): when ON, widen the fetched window to `top_k * W_eff` so the re-rank has a
-        // deeper same-relevance pool. `W_eff` is clamped to the arm pool multiplier so the window can
-        // never outrun the candidate set feeding RRF. OFF keeps today's exact `top_k + 1`.
-        let authority_weight = effective_authority_weight(&req.retrieval_options());
-        let window_factor = if authority_weight.is_some() {
-            AUTHORITY_RERANK_WINDOW.min(pool_multiplier)
-        } else {
-            1
-        };
-        let query_limit = if authority_weight.is_some() {
-            req.top_k.saturating_mul(window_factor).saturating_add(1)
-        } else {
-            req.top_k.saturating_add(1)
-        };
-        Self {
-            snapshot,
-            req,
-            retrieval_mode,
-            query_text,
-            after_cursor,
-            embedder,
-            as_of,
-            kind_filter,
-            group_by,
-            lexical_limit,
-            dense_limit,
-            query_limit,
-            authority_weight,
-            window_factor,
-        }
-    }
-
-    /// Hybrid retrieval (embedding + BM25/dense/RRF). Run for conceptual queries, explicit bm25/dense
-    /// modes, or as the fallback when structured citation resolution finds nothing.
-    fn run_hybrid_candidates(&mut self) -> Result<Value, ErrorObject> {
-        let (query_embedding, embedding_fingerprint) = if self.retrieval_mode.uses_dense() {
-            let (literal, fingerprint) = match self.embedder {
-                Some(prepared) => prepared.embed(self.req.query.as_str())?,
-                None => PreparedQueryEmbedder::from_env()?.embed(self.req.query.as_str())?,
-            };
-            (Some(literal), Some(fingerprint))
-        } else {
-            (None, None)
-        };
-        let response = hybrid_candidates_in_snapshot(
-            self.snapshot,
-            &HybridCandidateQuery {
-                query_text: self.query_text,
-                query_embedding: query_embedding.as_deref(),
-                embedding_fingerprint: embedding_fingerprint.as_deref(),
-                retrieval_mode: self.retrieval_mode,
-                group_by: self.group_by,
-                options: self.req.retrieval_options(),
-                after_cursor: self
-                    .after_cursor
-                    .map(ParsedSearchCursor::as_retrieval_cursor),
-                as_of: self.as_of.as_str(),
-                kind_filter: self.kind_filter,
-                project_authority: self.authority_weight.is_some(),
-                decision_filters: self.req.decision_filters(),
-                lexical_limit: self.lexical_limit,
-                dense_limit: self.dense_limit,
-                limit: self.query_limit,
-            },
-        )
-        .map_err(storage_error_object)?;
-        serde_json::from_str::<Value>(&response)
-            .map_err(|error| dependency_unavailable(error.to_string()))
-    }
-
-    /// Intent routing. A citation-shaped query (`Article <n>`) in Hybrid mode resolves structurally;
-    /// a structured miss falls back to hybrid so a malformed citation still returns results. Conceptual
-    /// queries and explicit bm25/dense modes go straight to hybrid.
-    fn run_structured_citation_or_fallback(&mut self) -> Result<RoutedSearch, ErrorObject> {
-        let citation_intent = legi_citation_routing(&self.req.query, self.as_of.as_str());
-        let query_type = if citation_intent.is_some() {
-            "citation"
-        } else {
-            "semantic"
-        };
-        let (response, chosen_backend, fallback_path) = match citation_intent {
-            Some(parsed) if matches!(self.retrieval_mode, RetrievalMode::Hybrid) => {
-                let structured = resolve_legi_citation_in_snapshot(
-                    self.snapshot,
-                    &CitationResolutionQuery {
-                        query: parsed.citation_query.as_str(),
-                        article_number: parsed.article_number.as_str(),
-                        code_hint: parsed.code_hint.as_deref(),
-                        as_of: parsed.as_of.as_str(),
-                        kind_filter: self.kind_filter,
-                        // Structured results have no pagination cursor; request exactly top_k so the
-                        // response never reports a phantom truncation it cannot page past.
-                        limit: self.req.top_k,
-                    },
-                )
-                .map_err(storage_error_object)?;
-                let structured: Value = serde_json::from_str(&structured)
-                    .map_err(|error| dependency_unavailable(error.to_string()))?;
-                let count = structured["candidates"].as_array().map_or(0, Vec::len);
-                if count > 0 {
-                    (structured, "structured_citation", "none")
-                } else {
-                    (
-                        self.run_hybrid_candidates()?,
-                        self.retrieval_mode.as_str(),
-                        "hybrid_fallback",
-                    )
-                }
-            }
-            _ => (
-                self.run_hybrid_candidates()?,
-                self.retrieval_mode.as_str(),
-                "none",
-            ),
-        };
-        Ok(RoutedSearch {
-            response,
-            query_type,
-            chosen_backend,
-            fallback_path,
-        })
-    }
-
-    /// Shape the routed candidate set into the final `SearchResponse`: expansion/format/limit
-    /// decoration, top_k truncation + next-cursor, pagination block, the intent-routing audit, and
-    /// (detailed only) diagnostics. Maps an empty candidate set to `no_results`.
-    fn apply_search_response_envelope(
-        &self,
-        routed: RoutedSearch,
-        output_format: OutputFormat,
-    ) -> Result<Value, ErrorObject> {
-        let RoutedSearch {
-            mut response,
-            query_type,
-            chosen_backend,
-            fallback_path,
-        } = routed;
-        let routed_candidate_count = response["candidates"].as_array().map_or(0, Vec::len);
-        let expansion = expand_query(&self.req.query);
-        response["format"] = json!(output_format.as_str());
-        response["limit"] = json!(self.req.top_k);
-        response["expansion_seed_version"] = json!(expansion.seed_version);
-        response["expanded_terms"] = json!(expansion.expanded_terms);
-        // Authority re-rank (A4): reorder the widened window by within-order publication authority
-        // BEFORE truncation, so the most authoritative of the near-tied top results surfaces. Only on
-        // the hybrid candidate path — structured citation results are an exact set with no ranking band.
-        let mut authority_applied = false;
-        if chosen_backend != "structured_citation"
-            && let Some(weight) = self.authority_weight
-            && let Some(candidates) = response["candidates"].as_array_mut()
-        {
-            authority_rerank(candidates, weight, AUTHORITY_DEFAULT_BAND);
-            authority_applied = true;
-        }
-        let mut next_cursor = None;
-        let top_k = self.req.top_k as usize;
-        if let Some(candidates) = response["candidates"].as_array_mut()
-            && candidates.len() > top_k
-        {
-            candidates.truncate(top_k);
-            // Storage always projects a cursor; keep next_cursor tied to the last displayed row.
-            next_cursor = candidates
-                .last()
-                .and_then(|candidate| candidate["cursor"].as_str().map(str::to_owned));
-        }
-        let returned = response["candidates"].as_array().map_or(0, Vec::len);
-        // Structured citation results are an exact, fully-returned resolution set with no ranking
-        // cursor. Authority re-rank is first-page-only in v1: it reorders rows away from SQL keyset
-        // order, so no single (score,id) cursor can represent the page — disable paging for it too.
-        let cursor_supported = chosen_backend != "structured_citation" && !authority_applied;
-        if authority_applied {
-            next_cursor = None;
-        }
-        response["pagination"] = search_pagination_value(
-            self.req.top_k,
-            self.req.cursor.as_deref(),
-            returned,
-            cursor_supported,
-            next_cursor.as_deref(),
-        );
-        if authority_applied {
-            response["pagination"]["cursor_note"] = json!(
-                "Authority re-rank is first-page-only in v1: cursor paging is disabled for this \
-                 response. Increase --top-k (or top_k in session JSON) to inspect a wider \
-                 authority-ranked window."
-            );
-            response["authority"] = json!({
-                "enabled": true,
-                "weight": self.authority_weight,
-                "window_factor": self.window_factor,
-                "paging": "first_page_only",
-            });
-        }
-        // Intent-routing audit: prove the resolver was used because the input is structurally
-        // resolvable (query_type=citation, backend=structured_citation), not because the evaluator
-        // knew the answer. Recorded on every search, structured and hybrid alike.
-        response["routing"] = json!({
-            "query_type": query_type,
-            "chosen_backend": chosen_backend,
-            "candidate_count": routed_candidate_count,
-            "fallback_path": fallback_path,
-        });
-        if matches!(output_format, OutputFormat::Detailed) {
-            response["diagnostics"] = json!({
-                "query_input": self.req.query.clone(),
-                "lexical_query_text": if self.retrieval_mode.uses_lexical() {
-                    Some(self.query_text)
-                } else {
-                    None
-                },
-                "retrieval": {
-                    "mode": self.retrieval_mode.as_str(),
-                    "uses_lexical": self.retrieval_mode.uses_lexical(),
-                    "uses_dense": self.retrieval_mode.uses_dense(),
-                    "lexical_limit": self.lexical_limit,
-                    "dense_limit": self.dense_limit,
-                    "query_limit": self.query_limit,
-                    "kind_filter": self.kind_filter,
-                    "after_cursor": self.req.cursor.as_deref(),
-                }
-            });
-        }
-        if response["candidates"]
-            .as_array()
-            .is_some_and(|candidates| candidates.is_empty())
-        {
-            Err(no_results("search returned no candidates"))
-        } else {
-            Ok(response)
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum ParsedSearchCursor {
-    Chunk {
-        score: String,
-        chunk_id: String,
-    },
-    Document {
-        score: String,
-        document_id: String,
-    },
-    /// A multi-corpus fan-out cursor `mc:<group>:<cross_score>:<corpus>:<id>` (work/09 P3C).
-    MultiCorpus {
-        score: String,
-        corpus: String,
-        id: String,
-    },
-}
-
-impl ParsedSearchCursor {
-    pub(crate) fn as_retrieval_cursor(&self) -> RetrievalCursor<'_> {
-        match self {
-            Self::Chunk { score, chunk_id } => RetrievalCursor::Chunk { score, chunk_id },
-            Self::Document { score, document_id } => {
-                RetrievalCursor::Document { score, document_id }
-            }
-            Self::MultiCorpus { score, corpus, id } => {
-                RetrievalCursor::MultiCorpus { score, corpus, id }
-            }
-        }
-    }
-}
-
-pub(crate) fn validate_cursor_score(score: &str, tail: &str) -> Result<(), ErrorObject> {
-    let parsed = score.parse::<f64>().map_err(|_| {
-        ErrorObject::bad_input(
-            "search --cursor must start with a numeric score followed by ':' and an id",
-        )
-    })?;
-    if !parsed.is_finite() || parsed < 0.0 || tail.trim().is_empty() {
-        return Err(ErrorObject::bad_input(
-            "search --cursor must be a finite non-negative score followed by ':' and an id",
-        ));
-    }
-    Ok(())
-}
-
-/// Parse the opaque cursor, tagged by grouping. An `mc:`-prefixed cursor is a multi-corpus fan-out
-/// cursor; a `doc:`-prefixed cursor is a document cursor; an unprefixed `<score>:<chunk_id>` is a chunk
-/// cursor. A cursor from the other grouping is rejected rather than silently mis-paging.
-pub(crate) fn parse_search_cursor(
-    cursor: &str,
-    group_by: CliGroupBy,
-) -> Result<ParsedSearchCursor, ErrorObject> {
-    if let Some(rest) = cursor.strip_prefix("mc:") {
-        // `mc:<group>:<cross_score>:<corpus>:<id>` — the id may itself contain ':' (e.g. `cass:D1#0`),
-        // so split into exactly four fields and keep the remainder as the id.
-        let parts: Vec<&str> = rest.splitn(4, ':').collect();
-        let [group, score, corpus, id] = parts.as_slice() else {
-            return Err(ErrorObject::bad_input(
-                "malformed multi-corpus cursor (expected mc:<group>:<score>:<corpus>:<id>)",
-            ));
-        };
-        let cursor_group = match *group {
-            "chunk" => CliGroupBy::Chunk,
-            "document" => CliGroupBy::Document,
-            other => {
-                return Err(ErrorObject::bad_input(format!(
-                    "multi-corpus cursor has an unknown grouping `{other}`"
-                )));
-            }
-        };
-        if cursor_group != group_by {
-            return Err(ErrorObject::bad_input(format!(
-                "this is a `{group}`-grouped multi-corpus cursor; rerun with --group-by {group}"
-            )));
-        }
-        validate_cursor_score(score, id)?;
-        if corpus.trim().is_empty() {
-            return Err(ErrorObject::bad_input(
-                "multi-corpus cursor is missing its corpus",
-            ));
-        }
-        return Ok(ParsedSearchCursor::MultiCorpus {
-            score: (*score).to_owned(),
-            corpus: (*corpus).to_owned(),
-            id: (*id).to_owned(),
-        });
-    }
-    if let Some(rest) = cursor.strip_prefix("doc:") {
-        if group_by != CliGroupBy::Document {
-            return Err(ErrorObject::bad_input(
-                "this is a document cursor; rerun with --group-by document",
-            ));
-        }
-        let (score, document_id) = rest.split_once(':').ok_or_else(|| {
-            ErrorObject::bad_input("malformed document cursor (expected doc:<score>:<document_id>)")
-        })?;
-        validate_cursor_score(score, document_id)?;
-        Ok(ParsedSearchCursor::Document {
-            score: score.to_owned(),
-            document_id: document_id.to_owned(),
-        })
-    } else {
-        if group_by != CliGroupBy::Chunk {
-            return Err(ErrorObject::bad_input(
-                "this is a chunk cursor; rerun with --group-by chunk (the default)",
-            ));
-        }
-        let (score, chunk_id) = cursor.split_once(':').ok_or_else(|| {
-            ErrorObject::bad_input(
-                "search --cursor must use the cursor value returned by a previous search candidate",
-            )
-        })?;
-        validate_cursor_score(score, chunk_id)?;
-        Ok(ParsedSearchCursor::Chunk {
-            score: score.to_owned(),
-            chunk_id: chunk_id.to_owned(),
-        })
-    }
+    run_search_with_input(postgres, &input, verify_readiness, embedder)
 }

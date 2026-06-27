@@ -1,13 +1,20 @@
-//! work/09 P4 (4A) e2e: the site service end to end over an in-memory connection, through the READ-ROLE
-//! store. Proves the walking skeleton: a versioned `fetch` request frames → dispatches → reads one
-//! snapshot under the least-privilege read identity → returns the document; `status` returns health; an
-//! unversioned frame is rejected before dispatch; a client `index_dir` is rejected. Skips cleanly when the
-//! managed-PG harness is absent.
+//! work/09 P4 (4B) e2e: the site service end to end over an in-memory connection, through the READ-ROLE
+//! store and the FULL operation set. Proves: a versioned `fetch`/`search`/`cite` request frames →
+//! dispatches → validates the writer-owned readiness stamp on its snapshot → reads under the
+//! least-privilege read identity → returns the document (with render parity); a fingerprint mismatch
+//! fails closed THROUGH the dispatcher; a missing readiness stamp is refused; `status` returns health;
+//! `online`/`zone`/unversioned/`index_dir` are rejected. A second (no-PG) test proves concurrent requests
+//! each open their OWN snapshot. Skips cleanly when the managed-PG harness is absent.
 
 use std::io::Cursor;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use jurisearch_core::envelope::ProtocolEnvelope;
+use jurisearch_core::error::ErrorObject;
+use jurisearch_core::operation::Operation;
 use jurisearch_core::session::{SessionRequest, SessionResponse};
+use jurisearch_query::QueryEmbedder;
 use jurisearch_storage::backend::{
     DEFAULT_OWNER_ROLE, DEFAULT_READ_ROLE, DEFAULT_WRITER_ROLE, ManagedPostgresBackend, RoleSpec,
     StorageBackend, provision_roles,
@@ -16,12 +23,14 @@ use jurisearch_storage::generations::{
     ActivationReadVisibility, ActivationStamps, CursorGuard,
     activate_generation_with_guard_and_visibility, create_generation_from_public,
 };
+use jurisearch_storage::query::{ActiveCorpus, QueryStore, ReadSnapshot};
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
 use jurisearch_transport::{encode_bare_request_line, encode_site_envelope_line};
-use serde_json::json;
+use serde_json::{Value, json};
 
-use super::dispatcher::ServerContext;
-use super::{build_skeleton_dispatcher, serve_site_connection};
+use super::dispatcher::{OperationHandler, ServerContext, SiteDispatcher};
+use super::testkit::{PanicEmbedder, StubEmbedder};
+use super::{build_dispatcher, serve_site_connection};
 
 fn stamps() -> ActivationStamps<'static> {
     ActivationStamps {
@@ -36,7 +45,8 @@ fn stamps() -> ActivationStamps<'static> {
 }
 
 /// Seed one query-ready `core` decision, provision the least-privilege roles, and activate a generation
-/// with the read role's visibility — the supported shared-server read path.
+/// with the read role's visibility — the supported shared-server read path. Activation stamps query
+/// readiness (P3A), so the site read gate passes.
 fn ready_site(postgres: &ManagedPostgres) -> Result<(), StorageError> {
     {
         let mut superuser = postgres.client()?;
@@ -72,15 +82,19 @@ fn ready_site(postgres: &ManagedPostgres) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// Frame one request line, run it through the site listener over the read-role store, and decode the
-/// single response line.
+/// Frame one request line, run it through the site listener over the read-role store with the given
+/// server embedder, and decode the single response line.
 fn round_trip(
     backend: &ManagedPostgresBackend,
+    embedder: &dyn QueryEmbedder,
     request_line: &str,
 ) -> Result<SessionResponse, StorageError> {
     let store = backend.read_handle()?;
-    let ctx = ServerContext { store: &store };
-    let dispatcher = build_skeleton_dispatcher();
+    let ctx = ServerContext {
+        store: &store,
+        embedder,
+    };
+    let dispatcher = build_dispatcher(4);
     let mut output: Vec<u8> = Vec::new();
     serve_site_connection(
         Cursor::new(format!("{request_line}\n")),
@@ -107,7 +121,8 @@ fn site_line(command: &str, args: serde_json::Value) -> String {
 }
 
 #[test]
-fn the_site_service_serves_a_versioned_fetch_through_the_read_role() -> Result<(), StorageError> {
+fn the_site_service_serves_the_full_operation_set_through_the_read_role() -> Result<(), StorageError>
+{
     let Ok(pg_config) = PgConfig::discover() else {
         return Ok(());
     };
@@ -123,22 +138,25 @@ fn the_site_service_serves_a_versioned_fetch_through_the_read_role() -> Result<(
         DEFAULT_WRITER_ROLE,
         DEFAULT_OWNER_ROLE,
     );
+    // The server embedder: a fixed 1024-d vector under the ACTIVE fingerprint (`fp`), so the dense path
+    // is fingerprint-compatible with the seeded generation.
+    let embedder = StubEmbedder {
+        fingerprint: "fp".to_owned(),
+        dimension: 1024,
+    };
 
-    // A versioned `fetch` returns the document through the least-privilege read identity.
-    let response = round_trip(&backend, &site_line("fetch", json!({"ids": ["cass:SITE"]})))?;
+    // ---- fetch: full FetchResponse shape + render parity through the read role -----------------------
+    let response = round_trip(
+        &backend,
+        &embedder,
+        &site_line("fetch", json!({"ids": ["cass:SITE"]})),
+    )?;
     assert!(response.is_ok(), "fetch ok: {response:?}");
-    assert_eq!(
-        response.id(),
-        Some(&json!("r1")),
-        "the response correlates by id"
-    );
     let documents = response.result().expect("a result")["documents"]
         .as_array()
         .expect("documents array");
     assert_eq!(documents.len(), 1);
     let document = &documents[0];
-    // The FULL FetchResponse shape — not just the id — so a regression that dropped the body/citation/
-    // chunks would fail (the site path returns the same builder output as the one-shot CLI).
     assert_eq!(document["document_id"].as_str(), Some("cass:SITE"));
     assert_eq!(document["citation"].as_str(), Some("Cass"));
     assert_eq!(document["title"].as_str(), Some("Arret du site"));
@@ -146,8 +164,6 @@ fn the_site_service_serves_a_versioned_fetch_through_the_read_role() -> Result<(
     let chunks = document["chunks"].as_array().expect("chunks array");
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0]["chunk_id"].as_str(), Some("cass:SITE#0"));
-    // Render parity: the thin client / one-shot CLI renderer prints the SAME response (P6 reuses this);
-    // assert it renders to the byte-identical pretty body and is non-trivial.
     let rendered = jurisearch_render::render_session_response(&response).expect("render");
     let expected = jurisearch_render::render_value_pretty(response.result().expect("result"))
         .expect("render expected");
@@ -157,8 +173,42 @@ fn the_site_service_serves_a_versioned_fetch_through_the_read_role() -> Result<(
     );
     assert!(rendered.contains("cass:SITE"));
 
-    // `status` returns server-context health (active corpus topology), not the local status payload.
-    let health = round_trip(&backend, &site_line("status", json!({})))?;
+    // ---- search: hybrid retrieval through the dispatcher returns the seeded decision ----------------
+    let search = round_trip(
+        &backend,
+        &embedder,
+        &site_line(
+            "search",
+            json!({"query": "corps", "mode": "hybrid", "kind": "decision"}),
+        ),
+    )?;
+    assert!(search.is_ok(), "site search ok: {search:?}");
+    let candidates = search.result().expect("search result")["candidates"]
+        .as_array()
+        .expect("candidates array");
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["document_id"].as_str() == Some("cass:SITE")),
+        "the seeded decision is retrieved: {candidates:?}"
+    );
+
+    // ---- cite: a decision identifier classifies through the read snapshot ---------------------------
+    let cite = round_trip(
+        &backend,
+        &embedder,
+        &site_line("cite", json!({"cite": "cass:SITE"})),
+    )?;
+    assert!(cite.is_ok(), "site cite ok: {cite:?}");
+    let cite_result = cite.result().expect("cite result");
+    assert_eq!(cite_result["online"]["requested"].as_bool(), Some(false));
+    assert!(
+        cite_result["state"].is_string(),
+        "cite reports a state: {cite_result:?}"
+    );
+
+    // ---- status: health reports topology + the readiness stamp + the bounded read model -------------
+    let health = round_trip(&backend, &embedder, &site_line("status", json!({})))?;
     assert!(health.is_ok(), "status/health ok: {health:?}");
     let result = health.result().expect("health result");
     assert_eq!(result["service"].as_str(), Some("jurisearch-site"));
@@ -167,19 +217,55 @@ fn the_site_service_serves_a_versioned_fetch_through_the_read_role() -> Result<(
         result["multi_corpus_readiness"].as_str(),
         Some("single_corpus")
     );
+    assert_eq!(
+        result["readiness"]["ready"].as_bool(),
+        Some(true),
+        "the activated, stamped topology is ready: {result}"
+    );
+    assert_eq!(
+        result["read_pool"]["max_read_connections"].as_u64(),
+        Some(4)
+    );
 
+    // ---- boundary rejections ------------------------------------------------------------------------
+    // A `zone` search is rejected (Cassation-only client concern).
+    let zoned = round_trip(
+        &backend,
+        &embedder,
+        &site_line("search", json!({"query": "corps", "zone": "motivations"})),
+    )?;
+    assert!(!zoned.is_ok(), "a zone search is rejected");
+    assert!(
+        zoned
+            .error()
+            .is_some_and(|error| error.message.contains("zone")),
+        "the rejection names zone: {zoned:?}"
+    );
+    // An `online` cite is rejected (the Légifrance probe is a client/online concern).
+    let online = round_trip(
+        &backend,
+        &embedder,
+        &site_line("cite", json!({"cite": "cass:SITE", "online": true})),
+    )?;
+    assert!(!online.is_ok(), "an online cite is rejected");
+    assert!(
+        online
+            .error()
+            .is_some_and(|error| error.message.contains("online")),
+        "the rejection names online: {online:?}"
+    );
     // An UNVERSIONED frame (the local bare request shape) is rejected before dispatch.
     let bare = encode_bare_request_line(&SessionRequest {
         id: Some(json!("r2")),
         command: "fetch".to_owned(),
         args: json!({"ids": ["cass:SITE"]}),
     });
-    let rejected = round_trip(&backend, bare.trim())?;
+    let rejected = round_trip(&backend, &embedder, bare.trim())?;
     assert!(!rejected.is_ok(), "an unversioned site frame is rejected");
-
     // A client-supplied `index_dir` is rejected at the boundary (never influences the server).
     let index_dir = round_trip(
         &backend,
+        &embedder,
         &site_line(
             "fetch",
             json!({"ids": ["cass:SITE"], "index_dir": "/tmp/x"}),
@@ -192,5 +278,147 @@ fn the_site_service_serves_a_versioned_fetch_through_the_read_role() -> Result<(
             .is_some_and(|error| error.message.contains("index_dir")),
         "the rejection names index_dir: {index_dir:?}"
     );
+
+    // ---- fingerprint mismatch fails closed THROUGH the dispatcher -----------------------------------
+    // A server embedder whose fingerprint disagrees with the active generation must fail the dense
+    // preflight (P3A/P3C), not silently fall back to a partial result.
+    let wrong = StubEmbedder {
+        fingerprint: "wrong-fp".to_owned(),
+        dimension: 1024,
+    };
+    let mismatch = round_trip(
+        &backend,
+        &wrong,
+        &site_line(
+            "search",
+            json!({"query": "corps", "mode": "dense", "kind": "decision"}),
+        ),
+    )?;
+    assert!(
+        !mismatch.is_ok(),
+        "a fingerprint-mismatched dense search must fail closed: {mismatch:?}"
+    );
+
+    // ---- a missing readiness stamp is refused by the read gate --------------------------------------
+    // Drop the writer-owned stamp; every query handler must now fail closed (the P3A contract), even
+    // though the tables are still visible.
+    postgres.execute_sql("DELETE FROM public.index_manifest WHERE key = 'query_readiness';")?;
+    let unready = round_trip(
+        &backend,
+        &embedder,
+        &site_line("fetch", json!({"ids": ["cass:SITE"]})),
+    )?;
+    assert!(
+        !unready.is_ok(),
+        "a fetch on an unstamped topology is refused: {unready:?}"
+    );
+    // Health still answers (it never gates) and now reports not-ready.
+    let health_unready = round_trip(&backend, &embedder, &site_line("status", json!({})))?;
+    assert!(health_unready.is_ok(), "health answers even when not ready");
+    assert_eq!(
+        health_unready.result().expect("health")["readiness"]["ready"].as_bool(),
+        Some(false),
+        "health reports the dropped stamp as not-ready"
+    );
     Ok(())
+}
+
+// ---- concurrency: each request opens its OWN snapshot (no PG) ---------------------------------------
+
+/// A fake store that COUNTS `begin_snapshot` calls and tags each snapshot with a unique id, so a
+/// concurrent dispatch can prove every request gets its own snapshot (no shared `postgres::Client`).
+struct CountingStore {
+    opened: Arc<AtomicUsize>,
+}
+impl QueryStore for CountingStore {
+    fn begin_snapshot(&self) -> Result<Box<dyn ReadSnapshot + '_>, StorageError> {
+        let id = self.opened.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(CountingSnapshot { id }))
+    }
+}
+struct CountingSnapshot {
+    id: usize,
+}
+impl ReadSnapshot for CountingSnapshot {
+    fn read_text(&mut self, _sql: &str) -> Result<String, StorageError> {
+        Ok(self.id.to_string())
+    }
+    fn read_text_for_corpus(
+        &mut self,
+        _corpus: &ActiveCorpus,
+        _sql: &str,
+    ) -> Result<String, StorageError> {
+        Ok(self.id.to_string())
+    }
+    fn active_corpora(&self) -> &[ActiveCorpus] {
+        &[]
+    }
+}
+
+/// A handler that opens a snapshot and returns its unique id — bypasses the readiness gate/builders so
+/// the test isolates the snapshot-per-request concurrency contract.
+struct SnapshotIdHandler;
+impl OperationHandler for SnapshotIdHandler {
+    fn handle(&self, ctx: &ServerContext, _args: &Value) -> Result<Value, ErrorObject> {
+        let mut snapshot = ctx
+            .store
+            .begin_snapshot()
+            .map_err(|error| ErrorObject::bad_input(error.to_string()))?;
+        let id = snapshot
+            .read_text("")
+            .map_err(|error| ErrorObject::bad_input(error.to_string()))?;
+        Ok(json!({ "snapshot_id": id }))
+    }
+}
+
+#[test]
+fn concurrent_dispatch_opens_one_independent_snapshot_per_request() {
+    const REQUESTS: usize = 16;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(CountingStore {
+        opened: Arc::clone(&opened),
+    });
+    let embedder = Arc::new(PanicEmbedder);
+    let mut dispatcher = SiteDispatcher::new();
+    dispatcher.register(Operation::Fetch, Box::new(SnapshotIdHandler));
+    let dispatcher = Arc::new(dispatcher);
+
+    let handles: Vec<_> = (0..REQUESTS)
+        .map(|index| {
+            let store = Arc::clone(&store);
+            let embedder = Arc::clone(&embedder);
+            let dispatcher = Arc::clone(&dispatcher);
+            std::thread::spawn(move || {
+                // Each worker builds its OWN borrowed ServerContext from the shared Arc deps (mirroring
+                // serve.rs), then dispatches — exactly the per-connection model.
+                let ctx = ServerContext {
+                    store: &*store,
+                    embedder: &*embedder,
+                };
+                let request = SessionRequest {
+                    id: Some(json!(index)),
+                    command: "fetch".to_owned(),
+                    args: json!({}),
+                };
+                let response = dispatcher.dispatch(&ctx, &request);
+                response.result().expect("a result")["snapshot_id"]
+                    .as_str()
+                    .expect("snapshot id")
+                    .to_owned()
+            })
+        })
+        .collect();
+
+    let ids: std::collections::HashSet<String> =
+        handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(
+        opened.load(Ordering::SeqCst),
+        REQUESTS,
+        "each request opened exactly one snapshot"
+    );
+    assert_eq!(
+        ids.len(),
+        REQUESTS,
+        "every request received its OWN (distinct) snapshot id"
+    );
 }

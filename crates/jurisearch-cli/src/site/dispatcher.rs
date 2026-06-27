@@ -12,13 +12,17 @@ use std::collections::HashMap;
 use jurisearch_core::error::{ErrorCode, ErrorObject};
 use jurisearch_core::operation::Operation;
 use jurisearch_core::session::{SessionRequest, SessionResponse};
+use jurisearch_query::QueryEmbedder;
 use jurisearch_storage::query::QueryStore;
 use serde_json::Value;
 
 /// Server-owned, long-lived dependencies injected into every handler — NEVER taken from the client. The
 /// active corpus topology is resolved per request via `store.begin_snapshot()`, not pre-resolved here.
+/// The embedder is the server's own (a local bge-m3 endpoint), shared read-only across requests; a
+/// lexical-only op never invokes it.
 pub(crate) struct ServerContext<'a> {
     pub(crate) store: &'a dyn QueryStore,
+    pub(crate) embedder: &'a dyn QueryEmbedder,
 }
 
 /// One handler per exposed [`Operation`]. Returns the bare result body; the dispatcher wraps it (with the
@@ -121,6 +125,7 @@ fn client_data_source_field(args: &Value) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site::testkit::PanicEmbedder;
     use jurisearch_storage::query::ReadSnapshot;
     use jurisearch_storage::runtime::StorageError;
     use serde_json::json;
@@ -162,7 +167,10 @@ mod tests {
     #[test]
     fn every_non_site_command_is_rejected_by_the_allowlist() {
         let dispatcher = skeleton();
-        let ctx = ServerContext { store: &PanicStore };
+        let ctx = ServerContext {
+            store: &PanicStore,
+            embedder: &PanicEmbedder,
+        };
         // Table-driven from the §45 compatibility matrix: EVERY local-only / non-site command is rejected
         // (it is not an `Operation`, so it never parses) — never a fall-through to a local payload, never
         // a snapshot (the PanicStore proves it). Covers query helpers, model/eval/management, diagnostics,
@@ -184,7 +192,10 @@ mod tests {
     #[test]
     fn a_valid_but_unregistered_operation_is_not_implemented() {
         let dispatcher = skeleton();
-        let ctx = ServerContext { store: &PanicStore };
+        let ctx = ServerContext {
+            store: &PanicStore,
+            embedder: &PanicEmbedder,
+        };
         // `search` IS an exposed Operation but is unregistered in the 4A skeleton → a NotImplemented error
         // (not a generic bad_input), never a fall-through to a local payload.
         let response = dispatcher.dispatch(&ctx, &request("search", json!({"query": "x"})));
@@ -205,7 +216,10 @@ mod tests {
     #[test]
     fn a_client_index_dir_is_rejected_before_any_handler() {
         let dispatcher = skeleton();
-        let ctx = ServerContext { store: &PanicStore };
+        let ctx = ServerContext {
+            store: &PanicStore,
+            embedder: &PanicEmbedder,
+        };
         // A sentinel `index_dir` (valid for the LOCAL dispatcher) is rejected at the boundary — the
         // PanicStore proves the (registered) fetch handler never ran.
         let response = dispatcher.dispatch(

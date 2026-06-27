@@ -86,6 +86,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::super::dispatcher::OperationHandler;
+    use crate::site::testkit::PanicEmbedder;
 
     struct UnusedStore;
     impl QueryStore for UnusedStore {
@@ -108,6 +109,7 @@ mod tests {
         dispatcher.register(Operation::Fetch, Box::new(PanicHandler));
         let ctx = ServerContext {
             store: &UnusedStore,
+            embedder: &PanicEmbedder,
         };
 
         // Line 1: an UNVERSIONED bare frame (a framing failure). Line 2: a valid versioned `fetch` that

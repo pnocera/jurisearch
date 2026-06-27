@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::generations::schema_for_generation;
+use crate::query::ReadSnapshot;
 use crate::runtime::{sql_identifier, sql_string_literal};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -467,6 +468,79 @@ pub fn load_query_readiness(
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     load_query_readiness_with_client(&mut client)
+}
+
+/// Read-only readiness LOOKUP bound to an open read SNAPSHOT (work/09 P4 site query service): the
+/// site handlers open ONE snapshot per request, validate the writer-owned `query_readiness` stamp on
+/// that same snapshot BEFORE running a builder, and never recompute coverage or write. It is the exact
+/// snapshot analogue of [`load_query_readiness_with_client`] — a `public` topology (no active corpus) is
+/// "index unavailable"; a missing / stale / malformed stamp is a writer/apply fault — but it derives the
+/// active-topology signature from the snapshot's already-resolved `active_corpora()` (the routing
+/// authority) so the stamp is validated against the SAME topology the request's reads will use, with no
+/// second connection and no TOCTOU against the request snapshot.
+///
+/// Multi-corpus is fail-closed (work/09 P3A/P3C): the writer stamp records the aggregate signature but
+/// only the just-applied corpus's coverage, so it cannot prove aggregate readiness; a >1-corpus site
+/// request errors here rather than being served on a single-corpus stamp (health reports the gap).
+pub fn load_query_readiness_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
+) -> Result<IngestReadinessReport, StorageError> {
+    // Signature over the active read topology, derived from the snapshot's resolved corpora. This is
+    // byte-identical to `active_read_signature`'s `string_agg(corpus || ':' || active_generation || ':'
+    // || sequence ORDER BY corpus)` because `resolve_active_corpora` orders by corpus and carries the
+    // same generation/sequence values — so it compares equal to the writer's stamped signature.
+    let (signature, active_count) = {
+        let corpora = snapshot.active_corpora();
+        let signature = corpora
+            .iter()
+            .map(|corpus| {
+                format!(
+                    "{}:{}:{}",
+                    corpus.corpus, corpus.generation, corpus.sequence
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        (signature, corpora.len())
+    };
+    if active_count == 0 {
+        return Err(StorageError::IngestAccounting {
+            message: "no active corpus installed; index unavailable".to_owned(),
+        });
+    }
+    if active_count > 1 {
+        return Err(StorageError::IngestAccounting {
+            message:
+                "multi-corpus query readiness is not supported until 3C (multi-corpus fan-out); \
+                      this build serves a single active corpus"
+                    .to_owned(),
+        });
+    }
+    let stamp = snapshot.read_text(
+        "SELECT value::text FROM public.index_manifest WHERE key = 'query_readiness';",
+    )?;
+    if stamp.is_empty() {
+        return Err(StorageError::IngestAccounting {
+            message: format!(
+                "query readiness was never stamped for the active topology `{signature}` \
+                 (writer/apply fault)"
+            ),
+        });
+    }
+    let cached: CachedReadiness =
+        serde_json::from_str(&stamp).map_err(|error| StorageError::IngestAccounting {
+            message: format!("malformed query_readiness stamp: {error}"),
+        })?;
+    if cached.signature != signature {
+        return Err(StorageError::IngestAccounting {
+            message: format!(
+                "stale query readiness stamp: stamped for `{}` but the active topology is `{signature}` \
+                 (writer/apply fault — the topology changed without restamping)",
+                cached.signature
+            ),
+        });
+    }
+    Ok(cached.report)
 }
 
 /// The LOCAL read gate's readiness resolution (work/09 P3A): an installed (client) topology is a

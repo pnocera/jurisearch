@@ -6,7 +6,15 @@ use jurisearch_storage::query::QueryStore;
 use crate::*;
 
 pub(crate) fn related_payload(req: RelatedRequest) -> Result<Value, ErrorObject> {
-    // Boundary validation shared by the one-shot and session paths.
+    let input = resolve_related_input(&req)?;
+    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
+    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    build_related(&input, &mut *snapshot)
+}
+
+/// Resolve a `related` request into the builder's [`RelatedInput`] (boundary validation only, no index):
+/// the depth-1 + non-sibling + known-relation checks. Shared by the CLI adapter and the site handler.
+pub(crate) fn resolve_related_input(req: &RelatedRequest) -> Result<RelatedInput, ErrorObject> {
     if req.id.trim().is_empty() {
         return Err(ErrorObject::bad_input("related requires a document id"));
     }
@@ -26,16 +34,11 @@ pub(crate) fn related_payload(req: RelatedRequest) -> Result<Value, ErrorObject>
             req.rel
         ))
     })?;
-    let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
-    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
-    build_related(
-        &RelatedInput {
-            document_id: req.id.clone(),
-            rel: relation,
-            limit: req.limit,
-        },
-        &mut *snapshot,
-    )
+    Ok(RelatedInput {
+        document_id: req.id.clone(),
+        rel: relation,
+        limit: req.limit,
+    })
 }
 
 pub(crate) fn emit_related(req: RelatedRequest) -> anyhow::Result<()> {
