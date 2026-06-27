@@ -181,6 +181,15 @@ impl QueryStore for ManagedPostgres {
     }
 }
 
+/// The site query service's read-role store (work/09 P4): each `begin_snapshot` checks out ONE connection
+/// under the least-privilege READ identity (never the self-managed superuser path) and opens a snapshot
+/// on it. This is what lets the service honestly claim a read-only DB identity.
+impl QueryStore for crate::backend::ReadHandle {
+    fn begin_snapshot(&self) -> Result<Box<dyn ReadSnapshot + '_>, StorageError> {
+        Ok(Box::new(LocalSnapshot::open(self.client()?)?))
+    }
+}
+
 /// Run `sql` (one or more statements) and render the result with `psql -qAt` semantics: every result
 /// row's columns joined by `|`, rows joined by newline, `NULL` as the empty string, the whole output
 /// trimmed. Statements that return no rows (e.g. a leading `SET ivfflat.probes = …`) contribute

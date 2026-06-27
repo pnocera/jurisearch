@@ -123,6 +123,14 @@ pub(crate) enum Command {
     /// `--index-dir` is injected into requests that omit it. Example:
     ///   jurisearch serve --socket /tmp/jurisearch.sock --index-dir /abs/index
     Serve(ServeArgs),
+    /// Serve the work/09 read-only SITE query service over a UDS or loopback TCP socket (versioned site
+    /// protocol; allowlist-by-construction; server-owned read-role store; client `index_dir` rejected).
+    ///
+    /// The walking skeleton (4A) answers `fetch` + `status`/health sequentially over one read-role
+    /// connection. Example:
+    ///   jurisearch serve-site --socket /run/jurisearch-site.sock --db-name jurisearch --db-user jurisearch_read
+    #[command(name = "serve-site")]
+    ServeSite(ServeSiteArgs),
     /// Official-source ingestion helpers (subcommands: plan-archives, legi-archives, embed-chunks, ...).
     ///
     /// Builds the canonical index from official archives. Example:
@@ -395,6 +403,32 @@ pub(crate) struct ServeArgs {
     /// Allow a non-loopback TCP bind (off-host exposure). Off by default; the protocol is unauthenticated.
     #[arg(long)]
     pub(crate) allow_remote: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ServeSiteArgs {
+    /// Bind a Unix-domain socket at this path. Provide this OR --tcp.
+    #[arg(long)]
+    pub(crate) socket: Option<PathBuf>,
+    /// Bind a loopback TCP listener at host:port (e.g. 127.0.0.1:8099). Provide this OR --socket. The
+    /// site service is loopback/UDS-only until work/09 P6 (LAN exposure).
+    #[arg(long)]
+    pub(crate) tcp: Option<String>,
+    /// The site PostgreSQL host (the shared server). Defaults to loopback.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) db_host: String,
+    /// The site PostgreSQL port.
+    #[arg(long, default_value_t = 5432)]
+    pub(crate) db_port: u16,
+    /// The site database name.
+    #[arg(long)]
+    pub(crate) db_name: String,
+    /// The LEAST-PRIVILEGE read role the service connects as (SELECT-only; never the writer/owner).
+    #[arg(long)]
+    pub(crate) db_user: String,
+    /// The read role's password (omit on a trusted/`peer`-auth socket).
+    #[arg(long)]
+    pub(crate) db_password: Option<String>,
 }
 
 #[derive(Debug, Args)]

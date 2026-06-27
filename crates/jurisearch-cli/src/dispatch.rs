@@ -27,6 +27,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
         )),
         Command::Session(args) | Command::Batch(args) => run_jsonl(args),
         Command::Serve(args) => run_serve(args, index_dir.as_deref()),
+        Command::ServeSite(args) => crate::site::serve::run_serve_site(args),
         Command::Ingest(ingest) => emit_ingest(ingest, index_dir.as_deref()),
         Command::Eval(eval) => emit_eval(eval, index_dir.as_deref()),
         // Boundary validation (empty query/id, top_k==0, …) now lives once in each payload builder,
