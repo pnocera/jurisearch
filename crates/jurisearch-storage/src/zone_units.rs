@@ -10,6 +10,7 @@
 //! parameterized client (like the ingestion writes).
 
 use crate::dense::DenseRebuildSpec;
+use crate::query::{QueryStore, ReadSnapshot};
 use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
 /// Name of the zone-unit dense ANN index (built at finalize time, like the chunk ivfflat index).
@@ -681,13 +682,24 @@ fn validate_zone_dense_spec(spec: &DenseRebuildSpec<'_>) -> Result<(), StorageEr
 /// surface from the Phase 2 corpus gate — it reports the per-decision official overlay's reach
 /// (enrichment attempts by source/status, derived units by zone, embedding coverage), never inflating
 /// the corpus claim. Counts run over the small zone/overlay tables only (no 1.1M-row resolver scan).
+/// Legacy one-shot wrapper over [`zone_retrieval_coverage_in_snapshot`]: open a read snapshot and
+/// delegate (for the operator `status` block and deferred callers). The `search --zone` path uses the
+/// snapshot-bound core so the zone gate, the candidates, and the response's `scope` coverage all observe
+/// ONE generation (work/09 P3B).
 pub fn zone_retrieval_coverage_json(postgres: &ManagedPostgres) -> Result<String, StorageError> {
-    // Client read role (plan P2): this backs the zone-retrieval gate (`retrieval/zone.rs`) and the
-    // `status` block, both of which must reflect the SERVED corpus. The zone/overlay tables
-    // (`decision_zones`/`zone_units`/`zone_unit_embeddings`/`documents`) are replicated, so they resolve
-    // to the active generation; the global `index_manifest` read falls through to `public`. Without
-    // this the zone gate would split-brain (zone search reads the generation, the coverage reads public).
-    postgres.execute_read_sql(
+    let mut snapshot = postgres.begin_snapshot()?;
+    zone_retrieval_coverage_in_snapshot(&mut *snapshot)
+}
+
+/// Zone-retrieval coverage as JSON, read THROUGH a request snapshot. Backs the `search --zone` readiness
+/// gate AND the response's `scope.indexed_decisions`, so both — and the candidate set — reflect the same
+/// served generation. The zone/overlay tables (`decision_zones`/`zone_units`/`zone_unit_embeddings`/
+/// `documents`) are replicated, so they resolve to the active generation via the snapshot search_path;
+/// the global `index_manifest` read falls through to `public`.
+pub fn zone_retrieval_coverage_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
+) -> Result<String, StorageError> {
+    snapshot.read_text(
         r#"
 SELECT jsonb_build_object(
     'scope', 'official_cour_de_cassation_zones (cass+inca)',

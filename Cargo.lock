@@ -983,6 +983,7 @@ dependencies = [
  "jurisearch-embed",
  "jurisearch-ingest",
  "jurisearch-official-api",
+ "jurisearch-query",
  "jurisearch-render",
  "jurisearch-storage",
  "jurisearch-transport",
@@ -1072,6 +1073,15 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "jurisearch-query"
+version = "0.1.0"
+dependencies = [
+ "jurisearch-core",
+ "jurisearch-storage",
+ "serde_json",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use jurisearch_storage::query::QueryStore;
+
 use crate::*;
 
 /// The benchmark-only widened window (unique decisions per query) used to FORM pairs. This is not the
@@ -462,7 +464,14 @@ fn authority_zone_recall(
     let needs_dense = retrieval_mode.uses_dense();
     let expected_fingerprint =
         needs_dense.then(|| embedding_config_from_env().storage_embedding_fingerprint());
-    ensure_zone_retrieval_readiness(postgres, needs_dense, expected_fingerprint.as_deref())?;
+    {
+        let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+        ensure_zone_retrieval_readiness(
+            &mut *snapshot,
+            needs_dense,
+            expected_fingerprint.as_deref(),
+        )?;
+    }
 
     let gold_json = france_juris_zone_gold_json(postgres, FranceJurisZoneGoldLimits::default())
         .map_err(storage_error_object)?;

@@ -1,5 +1,8 @@
 //! cite command: citation-state classification, validity, and optional online confirmation.
 
+use jurisearch_storage::citation::citation_lookup_in_snapshot;
+use jurisearch_storage::query::QueryStore;
+
 use crate::*;
 
 pub(crate) fn emit_cite(req: CiteRequest) -> anyhow::Result<()> {
@@ -20,8 +23,9 @@ pub(crate) fn cite_payload(req: CiteRequest) -> Result<Value, ErrorObject> {
     let mut lookup = json!({ "matches": [] });
     if let Some(lookup_target) = parsed.lookup() {
         let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
-        let response = citation_lookup_json(
-            &postgres,
+        let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+        let response = citation_lookup_in_snapshot(
+            &mut *snapshot,
             &CitationLookupQuery {
                 lookup: lookup_target,
                 limit: 25,

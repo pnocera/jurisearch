@@ -8,8 +8,8 @@ use super::*;
 ///   `payload->>'to_source_uid'` → `documents.source_uid` — served by `graph_edges_from_idx`.
 /// - `cited_by`: incoming citations keyed on the seed's `source_uid` — served by the partial
 ///   expression index `graph_edges_publisher_citation_to_source_uid_idx` (migration 10).
-pub fn related_neighbours_json(
-    postgres: &ManagedPostgres,
+pub fn related_neighbours_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &RelatedQuery<'_>,
 ) -> Result<String, StorageError> {
     let id = sql_string_literal(query.document_id);
@@ -98,7 +98,7 @@ resolved AS (
         ),
     };
 
-    postgres.execute_read_sql(&format!(
+    snapshot.read_text(&format!(
         r#"
 WITH {resolved_cte}
 SELECT jsonb_build_object(

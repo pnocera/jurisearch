@@ -9,38 +9,31 @@ use super::*;
 /// this turns that into a clear error BEFORE retrieval. Single-corpus in 3A: no active corpus keeps the
 /// legacy `public` path, and more than one active corpus is deferred to 3C (multi-corpus fan-out).
 fn ensure_embedding_fingerprint_compatible(
-    postgres: &ManagedPostgres,
+    snapshot: &dyn ReadSnapshot,
     query: &HybridCandidateQuery<'_>,
 ) -> Result<(), StorageError> {
     if !query.retrieval_mode.uses_dense() {
         return Ok(());
     }
-    let mut client = postgres.client()?;
-    let rows = client
-        .query(
-            "SELECT embedding_fingerprint FROM jurisearch_control.corpus_state ORDER BY corpus;",
-            &[],
-        )
-        .map_err(StorageError::PostgresClient)?;
-    match rows.as_slice() {
+    match snapshot.active_corpora() {
         // No active corpus: the `public` producer/local working set — keep the legacy path (the
         // active-generation preflight is a site/client concern).
         [] => Ok(()),
-        [row] => {
-            let active: String = row.get(0);
-            if query.embedding_fingerprint == Some(active.as_str()) {
+        [active] => {
+            if query.embedding_fingerprint == Some(active.fingerprint.as_str()) {
                 Ok(())
             } else {
                 Err(StorageError::Retrieval {
                     message: format!(
                         "embedding_fingerprint_mismatch: query fingerprint {:?} does not match the \
-                         active generation fingerprint `{active}`; refusing dense/hybrid retrieval \
+                         active generation fingerprint `{}`; refusing dense/hybrid retrieval \
                          (it would silently degrade to lexical or return false no-results)",
-                        query.embedding_fingerprint
+                        query.embedding_fingerprint, active.fingerprint
                     ),
                 })
             }
         }
+        // A query snapshot never opens over >1 corpus in 3B (`begin_snapshot` refuses it); kept total.
         _ => Err(StorageError::Retrieval {
             message: "multi-corpus embedding-fingerprint preflight is deferred to work/09 3C \
                       (multi-corpus fan-out)"
@@ -49,11 +42,11 @@ fn ensure_embedding_fingerprint_compatible(
     }
 }
 
-pub fn hybrid_candidates_json(
-    postgres: &ManagedPostgres,
+pub fn hybrid_candidates_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &HybridCandidateQuery<'_>,
 ) -> Result<String, StorageError> {
-    ensure_embedding_fingerprint_compatible(postgres, query)?;
+    ensure_embedding_fingerprint_compatible(snapshot, query)?;
     let query_text = sql_string_literal(query.query_text);
     let as_of = sql_string_literal(query.as_of);
     let retrieval_mode = sql_string_literal(query.retrieval_mode.as_str());
@@ -65,7 +58,7 @@ pub fn hybrid_candidates_json(
     let filter_predicate = format!("{kind_predicate}{}", query.decision_filters.predicate());
     let ranked_ctes = ranked_candidate_ctes(query, &query_text, &as_of, &filter_predicate)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
-        let stored_probes = manifest_default_probes(postgres, "embedding")?;
+        let stored_probes = manifest_default_probes(snapshot, "embedding")?;
         let probes = effective_probes(&query.options, stored_probes);
         format!("SET ivfflat.probes = {probes};\n\n")
     } else {
@@ -182,5 +175,5 @@ SELECT jsonb_build_object(
             )
         }
     };
-    postgres.execute_read_sql(&sql)
+    snapshot.read_text(&sql)
 }

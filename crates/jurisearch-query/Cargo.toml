@@ -1,0 +1,11 @@
+[package]
+name = "jurisearch-query"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jurisearch-core = { path = "../jurisearch-core" }
+jurisearch-storage = { path = "../jurisearch-storage" }
+serde_json.workspace = true

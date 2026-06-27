@@ -1,5 +1,7 @@
 //! Advisory france-juris-zones zone-retrieval benchmark.
 
+use jurisearch_storage::query::QueryStore;
+
 use crate::*;
 
 /// Run the SEPARATE official-zone retrieval benchmark and emit the `phase2_zone_benchmark` artifact
@@ -21,7 +23,14 @@ pub(crate) fn eval_france_juris_zones_payload(
     // match nothing — and gate on the ZONE subsystem only (independent of chunk readiness).
     let expected_fingerprint =
         needs_dense.then(|| embedding_config_from_env().storage_embedding_fingerprint());
-    ensure_zone_retrieval_readiness(&postgres, needs_dense, expected_fingerprint.as_deref())?;
+    {
+        let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+        ensure_zone_retrieval_readiness(
+            &mut *snapshot,
+            needs_dense,
+            expected_fingerprint.as_deref(),
+        )?;
+    }
 
     let limits = FranceJurisZoneGoldLimits {
         motivations: args.motivations,

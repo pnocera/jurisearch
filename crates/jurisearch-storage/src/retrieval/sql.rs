@@ -19,10 +19,10 @@ pub(crate) fn format_sql_f64(value: f64) -> String {
 /// the fixed conservative default and older indexes keep their prior behaviour. One lightweight indexed
 /// single-row read on the dense query path; the value scales probes to a corpus-sized `lists`.
 pub(crate) fn manifest_default_probes(
-    postgres: &ManagedPostgres,
+    snapshot: &mut dyn ReadSnapshot,
     key: &str,
 ) -> Result<Option<u32>, StorageError> {
-    let raw = postgres.execute_read_sql(&format!(
+    let raw = snapshot.read_text(&format!(
         "SELECT value->'vector_index'->>'default_probes' FROM index_manifest WHERE key = {};",
         sql_string_literal(key)
     ))?;

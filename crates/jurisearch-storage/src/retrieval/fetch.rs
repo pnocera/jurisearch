@@ -2,8 +2,8 @@
 
 use super::*;
 
-pub fn fetch_documents_json(
-    postgres: &ManagedPostgres,
+pub fn fetch_documents_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &FetchDocumentsQuery<'_>,
 ) -> Result<String, StorageError> {
     if query.document_ids.is_empty() {
@@ -18,7 +18,7 @@ pub fn fetch_documents_json(
         .collect::<Vec<_>>()
         .join(", ");
 
-    postgres.execute_read_sql(&format!(
+    snapshot.read_text(&format!(
         r#"
 WITH requested(document_id, ordinal) AS (
     VALUES {requested_values}

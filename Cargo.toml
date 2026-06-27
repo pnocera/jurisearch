@@ -11,6 +11,7 @@ members = [
     "crates/jurisearch-storage",
     "crates/jurisearch-syncd",
     "crates/jurisearch-transport",
+    "crates/jurisearch-query",
 ]
 resolver = "3"
 

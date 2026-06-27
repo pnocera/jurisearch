@@ -1,7 +1,8 @@
 //! `fetch` command: return full source text for version-pinned stable IDs, with the
 //! optional decision-part overlay delegated to `crate::enrichment`.
 
-use jurisearch_storage::retrieval::{FetchDocumentsQuery, fetch_documents_json};
+use jurisearch_query::{FetchInput, build_fetch};
+use jurisearch_storage::query::QueryStore;
 
 use crate::*;
 
@@ -27,19 +28,20 @@ pub(crate) fn fetch_payload(req: FetchRequest) -> Result<Value, ErrorObject> {
             ))
         })?),
     };
+    // Adapter owns the side effects (index open + readiness gate); the builder is a pure read over ONE
+    // snapshot. work/09 P3B.
     let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
-    let ids = req.ids.iter().map(String::as_str).collect::<Vec<_>>();
-    let response = fetch_documents_json(&postgres, &FetchDocumentsQuery { document_ids: &ids })
-        .map_err(storage_error_object)?;
-    let mut response: Value = parse_storage_json(&response)?;
-    if response["documents"]
-        .as_array()
-        .is_some_and(|documents| documents.is_empty())
-    {
-        return Err(no_results(
-            "fetch returned no documents for the requested IDs",
-        ));
-    }
+    let mut response = {
+        let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+        build_fetch(
+            &FetchInput {
+                document_ids: req.ids.clone(),
+            },
+            &mut *snapshot,
+        )?
+    };
+    // The decision-part overlay (`--part`, online Judilibre) is layered on by the adapter, outside the
+    // base read snapshot (it is an online/enrichment concern, not a snapshot read — work/09 P3B scope).
     if let Some(part) = part {
         annotate_fetched_parts(&postgres, &mut response, part, req.online)?;
     }

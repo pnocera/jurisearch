@@ -1,3 +1,4 @@
+use crate::query::{QueryStore, ReadSnapshot};
 use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
 #[derive(Debug, Clone, Copy)]
@@ -28,8 +29,18 @@ pub enum CitationLookup<'a> {
     DecisionPourvoi(&'a str),
 }
 
+/// Legacy one-shot wrapper over [`citation_lookup_in_snapshot`]: open a read snapshot and delegate (for
+/// deferred callers that hold a [`ManagedPostgres`]). The query path uses the snapshot-bound core.
 pub fn citation_lookup_json(
     postgres: &ManagedPostgres,
+    query: &CitationLookupQuery<'_>,
+) -> Result<String, StorageError> {
+    let mut snapshot = postgres.begin_snapshot()?;
+    citation_lookup_in_snapshot(&mut *snapshot, query)
+}
+
+pub fn citation_lookup_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &CitationLookupQuery<'_>,
 ) -> Result<String, StorageError> {
     let limit = query.limit.max(1);
@@ -106,7 +117,7 @@ pub fn citation_lookup_json(
     // and any other functions/operators fall through to `public` under the `generation, public` path.)
     // Without this, `cite` would split-brain: readiness/fetch read the generation while `cite` matches
     // identifiers against stale/empty `public`.
-    postgres.execute_read_sql(&format!(
+    snapshot.read_text(&format!(
         r#"
 WITH matches AS (
 {union_sql}

@@ -50,6 +50,18 @@ impl PreparedQueryEmbedder {
     }
 }
 
+/// The work/09 P3B query-embedder seam: the CLI injects its prepared embedder into the side-effect-free
+/// response builders (which depend only on the `QueryEmbedder` trait, never on the CLI runtime).
+impl jurisearch_query::QueryEmbedder for PreparedQueryEmbedder {
+    fn embed(&self, text: &str) -> Result<jurisearch_query::QueryEmbedding, ErrorObject> {
+        let (literal, fingerprint) = PreparedQueryEmbedder::embed(self, text)?;
+        Ok(jurisearch_query::QueryEmbedding {
+            literal,
+            fingerprint,
+        })
+    }
+}
+
 pub(crate) fn ensure_embedding_runtime_ready(
     embedding_config: &EmbeddingConfig,
     allow_download: bool,

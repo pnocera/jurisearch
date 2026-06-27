@@ -1,19 +1,25 @@
 //! zone command: official-zone (Cassation) parallel retrieval index path.
 
+use jurisearch_storage::query::{QueryStore, ReadSnapshot};
+use jurisearch_storage::zone_retrieval::zone_candidates_in_snapshot;
+use jurisearch_storage::zone_units::zone_retrieval_coverage_in_snapshot;
+
 use crate::*;
 
 /// Dedicated zone readiness gate (NOT the chunk-corpus `ensure_query_readiness`): the zone subsystem
 /// has its own coverage. Requires materialized `zone_units`; for dense/hybrid also requires the
 /// zone-unit embeddings to be complete (no pending units) AND finalized under the SAME fingerprint the
 /// query embedder uses — otherwise the dense arm (which filters by fingerprint) would silently match
-/// nothing and report a false `no_results` instead of an actionable readiness error.
+/// nothing and report a false `no_results` instead of an actionable readiness error. Reads coverage
+/// THROUGH the request snapshot (work/09 P3B) so the gate, the candidates, and the response's `scope`
+/// coverage all observe ONE generation.
 pub(crate) fn ensure_zone_retrieval_readiness(
-    postgres: &ManagedPostgres,
+    snapshot: &mut dyn ReadSnapshot,
     needs_dense: bool,
     expected_fingerprint: Option<&str>,
 ) -> Result<(), ErrorObject> {
     let coverage: Value = serde_json::from_str(
-        &zone_retrieval_coverage_json(postgres).map_err(storage_error_object)?,
+        &zone_retrieval_coverage_in_snapshot(snapshot).map_err(storage_error_object)?,
     )
     .map_err(|error| dependency_unavailable(error.to_string()))?;
     if coverage["zone_units"]["total"].as_u64().unwrap_or(0) == 0 {
@@ -46,6 +52,25 @@ pub(crate) fn ensure_zone_retrieval_readiness(
         }
     }
     Ok(())
+}
+
+/// The snapshot-bound core of `search --zone`'s reads: zone candidate retrieval AND the response's
+/// `scope` coverage, run through the SAME [`ReadSnapshot`] so they cannot straddle a generation swap
+/// (work/09 P3B). Returns `(candidates_json, coverage_json)`. The readiness gate
+/// ([`ensure_zone_retrieval_readiness`]) is run on this same snapshot just before this, in the adapter.
+pub(crate) fn zone_candidates_and_coverage_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
+    query: &ZoneCandidateQuery<'_>,
+) -> Result<(Value, Value), ErrorObject> {
+    let candidates: Value = serde_json::from_str(
+        &zone_candidates_in_snapshot(snapshot, query).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
+    let coverage: Value = serde_json::from_str(
+        &zone_retrieval_coverage_in_snapshot(snapshot).map_err(storage_error_object)?,
+    )
+    .map_err(|error| dependency_unavailable(error.to_string()))?;
+    Ok((candidates, coverage))
 }
 
 /// Run a zone-scoped search against the official-zone subsystem. Explicit opt-in only (`--zone`); the
@@ -93,7 +118,12 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
     // index finalized under a different embedder before we run a query that would match nothing.
     let expected_fingerprint =
         needs_dense.then(|| embedding_config_from_env().storage_embedding_fingerprint());
-    ensure_zone_retrieval_readiness(&postgres, needs_dense, expected_fingerprint.as_deref())?;
+
+    // work/09 P3B: ONE read snapshot spans the whole request — the zone readiness gate, the candidate
+    // retrieval, AND the response's `scope` coverage all observe the same served generation (a swap
+    // mid-request can never mix gen-A candidates with gen-B coverage).
+    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    ensure_zone_retrieval_readiness(&mut *snapshot, needs_dense, expected_fingerprint.as_deref())?;
 
     let as_of = req.as_of.clone().unwrap_or_else(today_utc);
     let (query_embedding, embedding_fingerprint) = if needs_dense {
@@ -121,8 +151,11 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
         req.top_k.saturating_add(1)
     };
 
-    let response = zone_candidates_json(
-        &postgres,
+    // Candidate retrieval AND the response `scope` coverage run through the SAME `snapshot` opened above
+    // (the one already used for the readiness gate) — so the gate, the candidates, and
+    // `scope.indexed_decisions` cannot straddle a generation swap.
+    let (mut response, coverage) = zone_candidates_and_coverage_in_snapshot(
+        &mut *snapshot,
         &ZoneCandidateQuery {
             query_text: query_text.as_str(),
             query_embedding: query_embedding.as_deref(),
@@ -140,15 +173,7 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
             dense_limit,
             limit: query_limit,
         },
-    )
-    .map_err(storage_error_object)?;
-    let mut response: Value = serde_json::from_str(&response)
-        .map_err(|error| dependency_unavailable(error.to_string()))?;
-
-    let coverage: Value = serde_json::from_str(
-        &zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?,
-    )
-    .map_err(|error| dependency_unavailable(error.to_string()))?;
+    )?;
     // Shared search decoration (expansion, format, limit) so the zone surface matches ordinary search.
     let expansion = expand_query(&req.query);
     response["format"] = json!(output_format.as_str());
@@ -245,5 +270,165 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
         Err(no_results("zone search returned no candidates"))
     } else {
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod snapshot_consistency_tests {
+    use super::*;
+    use jurisearch_storage::generations::{
+        ActivationStamps, activate_generation, create_generation_from_public,
+    };
+    use jurisearch_storage::runtime::{ManagedPostgres, PgConfig};
+
+    const FP: &str = "bge-m3:1024:cls:normalize=true";
+
+    fn stamps(sequence: i64, baseline_id: &'static str) -> ActivationStamps<'static> {
+        ActivationStamps {
+            sequence,
+            baseline_id,
+            schema_version: 24,
+            embedding_fingerprint: FP,
+            builder_versions: &serde_json::Value::Null,
+            last_package_id: None,
+            last_package_digest: None,
+        }
+    }
+
+    /// Seed one ready Cassation decision in `public` (document + dense-ready chunk) plus one official
+    /// `motivations` zone unit whose `search_body` matches the bm25 probe `alpha`.
+    fn seed_decision_with_zone(postgres: &ManagedPostgres, doc: &str, zone_unit_id: &str) {
+        postgres
+            .execute_sql(&format!(
+                "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
+                   valid_from, source_payload_hash, canonical_json) \
+                 VALUES ('{doc}','cass','decision','{doc}','Cass','Arret','corps','2024-01-01', \
+                   'sha256:{doc}','{{}}'); \
+                 INSERT INTO chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
+                   source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+                 VALUES ('{doc}#0','{doc}',0,'corps','ctx corps','sha256:c-{doc}','c1','{FP}'); \
+                 INSERT INTO zone_units (zone_unit_id, document_id, zone, fragment_index, body, \
+                   search_body, source, text_hash, zone_unit_builder_version) \
+                 VALUES ('{zone_unit_id}','{doc}','motivations',0,'alpha corps','alpha corps','cass', \
+                   'h-{zone_unit_id}','v1');"
+            ))
+            .unwrap();
+        let vector = (0..1024).map(|_| "0.01").collect::<Vec<_>>().join(",");
+        postgres
+            .execute_sql(&format!(
+                "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, \
+                   dimension) VALUES ('{doc}#0','{FP}','[{vector}]'::vector,'m',1024);"
+            ))
+            .unwrap();
+    }
+
+    fn bm25_zone_query<'a>(
+        query_text: &'a str,
+        zone: &'a str,
+        as_of: &'a str,
+    ) -> ZoneCandidateQuery<'a> {
+        ZoneCandidateQuery {
+            query_text,
+            query_embedding: None,
+            embedding_fingerprint: None,
+            retrieval_mode: RetrievalMode::Bm25,
+            options: RetrievalOptions::default(),
+            after_cursor: None,
+            zone,
+            as_of,
+            project_authority: false,
+            decision_filters: DecisionFilters::default(),
+            lexical_limit: 50,
+            dense_limit: 50,
+            limit: 10,
+        }
+    }
+
+    fn decisions(coverage: &Value) -> u64 {
+        coverage["zone_units"]["decisions"].as_u64().unwrap_or(0)
+    }
+
+    fn candidate_count(candidates: &Value) -> usize {
+        candidates["candidates"].as_array().map_or(0, Vec::len)
+    }
+
+    /// work/09 P3B (re-review fix): drives the FACTORED zone-search adapter core
+    /// ([`zone_candidates_and_coverage_in_snapshot`]) plus the readiness gate across a no-sleep
+    /// activation swap, and proves the candidate set AND `scope` coverage stay WHOLLY OLD for an
+    /// already-open request and WHOLLY NEW for the next — i.e. they never straddle a generation swap.
+    /// This would FAIL if the adapter opened a fresh snapshot for candidates or for coverage.
+    #[test]
+    fn zone_candidates_and_coverage_share_one_snapshot_across_a_swap() {
+        let Ok(pg_config) = PgConfig::discover() else {
+            return; // managed-PG harness absent → skip cleanly
+        };
+        let root = tempfile::Builder::new()
+            .prefix("jurisearch-p3b-zoneswap.")
+            .tempdir()
+            .unwrap();
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path()).unwrap();
+        postgres.run_migrations().unwrap();
+
+        // Generation A: ONE Cassation decision with an official motivations zone unit.
+        seed_decision_with_zone(&postgres, "cass:ZA", "za-mot");
+        let g1 =
+            create_generation_from_public(&postgres, "core", 1, Some("core-zone-g0001")).unwrap();
+        activate_generation(&postgres, "core", &g1, &stamps(1, "core-zone-g0001"), None).unwrap();
+
+        let query_text = "alpha";
+        let zone = "motivations";
+        let as_of = "2024-06-01";
+        let query = bm25_zone_query(query_text, zone, as_of);
+
+        // Open ONE request snapshot, run the readiness gate + the candidate/coverage reads on it.
+        let mut snapshot = postgres.begin_snapshot().unwrap();
+        ensure_zone_retrieval_readiness(&mut *snapshot, false, None).unwrap();
+        let (cands_a, cov_a) =
+            zone_candidates_and_coverage_in_snapshot(&mut *snapshot, &query).unwrap();
+        assert_eq!(decisions(&cov_a), 1);
+        assert_eq!(candidate_count(&cands_a), 1);
+
+        // Swap in Generation B with a SECOND zone-bearing decision, at sequence 2.
+        seed_decision_with_zone(&postgres, "cass:ZB", "zb-mot");
+        let g2 =
+            create_generation_from_public(&postgres, "core", 2, Some("core-zone-g0002")).unwrap();
+        activate_generation(
+            &postgres,
+            "core",
+            &g2,
+            &stamps(2, "core-zone-g0002"),
+            Some(1),
+        )
+        .unwrap();
+
+        // The already-open request: candidates AND scope coverage are wholly-old (gen A: one decision).
+        let (cands_old, cov_old) =
+            zone_candidates_and_coverage_in_snapshot(&mut *snapshot, &query).unwrap();
+        assert_eq!(
+            decisions(&cov_old),
+            1,
+            "scope coverage is wholly-old for the open request"
+        );
+        assert_eq!(
+            candidate_count(&cands_old),
+            1,
+            "candidates are wholly-old for the open request"
+        );
+        drop(snapshot);
+
+        // The next request: candidates AND scope coverage are wholly-new (gen B: two decisions).
+        let mut next = postgres.begin_snapshot().unwrap();
+        let (cands_new, cov_new) =
+            zone_candidates_and_coverage_in_snapshot(&mut *next, &query).unwrap();
+        assert_eq!(
+            decisions(&cov_new),
+            2,
+            "the next request sees the new scope coverage"
+        );
+        assert_eq!(
+            candidate_count(&cands_new),
+            2,
+            "the next request sees the new candidates"
+        );
     }
 }

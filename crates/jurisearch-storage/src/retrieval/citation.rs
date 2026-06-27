@@ -7,8 +7,8 @@ use super::*;
 /// as [`hybrid_candidates_json`] (a `candidates` array keyed on `document_id`), so callers can route
 /// to either backend transparently. The as-of validity filter yields one version per matched
 /// article, and exact-citation matches are ranked first.
-pub fn resolve_legi_citation_json(
-    postgres: &ManagedPostgres,
+pub fn resolve_legi_citation_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &CitationResolutionQuery<'_>,
 ) -> Result<String, StorageError> {
     let query_literal = sql_string_literal(query.query);
@@ -33,7 +33,7 @@ pub fn resolve_legi_citation_json(
         .unwrap_or_default();
     let limit = query.limit.max(1);
 
-    postgres.execute_read_sql(&format!(
+    snapshot.read_text(&format!(
         r#"
 WITH resolved AS (
     SELECT

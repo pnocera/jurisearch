@@ -25,7 +25,6 @@ use jurisearch_storage::generations::{create_generation_load_tables, rebuild_ser
 use jurisearch_storage::outbox::{
     DigestSource, OutboxContext, OutboxEvent, corpus_table_digests, emit_change, scope_kind,
 };
-use jurisearch_storage::retrieval::{FetchDocumentsQuery, fetch_documents_json};
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
 use jurisearch_syncd::{
     IncrementalApplyOutcome, apply_baseline, apply_incremental, apply_rebaseline, corpus_status,
@@ -303,12 +302,12 @@ fn rebaseline_scope_replaces_core_preserving_app_and_other_corpora() -> Result<(
         "the re-baselined generation matches the producer's re-embedded public"
     );
 
-    // ACCEPTANCE 2: a read on the client returns the NEW content from the active generation.
-    let fetched = fetch_documents_json(
-        &client,
-        &FetchDocumentsQuery {
-            document_ids: &["cass:RB1"],
-        },
+    // ACCEPTANCE 2: a read on the client returns the NEW content from the active generation. This client
+    // has TWO active corpora (core + the preserved `inpi`), so the read goes through the multi-corpus
+    // `jurisearch_server` UNION view — the documented non-indexed read path (work/09 P3B's snapshot read
+    // is single-corpus and refuses >1 corpus until 3C, which is asserted in `query_snapshot_p3b`).
+    let fetched = client.execute_sql(
+        "SELECT body FROM jurisearch_server.documents WHERE document_id = 'cass:RB1';",
     )?;
     assert!(
         fetched.contains("nouvelle analyse"),

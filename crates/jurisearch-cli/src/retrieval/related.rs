@@ -1,5 +1,8 @@
 //! related command: depth-1 graph neighbours with authority signals.
 
+use jurisearch_query::{RelatedInput, build_related};
+use jurisearch_storage::query::QueryStore;
+
 use crate::*;
 
 pub(crate) fn related_payload(req: RelatedRequest) -> Result<Value, ErrorObject> {
@@ -24,16 +27,15 @@ pub(crate) fn related_payload(req: RelatedRequest) -> Result<Value, ErrorObject>
         ))
     })?;
     let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
-    let response = related_neighbours_json(
-        &postgres,
-        &RelatedQuery {
-            document_id: &req.id,
+    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    build_related(
+        &RelatedInput {
+            document_id: req.id.clone(),
             rel: relation,
             limit: req.limit,
         },
+        &mut *snapshot,
     )
-    .map_err(storage_error_object)?;
-    parse_storage_json(&response)
 }
 
 pub(crate) fn emit_related(req: RelatedRequest) -> anyhow::Result<()> {

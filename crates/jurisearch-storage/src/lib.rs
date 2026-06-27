@@ -14,6 +14,7 @@ pub mod official_api_archive;
 pub mod outbox;
 pub mod package_catalog;
 pub mod projection;
+pub mod query;
 pub mod reference;
 pub mod retrieval;
 pub mod runtime;

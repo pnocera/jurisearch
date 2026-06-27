@@ -1,5 +1,10 @@
 //! search command: hybrid/bm25/dense retrieval, citation routing, pagination cursors.
 
+use jurisearch_storage::query::{QueryStore, ReadSnapshot};
+use jurisearch_storage::retrieval::{
+    hybrid_candidates_in_snapshot, resolve_legi_citation_in_snapshot,
+};
+
 use crate::*;
 
 pub(crate) fn emit_search(req: SearchRequest) -> anyhow::Result<()> {
@@ -195,8 +200,12 @@ pub(crate) fn search_with_postgres(
         };
         ensure_query_readiness(postgres, readiness_gate)?;
     }
-    let execution = SearchExecution::new(
-        postgres,
+    // work/09 P3B: the readiness gate is an adapter-side precondition (above, pre-snapshot); the request
+    // then runs all reads — structured-citation resolution AND the hybrid fallback — through ONE read
+    // snapshot, so a generation swap mid-request can never split the two reads across topologies.
+    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    let mut execution = SearchExecution::new(
+        &mut *snapshot,
         req,
         retrieval_mode,
         query_text,
@@ -213,7 +222,7 @@ pub(crate) fn search_with_postgres(
 /// execution, and response-shaping steps be small `&self` methods instead of one long function,
 /// without threading a dozen locals through each. Postgres stays concrete (no retriever trait).
 struct SearchExecution<'a> {
-    postgres: &'a ManagedPostgres,
+    snapshot: &'a mut dyn ReadSnapshot,
     req: &'a SearchRequest,
     retrieval_mode: RetrievalMode,
     query_text: &'a str,
@@ -243,7 +252,7 @@ struct RoutedSearch {
 
 impl<'a> SearchExecution<'a> {
     fn new(
-        postgres: &'a ManagedPostgres,
+        snapshot: &'a mut dyn ReadSnapshot,
         req: &'a SearchRequest,
         retrieval_mode: RetrievalMode,
         query_text: &'a str,
@@ -281,7 +290,7 @@ impl<'a> SearchExecution<'a> {
             req.top_k.saturating_add(1)
         };
         Self {
-            postgres,
+            snapshot,
             req,
             retrieval_mode,
             query_text,
@@ -300,7 +309,7 @@ impl<'a> SearchExecution<'a> {
 
     /// Hybrid retrieval (embedding + BM25/dense/RRF). Run for conceptual queries, explicit bm25/dense
     /// modes, or as the fallback when structured citation resolution finds nothing.
-    fn run_hybrid_candidates(&self) -> Result<Value, ErrorObject> {
+    fn run_hybrid_candidates(&mut self) -> Result<Value, ErrorObject> {
         let (query_embedding, embedding_fingerprint) = if self.retrieval_mode.uses_dense() {
             let (literal, fingerprint) = match self.embedder {
                 Some(prepared) => prepared.embed(self.req.query.as_str())?,
@@ -310,8 +319,8 @@ impl<'a> SearchExecution<'a> {
         } else {
             (None, None)
         };
-        let response = hybrid_candidates_json(
-            self.postgres,
+        let response = hybrid_candidates_in_snapshot(
+            self.snapshot,
             &HybridCandidateQuery {
                 query_text: self.query_text,
                 query_embedding: query_embedding.as_deref(),
@@ -339,7 +348,7 @@ impl<'a> SearchExecution<'a> {
     /// Intent routing. A citation-shaped query (`Article <n>`) in Hybrid mode resolves structurally;
     /// a structured miss falls back to hybrid so a malformed citation still returns results. Conceptual
     /// queries and explicit bm25/dense modes go straight to hybrid.
-    fn run_structured_citation_or_fallback(&self) -> Result<RoutedSearch, ErrorObject> {
+    fn run_structured_citation_or_fallback(&mut self) -> Result<RoutedSearch, ErrorObject> {
         let citation_intent = legi_citation_routing(&self.req.query, self.as_of.as_str());
         let query_type = if citation_intent.is_some() {
             "citation"
@@ -348,8 +357,8 @@ impl<'a> SearchExecution<'a> {
         };
         let (response, chosen_backend, fallback_path) = match citation_intent {
             Some(parsed) if matches!(self.retrieval_mode, RetrievalMode::Hybrid) => {
-                let structured = resolve_legi_citation_json(
-                    self.postgres,
+                let structured = resolve_legi_citation_in_snapshot(
+                    self.snapshot,
                     &CitationResolutionQuery {
                         query: parsed.citation_query.as_str(),
                         article_number: parsed.article_number.as_str(),

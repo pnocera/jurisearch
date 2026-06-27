@@ -59,9 +59,7 @@ pub(crate) fn open_query_index(
 /// standard `dependency_unavailable` error. The storage helpers return serialized JSON strings; this
 /// is the shared bridge into the CLI's `Value` world (replaces the repeated
 /// `serde_json::from_str(...).map_err(|e| dependency_unavailable(e.to_string()))`).
-pub(crate) fn parse_storage_json(response: &str) -> Result<Value, ErrorObject> {
-    serde_json::from_str(response).map_err(|error| dependency_unavailable(error.to_string()))
-}
+pub(crate) use jurisearch_query::parse_storage_json;
 
 pub(crate) fn open_index_for_bulk_ingest(index_dir: &Path) -> Result<ManagedPostgres, ErrorObject> {
     let pg_config = PgConfig::discover().map_err(storage_error_object)?;

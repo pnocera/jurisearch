@@ -16,6 +16,7 @@ jurisearch-core = { path = "../jurisearch-core" }
 jurisearch-embed = { path = "../jurisearch-embed" }
 jurisearch-ingest = { path = "../jurisearch-ingest" }
 jurisearch-official-api = { path = "../jurisearch-official-api" }
+jurisearch-query = { path = "../jurisearch-query" }
 jurisearch-render = { path = "../jurisearch-render" }
 jurisearch-storage = { path = "../jurisearch-storage" }
 jurisearch-transport = { path = "../jurisearch-transport" }

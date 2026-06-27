@@ -11,6 +11,7 @@
 //! before ranking and limiting, so an out-of-scope high scorer can never consume a pool slot and starve
 //! an in-scope hit (and the dense ANN pool is selected from the requested zone, not globally).
 
+use crate::query::{QueryStore, ReadSnapshot};
 use crate::retrieval::{
     DecisionFilters, RRF_K, RetrievalCursor, RetrievalMode, RetrievalOptions,
     document_cursor_predicate, effective_probes, effective_rrf_weights, format_sql_f64,
@@ -199,8 +200,18 @@ ranked AS (
 /// Zone-scoped hybrid retrieval: one best official-zone fragment per decision, ranked within `zone`.
 /// Returns the same candidate JSON shape as the main path plus `zone`/`zone_accurate`/`provider`, with
 /// a document keyset cursor (`doc:<score>:<document_id>`) shared with `GroupBy::Document`.
+/// Legacy one-shot wrapper over [`zone_candidates_in_snapshot`]: open a read snapshot and delegate (for
+/// deferred callers that hold a [`ManagedPostgres`]). The `search --zone` path uses the snapshot core.
 pub fn zone_candidates_json(
     postgres: &ManagedPostgres,
+    query: &ZoneCandidateQuery<'_>,
+) -> Result<String, StorageError> {
+    let mut snapshot = postgres.begin_snapshot()?;
+    zone_candidates_in_snapshot(&mut *snapshot, query)
+}
+
+pub fn zone_candidates_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &ZoneCandidateQuery<'_>,
 ) -> Result<String, StorageError> {
     let query_text = sql_string_literal(query.query_text);
@@ -216,7 +227,7 @@ pub fn zone_candidates_json(
     );
     let ranked_ctes = ranked_zone_ctes(query, &query_text, &zone_literal, &doc_scope)?;
     let set_ivfflat_probes = if query.retrieval_mode.uses_dense() {
-        let stored_probes = manifest_default_probes(postgres, "zone_embedding")?;
+        let stored_probes = manifest_default_probes(snapshot, "zone_embedding")?;
         format!(
             "SET ivfflat.probes = {};\n\n",
             effective_probes(&query.options, stored_probes)
@@ -291,5 +302,5 @@ SELECT jsonb_build_object(
 )::text;
 "#
     );
-    postgres.execute_read_sql(&sql)
+    snapshot.read_text(&sql)
 }

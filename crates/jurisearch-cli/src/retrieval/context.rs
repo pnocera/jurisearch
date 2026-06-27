@@ -1,5 +1,8 @@
 //! context command: structural neighbourhood (ancestry, siblings).
 
+use jurisearch_query::{ContextInput, build_context};
+use jurisearch_storage::query::QueryStore;
+
 use crate::*;
 
 pub(crate) fn emit_context(req: ContextRequest) -> anyhow::Result<()> {
@@ -18,21 +21,13 @@ pub(crate) fn context_payload(req: ContextRequest) -> Result<Value, ErrorObject>
     }
     validate_as_of(req.as_of.as_deref())?;
     let postgres = open_query_index(req.index_dir.as_deref(), QueryReadinessGate::Fetch)?;
-    let response = context_documents_json(
-        &postgres,
-        &ContextDocumentsQuery {
-            document_id: req.id.as_str(),
-            as_of: req.as_of.as_deref(),
+    let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    build_context(
+        &ContextInput {
+            document_id: req.id.clone(),
+            as_of: req.as_of.clone(),
             include_siblings: req.siblings,
         },
+        &mut *snapshot,
     )
-    .map_err(storage_error_object)?;
-    let response: Value = parse_storage_json(&response)?;
-    if response["target"].is_null() {
-        Err(no_results(
-            "context returned no valid document for the requested ID and --as-of date",
-        ))
-    } else {
-        Ok(response)
-    }
 }

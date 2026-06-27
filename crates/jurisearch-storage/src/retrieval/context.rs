@@ -2,8 +2,8 @@
 
 use super::*;
 
-pub fn context_documents_json(
-    postgres: &ManagedPostgres,
+pub fn context_documents_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
     query: &ContextDocumentsQuery<'_>,
 ) -> Result<String, StorageError> {
     let document_id = sql_string_literal(query.document_id);
@@ -22,7 +22,7 @@ pub fn context_documents_json(
     };
     let sibling_limit = DEFAULT_CONTEXT_SIBLING_LIMIT;
 
-    postgres.execute_read_sql(&format!(
+    snapshot.read_text(&format!(
         r#"
 WITH target_raw AS (
     SELECT

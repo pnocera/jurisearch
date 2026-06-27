@@ -4,7 +4,6 @@
 
 use jurisearch_core::error::{ErrorCode, ErrorObject};
 use jurisearch_storage::ingest_accounting::CoverageMetric;
-use jurisearch_storage::runtime::StorageError;
 
 use crate::QueryReadinessGate;
 
@@ -32,50 +31,18 @@ pub(crate) fn index_not_query_ready(
     }
 }
 
-pub(crate) fn index_unavailable(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::IndexUnavailable,
-        message: message.into(),
-        suggestions: vec![
-            "Build or select an index before running retrieval commands.".into(),
-            "Pass `--index-dir <path>` or set JURISEARCH_INDEX_DIR.".into(),
-        ],
-    }
-}
-
-pub(crate) fn dependency_unavailable(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::DependencyUnavailable,
-        message: message.into(),
-        suggestions: vec![
-            "Check PostgreSQL extension setup and embedding endpoint configuration.".into(),
-        ],
-    }
-}
-
-pub(crate) fn no_results(message: impl Into<String>) -> ErrorObject {
-    ErrorObject {
-        code: ErrorCode::NoResults,
-        message: message.into(),
-        suggestions: vec!["Try a different query, ID, or --as-of date.".into()],
-    }
-}
+// work/09 P3B: the read path's error vocabulary is owned by `jurisearch-query` (the single authority
+// shared with the site service), so these stay byte-identical across the CLI and the service. The CLI
+// re-exports them under their existing crate-local names so call sites are unchanged.
+pub(crate) use jurisearch_query::{
+    dependency_unavailable, index_unavailable, no_results, storage_error_object,
+};
 
 pub(crate) fn upstream_unavailable(message: impl Into<String>) -> ErrorObject {
     ErrorObject {
         code: ErrorCode::Upstream,
         message: message.into(),
         suggestions: vec!["Check the configured OpenAI-compatible embeddings endpoint.".into()],
-    }
-}
-
-pub(crate) fn storage_error_object(error: StorageError) -> ErrorObject {
-    let message = error.to_string();
-    match &error {
-        StorageError::StorageLockBusy { .. } | StorageError::AdvisoryLockBusy { .. } => {
-            index_unavailable(message)
-        }
-        _ => dependency_unavailable(message),
     }
 }
 
