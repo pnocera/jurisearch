@@ -85,6 +85,19 @@ pub fn schema_for_generation(generation: &str) -> String {
     format!("{SERVER_VIEW_SCHEMA}_{generation}")
 }
 
+/// Parse the per-corpus generation counter out of a `<corpus>_g<NNNN>` label — the inverse of
+/// [`generation_name`]. `None` if `generation` is not a well-formed label for `corpus`. A media
+/// applier uses this to honour the producer's DETERMINISTIC generation label (plan P5): the physical
+/// generation a client creates is named by `manifest.identity.generation`, not a client-local counter,
+/// so a later incremental's `active_generation` precondition resolves even on a fresh client that
+/// jumped straight to a re-baseline.
+#[must_use]
+pub fn generation_counter_of(corpus: &str, generation: &str) -> Option<u32> {
+    generation
+        .strip_prefix(&format!("{corpus}_g"))
+        .and_then(|n| n.parse::<u32>().ok())
+}
+
 /// Create the physical schema for a new generation and clone the replicated tables into it
 /// (`LIKE public.<t> INCLUDING ALL` — columns, defaults, CHECKs, generated columns, and the BM25 /
 /// IVFFlat index *definitions*), then register the generation as `building` (design §7.2). The
@@ -493,6 +506,104 @@ pub fn next_generation_counter<C: GenericClient>(
     Ok(highest + 1)
 }
 
+/// Drop a leftover `building` generation (physical schema + registry row) for `corpus`/`generation`
+/// so a RETRIED media apply can re-create the same DETERMINISTIC generation label after a prior
+/// attempt failed mid-build (plan P5). A no-op if no row exists; refuses to touch a non-`building`
+/// row (never drops an `active`/`retired` generation). The lookup (`FOR UPDATE`), `DROP SCHEMA ...
+/// CASCADE`, and registry delete run in ONE transaction, so a crash mid-cleanup can never leave a
+/// dropped schema with a dangling registry row (plan P5 r1 BLOCKER). The `CASCADE` here is the allowed
+/// cleanup of a registry-confirmed, off-read-path private schema — never the switch path. Callers MUST
+/// hold the per-corpus apply lock ([`acquire_corpus_apply_lock`]) so no concurrent apply is building
+/// the same label — that, not the row state alone, is what proves the `building` row is abandoned.
+///
+/// # Errors
+/// [`StorageError::Generations`] if the registered generation is not `building`, or
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn reset_building_generation(
+    client: &mut postgres::Client,
+    corpus: &str,
+    generation: &str,
+) -> Result<(), StorageError> {
+    let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
+    let row = tx
+        .query_opt(
+            "SELECT physical_schema, state FROM jurisearch_control.generation_registry \
+             WHERE corpus = $1 AND generation = $2 FOR UPDATE;",
+            &[&corpus, &generation],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let Some(row) = row else {
+        tx.commit().map_err(StorageError::PostgresClient)?;
+        return Ok(()); // nothing to clean up
+    };
+    let state: String = row.get("state");
+    if state != "building" {
+        // tx drops → rollback; nothing was changed.
+        return Err(StorageError::Generations {
+            message: format!(
+                "refusing to reset generation `{generation}` for `{corpus}` in state `{state}` \
+                 (only a half-built `building` generation may be reset)"
+            ),
+        });
+    }
+    let physical_schema: String = row.get("physical_schema");
+    tx.batch_execute(&format!(
+        "DROP SCHEMA IF EXISTS {} CASCADE;",
+        sql_identifier(&physical_schema)
+    ))
+    .map_err(StorageError::PostgresClient)?;
+    tx.execute(
+        "DELETE FROM jurisearch_control.generation_registry \
+         WHERE corpus = $1 AND generation = $2;",
+        &[&corpus, &generation],
+    )
+    .map_err(StorageError::PostgresClient)?;
+    tx.commit().map_err(StorageError::PostgresClient)?;
+    Ok(())
+}
+
+/// The base key for the per-corpus CLIENT apply lock (plan P5 r1 BLOCKER). A media apply holds it
+/// across reset → create → load → build → switch, so two concurrent applies of the SAME corpus
+/// serialize — and the retriable [`reset_building_generation`] can never drop a generation another
+/// apply is actively building. Distinct from the producer-side `PACKAGE_BUILD_LOCK_BASE` (a different
+/// DB) and the global switch lock `APPLY_ADVISORY_LOCK_KEY`.
+pub const CORPUS_APPLY_LOCK_BASE: i32 = 0x6a61_7031; // "jap1"
+
+/// Take the per-corpus client apply lock (session-scoped, fail-by-blocking) — see
+/// [`CORPUS_APPLY_LOCK_BASE`]. Released by [`release_corpus_apply_lock`] or when the connection closes.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn acquire_corpus_apply_lock(
+    client: &mut postgres::Client,
+    corpus: &str,
+) -> Result<(), StorageError> {
+    client
+        .execute(
+            "SELECT pg_advisory_lock($1, hashtext($2));",
+            &[&CORPUS_APPLY_LOCK_BASE, &corpus],
+        )
+        .map(|_| ())
+        .map_err(StorageError::PostgresClient)
+}
+
+/// Release the per-corpus client apply lock taken by [`acquire_corpus_apply_lock`].
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn release_corpus_apply_lock(
+    client: &mut postgres::Client,
+    corpus: &str,
+) -> Result<(), StorageError> {
+    client
+        .execute(
+            "SELECT pg_advisory_unlock($1, hashtext($2));",
+            &[&CORPUS_APPLY_LOCK_BASE, &corpus],
+        )
+        .map(|_| ())
+        .map_err(StorageError::PostgresClient)
+}
+
 /// The non-generated columns of a replicated `public` table, in ordinal order — the explicit column
 /// list used for both COPY-out (producer) and COPY-in (client), and recorded per file in the manifest
 /// so producer and consumer move the **same** columns in the **same** order (plan P3 D2). Generated
@@ -760,6 +871,44 @@ pub fn rebuild_server_views<C: GenericClient>(client: &mut C) -> Result<(), Stor
     Ok(())
 }
 
+/// The §7.3 cursor guard for a generation switch — how the incoming package's position must relate to
+/// the corpus's CURRENT cursor. Encoding the three legitimate transitions in one type keeps a single
+/// switch implementation (plan P5): the baseline keeps exact semantics, the re-baseline gets
+/// forward-supersession, and `FirstBaseline` still cannot silently clobber an installed corpus (P2/P3).
+#[derive(Debug, Clone, Copy)]
+pub enum CursorGuard {
+    /// First baseline of a corpus: there must be NO existing `corpus_state` row.
+    FirstBaseline,
+    /// Ordinary controlled switch: the current cursor must equal exactly this sequence.
+    ExactPrevious(i64),
+    /// Self-sufficient re-baseline (full reload, §7.4): the current cursor must be absent OR strictly
+    /// less than `result_sequence`, so a long-offline client — or one partway through the superseded
+    /// incremental chain — jumps forward. A cursor already at/ahead of `result_sequence` is rejected;
+    /// idempotency and anti-regression are decided BEFORE the long build, this is the switch-time net.
+    RebaselineForward { result_sequence: i64 },
+}
+
+/// A dense-index `index_manifest` row to write INSIDE the activation transaction (plan P5 isolation
+/// fix): writing global dense query metadata ATOMICALLY with the view switch prevents a pre-switch
+/// global mutation that the still-active OLD generation (or another corpus) could observe, and stops a
+/// build failure from leaking metadata. `schema` is the generation the coverage counts are read over.
+/// (Note: `index_manifest` keys are still global — true per-corpus dense isolation is deferred; see the
+/// P5 review's risk note.)
+#[derive(Debug, Clone)]
+pub struct DenseManifestEntry {
+    pub schema: String,
+    pub key: String,
+    pub parent_table: String,
+    pub embedding_table: String,
+    pub index_name: String,
+    pub lists: u32,
+    pub default_probes: u32,
+    pub embedding_fingerprint: String,
+    pub embedding_model: String,
+    pub embedding_dimension: i32,
+    pub embedding_normalize: bool,
+}
+
 /// The compatibility stamps recorded on activation (mirrors the contract crate's stamp set).
 #[derive(Debug, Clone)]
 pub struct ActivationStamps<'a> {
@@ -773,12 +922,10 @@ pub struct ActivationStamps<'a> {
 }
 
 /// Activate a `building` generation for a corpus and repoint that corpus's views in ONE short
-/// transaction (design §7.4): take the package-apply advisory lock with a low `lock_timeout`
-/// (fail-clean), validate the target registry row is `building` and the current cursor matches
-/// `expected_previous_sequence` (the §7.3 cursor guard; `None` for the first baseline), retire the
-/// old active generation, mark this one `active`, write the `corpus_state` cursor (this function is
-/// the **sole writer** of `corpus_state`), rebuild the stable views, and commit as a unit. A failure
-/// after the cursor advance (e.g. a view-rebuild error) rolls the whole switch back — no half-state.
+/// transaction (design §7.4), with the §7.3 cursor guard expressed as `Option<i64>`: `None` is the
+/// first baseline (no prior cursor), `Some(n)` requires the current cursor to be exactly `n`. A thin
+/// wrapper over [`activate_generation_with_guard`] for the baseline/controlled-switch callers that
+/// ship no dense `index_manifest` rows.
 ///
 /// # Errors
 /// [`StorageError::PostgresClient`] / [`StorageError::AdvisoryLockBusy`] on lock contention, or
@@ -789,6 +936,33 @@ pub fn activate_generation(
     generation: &str,
     stamps: &ActivationStamps<'_>,
     expected_previous_sequence: Option<i64>,
+) -> Result<(), StorageError> {
+    let guard = match expected_previous_sequence {
+        None => CursorGuard::FirstBaseline,
+        Some(n) => CursorGuard::ExactPrevious(n),
+    };
+    activate_generation_with_guard(postgres, corpus, generation, stamps, guard, &[])
+}
+
+/// Activate a `building` generation and repoint that corpus's views in ONE short transaction
+/// (design §7.4): take the package-apply advisory lock with a low `lock_timeout` (fail-clean),
+/// validate the target registry row is `building` and the current cursor satisfies `guard` (the §7.3
+/// cursor guard), retire the old active generation, mark this one `active`, write the `corpus_state`
+/// cursor (this function is the **sole writer** of `corpus_state`), write any dense `index_manifest`
+/// rows ATOMICALLY with the switch (plan P5 — no pre-switch global metadata mutation), rebuild the
+/// stable views, and commit as a unit. A failure after the cursor advance rolls the whole switch back
+/// — no half-state, and no leaked dense metadata.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] / [`StorageError::AdvisoryLockBusy`] on lock contention, or
+/// [`StorageError::Generations`] if the target row is not `building` or the cursor guard fails.
+pub fn activate_generation_with_guard(
+    postgres: &ManagedPostgres,
+    corpus: &str,
+    generation: &str,
+    stamps: &ActivationStamps<'_>,
+    guard: CursorGuard,
+    dense_manifests: &[DenseManifestEntry],
 ) -> Result<(), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
@@ -836,11 +1010,12 @@ pub fn activate_generation(
         }
     }
 
-    // The §7.3 cursor guard: ALWAYS read the current cursor (`FOR UPDATE`) and require it matches the
-    // caller's expectation. `None` means "first baseline" → there must be NO existing `corpus_state`
-    // row; `Some(n)` means the cursor must currently be exactly `n`. Crucially, `None` against an
-    // already-installed corpus is rejected (not silently accepted) so a stale/miswired switch cannot
-    // clobber a live cursor by passing `None`.
+    // The §7.3 cursor guard: ALWAYS read the current cursor (`FOR UPDATE`, so a concurrent
+    // apply/switch that advances it is observed here) and require it satisfies `guard`.
+    // `FirstBaseline` requires NO existing `corpus_state` row — a `None` against an already-installed
+    // corpus is rejected (not silently accepted) so a stale/miswired switch cannot clobber a live
+    // cursor. `ExactPrevious(n)` requires the cursor to be exactly `n`. `RebaselineForward` accepts an
+    // absent cursor or one strictly behind `result_sequence` (forward supersession, §7.4).
     let current_sequence: Option<i64> = tx
         .query_opt(
             "SELECT sequence FROM jurisearch_control.corpus_state WHERE corpus = $1 FOR UPDATE;",
@@ -848,16 +1023,37 @@ pub fn activate_generation(
         )
         .map_err(StorageError::PostgresClient)?
         .map(|row| row.get("sequence"));
-    match (expected_previous_sequence, current_sequence) {
-        (None, None) => {}
-        (Some(expected), Some(current)) if current == expected => {}
-        (expected, found) => {
-            return Err(StorageError::Generations {
-                message: format!(
-                    "cursor mismatch for `{corpus}`: expected previous sequence {expected:?}, \
-                     found {found:?}"
-                ),
-            });
+    match guard {
+        CursorGuard::FirstBaseline => {
+            if let Some(found) = current_sequence {
+                return Err(StorageError::Generations {
+                    message: format!(
+                        "cursor guard for `{corpus}`: FirstBaseline requires no cursor, found {found}"
+                    ),
+                });
+            }
+        }
+        CursorGuard::ExactPrevious(expected) => {
+            if current_sequence != Some(expected) {
+                return Err(StorageError::Generations {
+                    message: format!(
+                        "cursor mismatch for `{corpus}`: expected previous sequence {expected}, \
+                         found {current_sequence:?}"
+                    ),
+                });
+            }
+        }
+        CursorGuard::RebaselineForward { result_sequence } => {
+            if let Some(current) = current_sequence
+                && current >= result_sequence
+            {
+                return Err(StorageError::Generations {
+                    message: format!(
+                        "re-baseline forward guard for `{corpus}`: current sequence {current} is not \
+                         behind result {result_sequence} (idempotency/regression decided pre-build)"
+                    ),
+                });
+            }
         }
     }
 
@@ -910,6 +1106,27 @@ pub fn activate_generation(
         ],
     )
     .map_err(StorageError::PostgresClient)?;
+
+    // Write the dense `index_manifest` rows INSIDE this switch transaction (plan P5): a media apply
+    // that previously wrote them BEFORE activation mutated global dense query metadata while the OLD
+    // generation was still live, and leaked it on a post-write failure. Doing it here makes the dense
+    // metadata atomic with the cursor advance + view repoint.
+    for entry in dense_manifests {
+        upsert_generation_dense_manifest(
+            &mut tx,
+            &entry.schema,
+            &entry.key,
+            &entry.parent_table,
+            &entry.embedding_table,
+            &entry.index_name,
+            entry.lists,
+            entry.default_probes,
+            &entry.embedding_fingerprint,
+            &entry.embedding_model,
+            entry.embedding_dimension,
+            entry.embedding_normalize,
+        )?;
+    }
 
     rebuild_server_views(&mut tx)?;
     tx.commit().map_err(StorageError::PostgresClient)?;

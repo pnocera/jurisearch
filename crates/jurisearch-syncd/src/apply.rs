@@ -18,9 +18,10 @@ pub const CLIENT_VERSION: Version = Version::new(0, 1, 0);
 
 use jurisearch_storage::dense::{DENSE_VECTOR_INDEX_NAME, recommended_probes};
 use jurisearch_storage::generations::{
-    ActivationStamps, GenerationIndexReport, REPLICATED_TABLES, build_generation_indexes,
-    create_generation_load_tables, generation_name, generation_schema, next_generation_counter,
-    schema_for_generation, upsert_generation_dense_manifest,
+    ActivationStamps, CursorGuard, DenseManifestEntry, GenerationIndexReport, REPLICATED_TABLES,
+    acquire_corpus_apply_lock, activate_generation_with_guard, build_generation_indexes,
+    create_generation_load_tables, generation_counter_of, generation_name, generation_schema,
+    release_corpus_apply_lock, reset_building_generation, schema_for_generation,
 };
 use jurisearch_storage::generations::{primary_key_columns, replicated_table_columns};
 use jurisearch_storage::incremental::{
@@ -53,8 +54,8 @@ pub enum BaselineApplyOutcome {
     AlreadyApplied { corpus: String, sequence: u64 },
 }
 
-/// Apply a baseline artifact directory onto `client` (plan P3). `verifier` checks the manifest
-/// signature (stub-OK for P3 via `AcceptAllVerifier`).
+/// Apply a baseline artifact directory onto `client` (plan P3) — a thin wrapper over the shared media
+/// apply with the first-baseline cursor guard. `verifier` checks the manifest signature.
 ///
 /// # Errors
 /// [`SyncError`] with a [`RejectCode`] on a contract refusal, or a storage/IO error.
@@ -62,6 +63,59 @@ pub fn apply_baseline(
     client: &ManagedPostgres,
     artifact_dir: &Path,
     verifier: &dyn Verifier,
+) -> Result<BaselineApplyOutcome, SyncError> {
+    apply_media_package(client, artifact_dir, verifier, MediaApplyMode::Baseline)
+}
+
+/// Apply a RE-BASELINE artifact directory onto `client` (plan P5): a full reissue that scope-replaces
+/// ONLY this corpus's server set — loaded into a fresh generation off the live read path, then swapped
+/// in by the §7.4 short switch with a FORWARD-SUPERSESSION cursor guard, so a long-offline client (or
+/// one partway through the superseded incremental chain) jumps forward to the re-baseline's sequence.
+/// `jurisearch_app` and every other installed corpus are untouched (INV-4/5).
+///
+/// # Errors
+/// [`SyncError`] with a [`RejectCode`] on a contract refusal, or a storage/IO error.
+pub fn apply_rebaseline(
+    client: &ManagedPostgres,
+    artifact_dir: &Path,
+    verifier: &dyn Verifier,
+) -> Result<BaselineApplyOutcome, SyncError> {
+    apply_media_package(client, artifact_dir, verifier, MediaApplyMode::Rebaseline)
+}
+
+/// Which media package is being applied — selects the accepted `package_kind`, whether a client BEHIND
+/// the package may apply it, and the §7.3 cursor guard at the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaApplyMode {
+    Baseline,
+    Rebaseline,
+}
+
+impl MediaApplyMode {
+    fn expected_kind(self) -> PackageKind {
+        match self {
+            MediaApplyMode::Baseline => PackageKind::Baseline,
+            MediaApplyMode::Rebaseline => PackageKind::Rebaseline,
+        }
+    }
+
+    /// A re-baseline is self-sufficient: applying it onto a corpus BEHIND its result sequence is valid
+    /// (the point of the P7 baseline shortcut). A first baseline onto an installed corpus is not.
+    fn behind_is_applicable(self) -> bool {
+        matches!(self, MediaApplyMode::Rebaseline)
+    }
+}
+
+/// Shared media (baseline / re-baseline) apply: verify → gates → per-file digests → idempotency →
+/// load into a fresh `building` generation NAMED BY THE MANIFEST → build indexes → validate index
+/// contract + postconditions → atomic switch (cursor guard + dense `index_manifest`, one txn). The
+/// corpus is never query-ready until its indexes are built (INV-6); the only globally-visible mutation
+/// is the [`activate_generation_with_guard`] switch.
+fn apply_media_package(
+    client: &ManagedPostgres,
+    artifact_dir: &Path,
+    verifier: &dyn Verifier,
+    mode: MediaApplyMode,
 ) -> Result<BaselineApplyOutcome, SyncError> {
     // 1. Read + verify the signed manifest.
     let manifest_bytes = std::fs::read(jurisearch_package::artifact::manifest_path(artifact_dir))?;
@@ -72,11 +126,12 @@ pub fn apply_baseline(
     let manifest = &signed.payload;
     let corpus = manifest.identity.corpus.as_str().to_owned();
 
-    if manifest.identity.package_kind != PackageKind::Baseline {
+    if manifest.identity.package_kind != mode.expected_kind() {
         return Err(SyncError::reject(
             RejectCode::BaselineRequired,
             format!(
-                "apply_baseline only applies `baseline` packages, got `{}`",
+                "apply expected a `{}` package, got `{}`",
+                mode.expected_kind().as_str(),
                 manifest.identity.package_kind.as_str()
             ),
         ));
@@ -93,53 +148,91 @@ pub fn apply_baseline(
     // 3. Per-file digests (§11.1): every payload file must match its declared digest before load.
     verify_per_file_digests(artifact_dir, manifest)?;
 
-    // 4. Idempotency (D7): decide before creating any generation. The cursor identity is the
-    //    PACKAGE/artifact digest (`manifest.integrity.artifact_sha256`) — the SAME value the producer
-    //    catalog stores as `package_digest`, so the P4 chain link compares like-for-like (plan P3 r2
-    //    WARN-1). The canonical manifest digest stays an internal verification value. Both the package
-    //    id AND the package digest are compared, so two distinct packages with identical payload bytes
-    //    at the same sequence are not falsely treated as already-applied.
-    let result_sequence = manifest.apply.result_sequence.get();
-    let _manifest_digest = canonical_digest(manifest)
+    // 4. Canonicalisation precheck: the manifest must canonicalise (an integrity precondition).
+    canonical_digest(manifest)
         .map_err(|error| SyncError::reject(RejectCode::DigestMismatch, error.to_string()))?;
+
+    // 5. Serialize the whole apply for this corpus under the per-corpus apply lock (plan P5 r1
+    //    BLOCKER): no concurrent apply can build the same deterministic generation, and the retriable
+    //    building-generation reset can never drop a generation another apply is actively loading. Held
+    //    across idempotency → reset → create → load → build → switch; released on EVERY path.
+    let mut db = client.client()?;
+    acquire_corpus_apply_lock(&mut db, &corpus)?;
+    let outcome = apply_media_locked(client, &mut db, artifact_dir, manifest, mode);
+    let _ = release_corpus_apply_lock(&mut db, &corpus);
+    outcome
+}
+
+/// The locked body of [`apply_media_package`], run while holding the per-corpus apply lock on `db`:
+/// idempotency (RE-CHECKED under the lock, since a concurrent apply may have advanced the cursor) →
+/// load into the manifest-named `building` generation → build + validate → atomic switch.
+fn apply_media_locked(
+    client: &ManagedPostgres,
+    db: &mut postgres::Client,
+    artifact_dir: &Path,
+    manifest: &EmbeddedManifest,
+    mode: MediaApplyMode,
+) -> Result<BaselineApplyOutcome, SyncError> {
+    let corpus = manifest.identity.corpus.as_str().to_owned();
+    let result_sequence = manifest.apply.result_sequence.get();
     let package_id = manifest.identity.package_id.as_str();
+    // The cursor identity is the PACKAGE/artifact digest — the SAME value the producer catalog stores
+    // as `package_digest`, so the P4 chain link compares like-for-like (plan P3 r2 WARN-1).
     let package_digest = manifest.integrity.artifact_sha256.as_str();
-    if let Some(outcome) =
-        idempotency_decision(client, &corpus, result_sequence, package_id, package_digest)?
-    {
+
+    // Idempotency (D7), RE-CHECKED under the apply lock: both the package id AND digest are compared. A
+    // re-baseline is self-sufficient, so a client BEHIND its result sequence proceeds (not rejected as
+    // `BaselineRequired`).
+    if let Some(outcome) = idempotency_decision(
+        client,
+        &corpus,
+        result_sequence,
+        package_id,
+        package_digest,
+        mode.behind_is_applicable(),
+    )? {
         return Ok(outcome);
     }
 
-    // 5. Load into a fresh, invisible `building` generation.
-    let mut db = client.client()?;
-    let counter = next_generation_counter(&mut db, &corpus)?;
-    let generation = create_generation_load_tables(
-        &mut db,
-        &corpus,
-        counter,
-        Some(&manifest.identity.baseline_id),
-    )?;
+    // Load into a fresh `building` generation NAMED BY THE MANIFEST (plan P5 critical gap): the physical
+    // generation a client creates is the producer's DETERMINISTIC label, so a later incremental's
+    // `active_generation` precondition resolves even on a fresh client that jumped straight to a
+    // re-baseline. A leftover `building` generation from a failed prior attempt at the same label is
+    // reset first (safe: the apply lock proves no concurrent apply owns it), so the apply is retriable.
+    let generation = manifest.identity.generation.clone();
+    let counter = generation_counter_of(&corpus, &generation).ok_or_else(|| {
+        SyncError::reject(
+            RejectCode::DigestMismatch,
+            format!("manifest generation `{generation}` is not a <corpus>_g<NNNN> label"),
+        )
+    })?;
     let schema = generation_schema(&corpus, counter);
     debug_assert_eq!(schema, schema_for_generation(&generation));
 
-    copy_payload_in(&mut db, artifact_dir, manifest, &schema)?;
+    reset_building_generation(db, &corpus, &generation)?;
+    let created =
+        create_generation_load_tables(db, &corpus, counter, Some(&manifest.identity.baseline_id))?;
+    debug_assert_eq!(created, generation);
 
-    // 6. Build indexes INSIDE the generation, before it can ever be read (§9.3, INV-6).
-    let index_report = build_generation_indexes(&mut db, &generation, &corpus)?;
+    copy_payload_in(db, artifact_dir, manifest, &schema)?;
 
-    // 6b. Enforce the producer's index contract: every declared BM25/IVFFlat index must exist in the
-    //     generation with the right access method/table/column/lists/probes BEFORE the switch.
-    validate_index_contract(&mut db, &schema, manifest)?;
+    // Build indexes INSIDE the generation, before it can ever be read (§9.3, INV-6).
+    let index_report = build_generation_indexes(db, &generation, &corpus)?;
 
-    // 6c. Persist the dense `index_manifest` rows (with the package-declared `default_probes`), so the
-    //     client's dense query path honours the producer's probe tuning rather than a fallback
-    //     (plan P3 r3 WARN-2). Written before the cursor advances — part of the materialisation contract.
-    write_dense_index_manifests(&mut db, &schema, manifest)?;
+    // Enforce the producer's index contract: every declared BM25/IVFFlat index must exist in the
+    // generation with the right access method/table/column/lists/probes BEFORE the switch.
+    validate_index_contract(db, &schema, manifest)?;
 
-    // 7. Validate postconditions against the producer's declared digests BEFORE the switch.
+    // Assemble the dense `index_manifest` rows (with the package-declared `default_probes`). They are
+    // written INSIDE the activation transaction (plan P5 isolation fix), not before — so a re-baseline
+    // never mutates global dense query metadata while the OLD generation is still live.
+    let dense_manifests = dense_manifest_entries(&schema, manifest);
+
+    // Validate postconditions against the producer's declared digests BEFORE the switch.
     validate_postconditions(client, &corpus, &schema, manifest)?;
 
-    // 8. Atomic activation: the single globally-visible mutation (P2 `activate_generation`).
+    // Atomic activation: the single globally-visible mutation, with the mode's cursor guard and the
+    // dense `index_manifest` write folded into the same short transaction.
     let builder_versions = builder_versions_json(manifest);
     let stamps = ActivationStamps {
         sequence: i64::try_from(result_sequence).unwrap_or(i64::MAX),
@@ -148,18 +241,24 @@ pub fn apply_baseline(
         embedding_fingerprint: &manifest.compatibility.embedding_fingerprint,
         builder_versions: &builder_versions,
         last_package_id: Some(package_id),
-        // Cursor + generation_registry.validation_digest carry the PACKAGE digest (not the manifest
-        // digest), matching the producer catalog's `package_digest`.
         last_package_digest: Some(package_digest),
     };
-    // A first baseline expects no prior cursor (the idempotency step already rejected an existing one
-    // with a different identity); `None` is the §7.3 "first baseline" guard.
-    jurisearch_storage::generations::activate_generation(
+    let guard = match mode {
+        // A first baseline expects no prior cursor (idempotency already rejected an existing one with a
+        // different identity) — the §7.3 "first baseline" guard.
+        MediaApplyMode::Baseline => CursorGuard::FirstBaseline,
+        // A re-baseline supersedes forward: any cursor strictly behind `result_sequence` jumps to it.
+        MediaApplyMode::Rebaseline => CursorGuard::RebaselineForward {
+            result_sequence: i64::try_from(result_sequence).unwrap_or(i64::MAX),
+        },
+    };
+    activate_generation_with_guard(
         client,
         &corpus,
         &generation,
         &stamps,
-        None,
+        guard,
+        &dense_manifests,
     )?;
 
     Ok(BaselineApplyOutcome::Applied {
@@ -346,15 +445,13 @@ fn validate_index_contract(
     Ok(())
 }
 
-/// Persist the dense `index_manifest` rows so the client's dense query path reads the package-declared
-/// `default_probes` (plan P3 r3 WARN-2). Maps each declared IVFFlat index to its `index_manifest` key +
-/// parent/embedding tables, using the manifest's embedding metadata + declared lists/probes.
-fn write_dense_index_manifests(
-    db: &mut postgres::Client,
-    schema: &str,
-    manifest: &EmbeddedManifest,
-) -> Result<(), SyncError> {
+/// Assemble the dense `index_manifest` rows declared by the manifest (the package-tuned `default_probes`
+/// for each IVFFlat index over its loaded generation, plan P3 r3 WARN-2). Returned for the caller to
+/// write INSIDE the activation transaction (plan P5), rather than mutating global dense metadata before
+/// the switch. Maps each declared IVFFlat index to its `index_manifest` key + parent/embedding tables.
+fn dense_manifest_entries(schema: &str, manifest: &EmbeddedManifest) -> Vec<DenseManifestEntry> {
     let compat = &manifest.compatibility;
+    let mut entries = Vec::new();
     for ivf in &manifest.apply.index_build.ivfflat_finalize {
         let (key, parent_table, embedding_table) = if ivf.index == DENSE_VECTOR_INDEX_NAME {
             ("embedding", "chunks", "chunk_embeddings")
@@ -363,22 +460,21 @@ fn write_dense_index_manifests(
         } else {
             continue; // an unknown dense index is not part of the P3 manifest contract
         };
-        upsert_generation_dense_manifest(
-            db,
-            schema,
-            key,
-            parent_table,
-            embedding_table,
-            &ivf.index,
-            ivf.lists,
-            ivf.probes,
-            &compat.embedding_fingerprint,
-            &compat.embedding_model,
-            i32::try_from(compat.embedding_dimension).unwrap_or(0),
-            compat.embedding_normalize,
-        )?;
+        entries.push(DenseManifestEntry {
+            schema: schema.to_owned(),
+            key: key.to_owned(),
+            parent_table: parent_table.to_owned(),
+            embedding_table: embedding_table.to_owned(),
+            index_name: ivf.index.clone(),
+            lists: ivf.lists,
+            default_probes: ivf.probes,
+            embedding_fingerprint: compat.embedding_fingerprint.clone(),
+            embedding_model: compat.embedding_model.clone(),
+            embedding_dimension: i32::try_from(compat.embedding_dimension).unwrap_or(0),
+            embedding_normalize: compat.embedding_normalize,
+        });
     }
-    Ok(())
+    entries
 }
 
 /// The shape of a generation index for contract validation: access method, target table, the first
@@ -526,6 +622,7 @@ fn idempotency_decision(
     result_sequence: u64,
     package_id: &str,
     package_digest: &str,
+    behind_is_applicable: bool,
 ) -> Result<Option<BaselineApplyOutcome>, SyncError> {
     let mut db = client.client()?;
     let row = db
@@ -562,12 +659,16 @@ fn idempotency_decision(
         return Err(SyncError::reject(
             RejectCode::WrongGeneration,
             format!(
-                "corpus `{corpus}` is at sequence {current}, ahead of this baseline's {result_sequence}"
+                "corpus `{corpus}` is at sequence {current}, ahead of this package's {result_sequence}"
             ),
         ));
     }
-    // current < result_sequence with an existing cursor: a baseline onto an installed corpus is a
-    // re-baseline (P5), not a P3 first baseline.
+    // current < result_sequence with an existing cursor. A self-sufficient re-baseline (full reload)
+    // legitimately supersedes an installed-but-behind corpus → proceed. A first baseline onto an
+    // installed corpus is wrong → BaselineRequired (a re-baseline is the right package, P5).
+    if behind_is_applicable {
+        return Ok(None);
+    }
     Err(SyncError::reject(
         RejectCode::BaselineRequired,
         format!("corpus `{corpus}` already installed at {current}; a re-baseline is P5, not P3"),

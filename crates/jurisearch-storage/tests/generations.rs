@@ -8,7 +8,7 @@ use jurisearch_storage::{
         ActivationStamps, REPLICATED_TABLES, activate_generation, active_generation_schema,
         build_generation_indexes, create_generation_from_public, create_generation_load_tables,
         create_generation_schema, drop_retired_generation, generation_name, generation_schema,
-        populate_generation_from_public,
+        populate_generation_from_public, reset_building_generation,
     },
     ingest_accounting::load_or_compute_query_readiness,
     retrieval::{
@@ -258,6 +258,77 @@ fn control_and_app_survive_a_generation_drop() -> Result<(), StorageError> {
         "cass:GEN1",
         "jurisearch_app survives the drop"
     );
+    Ok(())
+}
+
+#[test]
+fn operated_cleanup_refuses_a_live_generation() -> Result<(), StorageError> {
+    // Plan P5 (codex review): the operated cleanup `DROP SCHEMA ... CASCADE` is allowed ONLY for a
+    // registry-confirmed RETIRED private generation — never an active/building/missing one — and the
+    // retriable `reset_building_generation` is similarly confined to a half-built `building` row.
+    let Some(pg_config) = discover_pg_config("generations cleanup safety")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-gen-cleanup.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_public_core(&postgres)?;
+    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+
+    let g1 = create_generation_schema(&mut client, "core", 1, None)?;
+    populate_generation_from_public(&mut client, "core", &g1)?;
+    activate_generation(&postgres, "core", &g1, &stamps(), None)?;
+
+    // drop_retired_generation refuses an ACTIVE generation, leaving its schema intact.
+    assert!(
+        drop_retired_generation(&postgres, "core", &g1).is_err(),
+        "dropping an ACTIVE generation must be refused"
+    );
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT to_regclass('jurisearch_server_core_g0001.documents')::text;")?
+            .trim(),
+        "jurisearch_server_core_g0001.documents",
+        "the active generation schema is untouched after a refused drop"
+    );
+    // ...and refuses a generation with no registry row at all.
+    assert!(
+        drop_retired_generation(&postgres, "core", "core_g0099").is_err(),
+        "dropping a non-existent generation must be refused"
+    );
+
+    // reset_building_generation refuses an ACTIVE generation too.
+    assert!(
+        reset_building_generation(&mut client, "core", &g1).is_err(),
+        "resetting an ACTIVE generation must be refused"
+    );
+
+    // But it DOES reset a leftover `building` generation (schema + registry row gone), so a retried
+    // media apply can re-create the same deterministic label.
+    let g2 = create_generation_load_tables(&mut client, "core", 2, None)?;
+    reset_building_generation(&mut client, "core", &g2)?;
+    assert_eq!(
+        postgres
+            .execute_sql("SELECT to_regclass('jurisearch_server_core_g0002.documents')::text;")?
+            .trim(),
+        "",
+        "the building generation schema is gone after reset"
+    );
+    assert_eq!(
+        postgres
+            .execute_sql(
+                "SELECT count(*)::text FROM jurisearch_control.generation_registry \
+                 WHERE corpus='core' AND generation='core_g0002';"
+            )?
+            .trim(),
+        "0",
+        "the building registry row is gone after reset"
+    );
+    // A re-create at the same label now succeeds — the apply is retriable.
+    create_generation_load_tables(&mut client, "core", 2, None)?;
     Ok(())
 }
 

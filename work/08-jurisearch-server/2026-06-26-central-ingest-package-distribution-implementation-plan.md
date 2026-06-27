@@ -470,7 +470,12 @@ migration) as a **scoped reload of one corpus's server set**, provably preservin
   after a smoke check, with `retired` fallback if it cannot drop.
 - **Per-corpus isolation proof (C1).** Re-baselining `core` does not read, merge, or touch `inpi` or
   any other generation (§4.1 per-corpus generations; conception §5 OCP "rebaselining core is closed
-  over inpi").
+  over inpi"). *(P5 scope, per the review: physical generation tables, `corpus_state`, the unioned
+  views, and `jurisearch_app` are per-corpus isolated and proven so. The global `index_manifest`
+  dense-probe metadata is **still shared** across corpora — a re-baseline with different dense settings
+  would change another corpus's probe defaults. Per-corpus dense-metadata isolation (scoping
+  `index_manifest` by generation and resolving it via `corpus_state.active_generation`) is **deferred**;
+  the operated profile uses one dense configuration across corpora, so this is not yet a live hazard.)*
 
 **Acceptance.**
 
@@ -481,8 +486,11 @@ migration) as a **scoped reload of one corpus's server set**, provably preservin
   throughout the `core` re-baseline.
 - The switch confines reader impact to the short transaction; the long build phase does not block normal
   reads beyond shared extension/catalog work (§12).
-- `DROP SCHEMA … CASCADE` appears **only** on a documented disaster-recovery path, never the operated
-  one (§7.4).
+- `DROP SCHEMA … CASCADE` is **never** used for the apply/switch path (that path repoints views with
+  `CREATE OR REPLACE VIEW`); it is allowed only for the **locked cleanup of a registry-confirmed,
+  retired, off-read-path private generation schema** (or a retriable half-built `building` schema),
+  with a `retired` fallback if the cleanup cannot drop (§7.4). *(P5 review: wording reconciled with the
+  committed operated-cleanup code, which already confines `CASCADE` to that case.)*
 
 **Dependencies.** P2 (generations/views), P3 (baseline load + index materialiser).
 
