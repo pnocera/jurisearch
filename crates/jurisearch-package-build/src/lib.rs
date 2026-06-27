@@ -7,6 +7,8 @@
 
 pub mod baseline;
 mod error;
+pub mod incremental;
 
 pub use baseline::{BaselineBuildReport, BaselineParams, build_baseline};
 pub use error::BuildError;
+pub use incremental::{IncrementalBuildReport, IncrementalParams, build_incremental};

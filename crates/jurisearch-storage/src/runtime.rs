@@ -861,7 +861,10 @@ pub fn sql_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-pub(crate) fn sql_string_literal(value: &str) -> String {
+/// Quote a SQL string literal by doubling embedded single quotes. Public so the producer builder can
+/// compose scope-predicate SQL (plan P4).
+#[must_use]
+pub fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 

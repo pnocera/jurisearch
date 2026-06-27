@@ -229,10 +229,15 @@ impl PayloadLayout {
 /// One file in the payload (design §6.2.2 per-file list).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadFile {
+    /// The on-disk file name (e.g. `documents.copybin`, `chunks_with_embeddings.replace_set.jsonl`) and
+    /// the key in `integrity.per_file_digests` (plan P4) — so a baseline table file and an incremental
+    /// (table-or-group, op) file are both addressed uniformly and the aggregate digest binds the name.
+    pub file_name: String,
+    /// The table this file carries, or — for a `replace_set` file — the `ReplaceSetGroup` token.
     pub table: String,
     /// The explicit, ordered column list moved by this file (plan P3 D2) — generated columns excluded.
-    /// Producer and consumer COPY exactly these columns in this order, so a producer/consumer column
-    /// drift is caught instead of silently corrupting a binary COPY.
+    /// Producer and consumer move exactly these columns in this order, so a producer/consumer column
+    /// drift is caught. Empty for `replace_set`/`delete` files that carry self-describing JSON objects.
     pub columns: Vec<String>,
     pub op: crate::event::EventKind,
     pub format: PayloadFormat,
@@ -354,6 +359,7 @@ mod tests {
             },
             payload: PayloadLayout {
                 files: vec![PayloadFile {
+                    file_name: "documents.upsert.jsonl".to_owned(),
                     table: "documents".to_owned(),
                     columns: vec!["document_id".to_owned(), "body".to_owned()],
                     op: EventKind::Upsert,

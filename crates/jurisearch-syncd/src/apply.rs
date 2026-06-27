@@ -22,10 +22,19 @@ use jurisearch_storage::generations::{
     create_generation_load_tables, generation_name, generation_schema, next_generation_counter,
     schema_for_generation, upsert_generation_dense_manifest,
 };
+use jurisearch_storage::generations::{primary_key_columns, replicated_table_columns};
+use jurisearch_storage::incremental::{
+    advance_corpus_cursor, apply_deletes, apply_replace_set, apply_upserts, has_cascade_fks,
+    replace_set_rows,
+};
 use jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION;
-use jurisearch_storage::outbox::{DigestSource, TableDigest, corpus_table_digests};
+use jurisearch_storage::outbox::{
+    DigestSource, TableDigest, corpus_table_digests, corpus_table_digests_with_client,
+};
 use jurisearch_storage::runtime::{ManagedPostgres, sql_identifier};
 use jurisearch_storage::zone_units::ZONE_UNIT_VECTOR_INDEX_NAME;
+
+use jurisearch_package::event::{ReplaceSet, ReplaceSetGroup, set_digest_over_rows};
 
 use crate::error::SyncError;
 
@@ -454,8 +463,8 @@ fn verify_per_file_digests(
     let mut verified: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
     for file in &manifest.payload.files {
-        let name = jurisearch_package::artifact::payload_file_name(&file.table);
-        let path = jurisearch_package::artifact::payload_file_path(artifact_dir, &file.table);
+        let name = &file.file_name;
+        let path = jurisearch_package::artifact::payload_file_path(artifact_dir, name);
         let bytes = std::fs::read(&path)?;
         let digest = jurisearch_package::canonical::digest_bytes(&bytes);
         if digest != file.digest {
@@ -475,8 +484,7 @@ fn verify_per_file_digests(
         }
     }
     // The verified set (built from real bytes) must EXACTLY equal the signed `integrity.per_file_digests`
-    // — no missing, extra, or differing entries. Otherwise the aggregate could be inflated with a digest
-    // that names an apply-order table with no payload file, and was never proven against artifact bytes.
+    // — no missing, extra, or differing entries — so the aggregate can only be computed over proven bytes.
     if verified != manifest.integrity.per_file_digests {
         return Err(SyncError::reject(
             RejectCode::DigestMismatch,
@@ -487,10 +495,7 @@ fn verify_per_file_digests(
     // Recompute the AGGREGATE package digest over the VERIFIED set with the SAME shared definition the
     // producer used, and require it to equal BOTH integrity digests (the cursor identity is derived from
     // `artifact_sha256`, so this binds the cursor strictly to the applied payload bytes).
-    let aggregate = jurisearch_package::artifact::aggregate_payload_digest(
-        &verified,
-        &manifest.payload.apply_order,
-    );
+    let aggregate = jurisearch_package::artifact::aggregate_payload_digest(&verified);
     if aggregate != manifest.integrity.artifact_sha256 {
         return Err(SyncError::reject(
             RejectCode::DigestMismatch,
@@ -586,7 +591,7 @@ fn copy_payload_in(
         let Some(file) = manifest.payload.files.iter().find(|f| &f.table == table) else {
             continue; // a table can be absent from a payload (no rows) but present in apply_order
         };
-        let path = jurisearch_package::artifact::payload_file_path(artifact_dir, &file.table);
+        let path = jurisearch_package::artifact::payload_file_path(artifact_dir, &file.file_name);
         let bytes = std::fs::read(&path)?;
         let columns = file
             .columns
@@ -671,4 +676,339 @@ fn format_index_report(report: &GenerationIndexReport) -> String {
 #[must_use]
 pub fn baseline_generation_name(corpus: &str, counter: u32) -> String {
     generation_name(corpus, counter)
+}
+
+/// The outcome of applying an incremental.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncrementalApplyOutcome {
+    /// Applied and the corpus cursor advanced to `sequence`; `scopes` semantic scopes were applied.
+    Applied {
+        corpus: String,
+        sequence: u64,
+        scopes: usize,
+    },
+    /// Already at the result sequence with matching identity — an idempotent no-op (INV-3).
+    AlreadyApplied { corpus: String, sequence: u64 },
+}
+
+/// Apply an incremental artifact directory onto the corpus's ACTIVE generation in ONE cursor-gated
+/// transaction (plan P4 D4, §7.3): verify → gates → cursor/chain check → apply the JSONL diff with
+/// row-level index maintenance → validate the whole-corpus postconditions in-txn → advance the cursor.
+///
+/// # Errors
+/// [`SyncError`] with a [`RejectCode`] on a contract refusal (incl. `SequenceGap`), or a storage/IO error.
+pub fn apply_incremental(
+    client: &ManagedPostgres,
+    artifact_dir: &Path,
+    verifier: &dyn Verifier,
+) -> Result<IncrementalApplyOutcome, SyncError> {
+    let manifest_bytes = std::fs::read(jurisearch_package::artifact::manifest_path(artifact_dir))?;
+    let signed: Signed<EmbeddedManifest> = serde_json::from_slice(&manifest_bytes)?;
+    signed
+        .verify(verifier)
+        .map_err(|error| SyncError::reject(RejectCode::SignatureInvalid, error.to_string()))?;
+    let manifest = &signed.payload;
+    let corpus = manifest.identity.corpus.as_str().to_owned();
+    if manifest.identity.package_kind != PackageKind::Incremental {
+        return Err(SyncError::reject(
+            RejectCode::BaselineRequired,
+            format!(
+                "apply_incremental only applies `incremental` packages, got `{}`",
+                manifest.identity.package_kind.as_str()
+            ),
+        ));
+    }
+
+    // Gates (no CopyBinary guard — JSONL is portable) + payload digests.
+    check_client_version(manifest)?;
+    check_schema_compatibility(client, manifest)?;
+    check_extensions(client, manifest)?;
+    verify_per_file_digests(artifact_dir, manifest)?;
+
+    let package_id = manifest.identity.package_id.as_str();
+    let package_digest = manifest.integrity.artifact_sha256.as_str();
+    let result_sequence = manifest.apply.result_sequence.get();
+    let expected_from = manifest.apply.expected_client_from_sequence.get();
+
+    // Precompute the non-generated column list + PK for every replicated table (the schema is stable).
+    let mut meta = client.client()?;
+    let mut columns_map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut pk_map: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for table in REPLICATED_TABLES {
+        columns_map.insert(
+            (*table).to_owned(),
+            replicated_table_columns(&mut meta, table)?,
+        );
+        pk_map.insert((*table).to_owned(), primary_key_columns(&mut meta, table)?);
+    }
+
+    // ONE transaction on the active generation.
+    let mut db = client.client()?;
+    let mut tx = db.transaction().map_err(SyncError::Postgres)?;
+    tx.batch_execute("SET LOCAL lock_timeout = '5s';")
+        .map_err(SyncError::Postgres)?;
+    let locked: bool = tx
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock($1);",
+            &[&jurisearch_storage::generations::APPLY_ADVISORY_LOCK_KEY],
+        )
+        .map_err(SyncError::Postgres)?
+        .get(0);
+    if !locked {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            "another apply holds the advisory lock".to_owned(),
+        ));
+    }
+
+    let row = tx
+        .query_opt(
+            "SELECT sequence, last_package_id, last_package_digest, active_generation, baseline_id, \
+                    schema_version, embedding_fingerprint, builder_versions \
+             FROM jurisearch_control.corpus_state WHERE corpus = $1 FOR UPDATE;",
+            &[&corpus],
+        )
+        .map_err(SyncError::Postgres)?;
+    let Some(row) = row else {
+        return Err(SyncError::reject(
+            RejectCode::BaselineRequired,
+            format!("corpus `{corpus}` is not installed; apply a baseline first"),
+        ));
+    };
+    let current = u64::try_from(row.get::<_, i64>("sequence")).unwrap_or(0);
+    let cur_id: Option<String> = row.get("last_package_id");
+    let cur_digest: Option<String> = row.get("last_package_digest");
+    let active_generation: String = row.get("active_generation");
+    let baseline_id: String = row.get("baseline_id");
+    let cur_schema: i32 = row.get("schema_version");
+    let cur_fingerprint: String = row.get("embedding_fingerprint");
+    let cur_builders: serde_json::Value = row.get("builder_versions");
+
+    // Idempotency + ordering (D6).
+    if current == result_sequence {
+        if cur_id.as_deref() == Some(package_id) && cur_digest.as_deref() == Some(package_digest) {
+            tx.commit().map_err(SyncError::Postgres)?;
+            return Ok(IncrementalApplyOutcome::AlreadyApplied {
+                corpus,
+                sequence: current,
+            });
+        }
+        return Err(SyncError::reject(
+            RejectCode::DigestMismatch,
+            format!("corpus `{corpus}` already at {current} with a different package; refusing"),
+        ));
+    }
+    if current > result_sequence {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            format!("corpus `{corpus}` is at {current}, ahead of this package's {result_sequence}"),
+        ));
+    }
+    if current != expected_from {
+        return Err(SyncError::reject(
+            RejectCode::SequenceGap,
+            format!(
+                "corpus `{corpus}` is at {current}, package expects from-sequence {expected_from}"
+            ),
+        ));
+    }
+    // Chain link + active-state preconditions.
+    if manifest.identity.previous_package_id.as_deref() != cur_id.as_deref() {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            "previous_package_id does not match the corpus cursor".to_owned(),
+        ));
+    }
+    if manifest.identity.previous_package_sha256.as_deref() != cur_digest.as_deref() {
+        return Err(SyncError::reject(
+            RejectCode::DigestMismatch,
+            "previous_package_sha256 does not match the corpus cursor".to_owned(),
+        ));
+    }
+    if let Some(expected) = &manifest.apply.preconditions.active_baseline_id
+        && *expected != baseline_id
+    {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            "active_baseline_id precondition mismatch".to_owned(),
+        ));
+    }
+    if let Some(expected) = &manifest.apply.preconditions.active_generation
+        && *expected != active_generation
+    {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            "active_generation precondition mismatch".to_owned(),
+        ));
+    }
+
+    // Content-compatibility preconditions (plan P4 BLOCKER): the cursor's stamps MUST match the signed
+    // preconditions before any row is touched — an ordinary incremental that crossed a fingerprint /
+    // builder / schema boundary is rejected (it needs a re-baseline), even if its row digests happen to
+    // line up.
+    let pre = &manifest.apply.preconditions;
+    if pre.schema_version != cur_schema {
+        return Err(SyncError::reject(
+            RejectCode::SchemaAhead,
+            format!(
+                "precondition schema_version {} != cursor {cur_schema}",
+                pre.schema_version
+            ),
+        ));
+    }
+    if pre.embedding_fingerprint != cur_fingerprint {
+        return Err(SyncError::reject(
+            RejectCode::EmbeddingFingerprintMismatch,
+            format!(
+                "precondition embedding_fingerprint `{}` != cursor `{cur_fingerprint}`",
+                pre.embedding_fingerprint
+            ),
+        ));
+    }
+    let pre_builders =
+        serde_json::to_value(&pre.builder_versions).unwrap_or(serde_json::Value::Null);
+    if pre_builders != cur_builders {
+        return Err(SyncError::reject(
+            RejectCode::BuilderVersionMismatch,
+            "precondition builder_versions != cursor builder_versions".to_owned(),
+        ));
+    }
+
+    let schema = schema_for_generation(&active_generation);
+    if !has_cascade_fks(&mut tx, &schema)? {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            format!("generation `{schema}` is missing the cascade FKs replace-sets rely on"),
+        ));
+    }
+
+    let scopes = apply_incremental_files(
+        &mut tx,
+        &schema,
+        artifact_dir,
+        manifest,
+        &columns_map,
+        &pk_map,
+    )?;
+
+    // Postconditions IN-TXN (so they see the uncommitted apply) — the convergence proof.
+    let digests = corpus_table_digests_with_client(
+        &mut tx,
+        &corpus,
+        DigestSource::Generation { schema: &schema },
+    )?;
+    let post = &manifest.apply.postconditions;
+    for TableDigest {
+        table_name,
+        row_count,
+        digest,
+    } in &digests
+    {
+        if post.row_counts.get(table_name).copied().unwrap_or(0) != *row_count {
+            return Err(SyncError::reject(
+                RejectCode::DigestMismatch,
+                format!("postcondition row_count[{table_name}] mismatch after incremental apply"),
+            ));
+        }
+        if post.table_digests.get(table_name) != Some(digest) {
+            return Err(SyncError::reject(
+                RejectCode::DigestMismatch,
+                format!(
+                    "postcondition table_digest[{table_name}] mismatch after incremental apply"
+                ),
+            ));
+        }
+    }
+
+    advance_corpus_cursor(
+        &mut tx,
+        &corpus,
+        i64::try_from(result_sequence).unwrap_or(i64::MAX),
+        package_id,
+        package_digest,
+    )?;
+    tx.commit().map_err(SyncError::Postgres)?;
+
+    Ok(IncrementalApplyOutcome::Applied {
+        corpus,
+        sequence: result_sequence,
+        scopes,
+    })
+}
+
+/// Apply the diff's JSONL files in the manifest's dependency order onto `schema`. Returns the scope
+/// count. Replace-set digests are verified against the generation rows post-apply (§5.3).
+fn apply_incremental_files(
+    tx: &mut postgres::Transaction<'_>,
+    schema: &str,
+    artifact_dir: &Path,
+    manifest: &EmbeddedManifest,
+    columns_map: &std::collections::BTreeMap<String, Vec<String>>,
+    pk_map: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<usize, SyncError> {
+    let mut scopes = 0usize;
+    for token in &manifest.payload.apply_order {
+        for file in manifest.payload.files.iter().filter(|f| &f.table == token) {
+            let path =
+                jurisearch_package::artifact::payload_file_path(artifact_dir, &file.file_name);
+            let text = std::fs::read_to_string(&path)?;
+            match file.op {
+                jurisearch_package::EventKind::Upsert => {
+                    let rows = parse_jsonl(&text)?;
+                    let pk = pk_map.get(token).cloned().unwrap_or_default();
+                    apply_upserts(tx, schema, token, &file.columns, &pk, &rows)?;
+                    scopes += rows.len();
+                }
+                jurisearch_package::EventKind::Delete => {
+                    let keys = parse_jsonl(&text)?;
+                    let pk = pk_map.get(token).cloned().unwrap_or_default();
+                    apply_deletes(tx, schema, token, &pk, &keys)?;
+                    scopes += keys.len();
+                }
+                jurisearch_package::EventKind::ReplaceSet => {
+                    let group = replace_set_group(token).ok_or_else(|| {
+                        SyncError::reject(
+                            RejectCode::DigestMismatch,
+                            format!("unknown replace_set group token `{token}`"),
+                        )
+                    })?;
+                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                        let rs: ReplaceSet = serde_json::from_str(line)?;
+                        let doc = rs.scope.document_id.clone();
+                        apply_replace_set(tx, schema, group, &doc, &rs.rows, |table| {
+                            Ok(columns_map.get(table).cloned().unwrap_or_default())
+                        })?;
+                        let actual = replace_set_rows(tx, schema, group, &doc)?;
+                        if set_digest_over_rows(&actual) != rs.set_digest {
+                            return Err(SyncError::reject(
+                                RejectCode::DigestMismatch,
+                                format!("replace_set set_digest mismatch for document `{doc}`"),
+                            ));
+                        }
+                        scopes += 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(scopes)
+}
+
+fn parse_jsonl(text: &str) -> Result<Vec<serde_json::Value>, SyncError> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).map_err(SyncError::Json))
+        .collect()
+}
+
+fn replace_set_group(token: &str) -> Option<ReplaceSetGroup> {
+    match token {
+        "chunks_with_embeddings" => Some(ReplaceSetGroup::ChunksWithEmbeddings),
+        "chunk_embeddings" => Some(ReplaceSetGroup::ChunkEmbeddings),
+        "zone_units" => Some(ReplaceSetGroup::ZoneUnits),
+        "decision_zones" => Some(ReplaceSetGroup::DecisionZones),
+        _ => None,
+    }
 }

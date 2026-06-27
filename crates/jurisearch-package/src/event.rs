@@ -80,6 +80,10 @@ pub enum ReplaceSetGroup {
     /// `chunk_embeddings` only — allowed **only** when the chunk row set is unchanged and just an
     /// embedding payload/fingerprint is corrected.
     ChunkEmbeddings,
+    /// The per-document `decision_zones` Judilibre-overlay cache row (a singleton-per-document derived
+    /// set), scope = one `document_id`. Emitted by the zone-enrichment writer; replaced as a whole so a
+    /// re-resolution cannot leave a stale overlay (plan P4).
+    DecisionZones,
 }
 
 impl ReplaceSetGroup {
@@ -89,6 +93,7 @@ impl ReplaceSetGroup {
             ReplaceSetGroup::ZoneUnits => "zone_units",
             ReplaceSetGroup::ChunksWithEmbeddings => "chunks_with_embeddings",
             ReplaceSetGroup::ChunkEmbeddings => "chunk_embeddings",
+            ReplaceSetGroup::DecisionZones => "decision_zones",
         }
     }
 
@@ -139,6 +144,20 @@ pub struct ReplaceSet {
     pub embedding_fingerprint: String,
     /// Deterministic hash over the ordered `(pk, row_hash)` pairs (the postcondition proof, §5.3).
     pub set_digest: String,
+}
+
+/// The deterministic `set_digest` over a replace-set's rows (plan P4 §5.3): `sha256` over the canonical
+/// JSON of the per-table row map. The SINGLE definition both the producer (over the rows it ships) and
+/// the consumer (over the generation rows it reads back post-apply) compute, so the applier can prove
+/// the scope materialised to exactly the producer's set. The caller orders each table's rows by PK
+/// before calling, so the digest is stable. `serde_json::Value` maps are key-ordered, so this is
+/// canonical for fixed row order.
+#[must_use]
+pub fn set_digest_over_rows(
+    rows: &std::collections::BTreeMap<String, Vec<serde_json::Value>>,
+) -> String {
+    let json = serde_json::to_string(rows).unwrap_or_default();
+    crate::canonical::digest_bytes(json.as_bytes())
 }
 
 /// Marker for the `op` discriminant inside a [`ReplaceSet`] payload (always `replace_set`).

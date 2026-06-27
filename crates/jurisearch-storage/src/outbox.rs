@@ -30,6 +30,41 @@ pub mod scope_kind {
     pub const OFFICIAL_API_RESPONSE: &str = "official_api_response";
 }
 
+/// The advisory-lock key for the outbox high-water FENCE (plan P4 D7). Emitters take it SHARED
+/// (xact-scoped, in [`emit_change`]); a package builder takes it EXCLUSIVE ([`acquire_outbox_fence`])
+/// while it freezes the build `hi`, so it waits for all in-flight emitters to commit/rollback. Distinct
+/// from the apply/switch lock (`generations::APPLY_ADVISORY_LOCK_KEY`).
+pub const OUTBOX_FENCE_LOCK_KEY: i64 = 0x6a75_7269_7332; // "juris2"
+
+/// Acquire the EXCLUSIVE outbox fence (a SESSION-scoped advisory lock, so the caller controls release)
+/// — blocks until every in-flight [`emit_change`] shared-lock holder has committed/rolled back. The
+/// caller then establishes its build snapshot (so `max(change_seq)` is a true commit-order high-water
+/// mark) and calls [`release_outbox_fence`]. Acquire BEFORE starting the snapshot transaction.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn acquire_outbox_fence(client: &mut postgres::Client) -> Result<(), StorageError> {
+    client
+        .batch_execute(&format!(
+            "SELECT pg_advisory_lock({OUTBOX_FENCE_LOCK_KEY});"
+        ))
+        .map_err(StorageError::PostgresClient)
+}
+
+/// Release the EXCLUSIVE outbox fence taken by [`acquire_outbox_fence`] — call after the build snapshot
+/// has been established (its first query has run), so new emitters may proceed while the snapshot stays
+/// fixed at the frozen `hi`.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn release_outbox_fence(client: &mut postgres::Client) -> Result<(), StorageError> {
+    client
+        .batch_execute(&format!(
+            "SELECT pg_advisory_unlock({OUTBOX_FENCE_LOCK_KEY});"
+        ))
+        .map_err(StorageError::PostgresClient)
+}
+
 /// Run-level constants threaded into each replicated-table writer (design §5.1). One per producer
 /// mutation run (a LEGI/juri archive ingest, an embedding job, a zone/citation enrichment, a
 /// hierarchy backfill); each command mints its own at start.
@@ -110,6 +145,18 @@ pub fn emit_change<C: GenericClient>(
     ctx: &OutboxContext<'_>,
     event: &OutboxEvent<'_>,
 ) -> Result<ChangeSeq, StorageError> {
+    // The outbox high-water FENCE (plan P4 D7): take a SHARED, transaction-scoped advisory lock before
+    // allocating `change_seq`, held until this mutation's txn commits/rolls back. A package builder takes
+    // the matching EXCLUSIVE fence lock while it freezes `hi`, so it WAITS for every in-flight emitter to
+    // resolve — never freezing a `hi` that a later-committing lower `change_seq` could fall under (the
+    // bigserial-alloc-order ≠ commit-order skip). One central change; every hook routes through here.
+    //
+    // The lock and the `change_seq`-allocating INSERT are ONE statement (a `fence` CTE that runs
+    // `pg_advisory_xact_lock_shared` feeding the `INSERT ... SELECT`). This keeps the xact-scoped shared
+    // lock held through allocation even for a raw autocommit caller (P4 r2 WARN 2): a plain client would
+    // otherwise release the lock at the end of a *separate* lock statement, before the INSERT, and reopen
+    // the alloc-order skip. Multi-statement writers must still pass an explicit transaction so the
+    // mutation and the outbox row commit/roll back together.
     let op = event.op.as_str();
     // jsonb columns are passed as text + cast (mirrors the other parameterized writers).
     let row_pk = serialize_json_param(event.row_pk)?;
@@ -117,14 +164,18 @@ pub fn emit_change<C: GenericClient>(
     let builder_versions = serialize_json_param(event.builder_versions)?;
     let inserted = client
         .query_one(
-            "INSERT INTO package_change_log (\
+            &format!(
+                "WITH fence AS (SELECT pg_advisory_xact_lock_shared({OUTBOX_FENCE_LOCK_KEY})) \
+             INSERT INTO package_change_log (\
                  corpus, ingest_run_id, table_name, op, scope_kind, scope_key, \
                  row_pk, row_hash, before_hash, after_hash, payload, builder_versions, \
                  embedding_fingerprint, schema_version) \
-             VALUES ($1,$2,$3,$4,$5,$6, \
-                 COALESCE($7::text::jsonb, '{}'::jsonb), $8, $9, $10, $11::text::jsonb, \
-                 COALESCE($12::text::jsonb, '{}'::jsonb), $13, $14) \
-             RETURNING change_seq;",
+             SELECT $1,$2,$3,$4,$5,$6, \
+                 COALESCE($7::text::jsonb, '{{}}'::jsonb), $8, $9, $10, $11::text::jsonb, \
+                 COALESCE($12::text::jsonb, '{{}}'::jsonb), $13, $14 \
+             FROM fence \
+             RETURNING change_seq;"
+            ),
             &[
                 &event.corpus,
                 &ctx.ingest_run_id,
@@ -180,8 +231,21 @@ pub fn scopes_changed_for_corpus(
     after: ChangeSeq,
     through: ChangeSeq,
 ) -> Result<Vec<ChangedScope>, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    scopes_changed_for_corpus_with_client(&mut client, corpus, after, through)
+}
+
+/// [`scopes_changed_for_corpus`] on a caller-provided client/transaction — so the incremental builder
+/// reads the changed scopes inside the SAME fenced build snapshot it materialises rows from (plan P4).
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error, or [`StorageError::Outbox`] on a malformed `op`.
+pub fn scopes_changed_for_corpus_with_client<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+    after: ChangeSeq,
+    through: ChangeSeq,
+) -> Result<Vec<ChangedScope>, StorageError> {
     let after = i64::try_from(after.get()).unwrap_or(i64::MAX);
     let through = i64::try_from(through.get()).unwrap_or(i64::MAX);
     let rows = client

@@ -21,7 +21,7 @@ pub fn schema_bundle_digest<C: GenericClient>(client: &mut C) -> Result<String, 
     Ok(jurisearch_package::canonical::digest_bytes(agg.as_bytes()))
 }
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 21;
+pub const CURRENT_SCHEMA_VERSION: i32 = 22;
 
 struct Migration {
     version: i32,
@@ -1010,6 +1010,23 @@ ON package_catalog (corpus, package_sequence DESC);
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 21), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 22,
+        name: "package_catalog_window_low",
+        // Plan P4 (D1): store the FULL frozen outbox window `(low, high]` each package was built from,
+        // not just the high-water mark, so the window is self-describing (audits, rebuild detection,
+        // gap checks) without a join to the previous row. Existing baseline rows become `(0, high]`.
+        sql: r#"
+ALTER TABLE package_catalog
+    ADD COLUMN IF NOT EXISTS included_change_seq_low bigint NOT NULL DEFAULT 0;
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 22), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

@@ -12,9 +12,9 @@ use jurisearch_storage::{
     },
     official_api_archive::{InsertOfficialApiResponse, insert_official_api_response_with_client},
     outbox::{
-        DigestSource, OutboxContext, OutboxEvent, corpus_table_digests,
+        DigestSource, OutboxContext, OutboxEvent, acquire_outbox_fence, corpus_table_digests,
         corpus_table_digests_with_client, current_change_seq, current_change_seq_with_client,
-        emit_change, scope_kind, scopes_changed_for_corpus,
+        emit_change, release_outbox_fence, scope_kind, scopes_changed_for_corpus,
     },
     projection::{ChunkEmbeddingInsert, insert_chunk_embeddings},
     runtime::{ManagedPostgres, StorageError},
@@ -806,6 +806,63 @@ fn a_build_snapshot_freezes_the_corpus_and_change_seq_against_concurrent_commits
     assert_eq!(
         current_change_seq(&postgres)?,
         ChangeSeq::new(seq_before.get() + 1)
+    );
+    Ok(())
+}
+
+#[test]
+fn an_emitter_blocked_by_the_fence_commits_above_the_frozen_high_water() -> Result<(), StorageError>
+{
+    // P4 WARN-1 regression: the high-water FENCE makes a builder's frozen `hi` a true commit-order mark.
+    // While a builder holds the EXCLUSIVE fence and reads `hi`, a concurrent emitter (SHARED lock) is
+    // blocked, so it cannot commit a change_seq <= hi; once the fence releases, it commits ABOVE hi and
+    // is picked up by the FOLLOWING package. (This is what makes the early fence release safe.)
+    let Some(pg_config) = discover_pg_config("outbox fence")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-outbox-fence.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    seed_decision(&postgres, "cass:F0")?;
+
+    // The builder takes the exclusive fence, then freezes `hi`.
+    let mut fence = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
+        .map_err(StorageError::PostgresClient)?;
+    acquire_outbox_fence(&mut fence)?;
+    let hi = current_change_seq(&postgres)?;
+
+    // A concurrent emitter (in its own txn) blocks on the shared fence until release.
+    let conn = postgres.connection_string();
+    let handle = std::thread::spawn(move || {
+        let mut emitter = postgres::Client::connect(&conn, postgres::NoTls).unwrap();
+        let mut tx = emitter.transaction().unwrap();
+        let ctx = OutboxContext::new("blocked-emitter", 22);
+        let seq = emit_change(
+            &mut tx,
+            &ctx,
+            &OutboxEvent::scope(
+                "core",
+                "documents",
+                EventKind::Upsert,
+                scope_kind::DOCUMENT,
+                "blocked",
+            ),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        seq
+    });
+
+    // Release the fence; the blocked emitter now proceeds and commits ABOVE the frozen high-water mark.
+    release_outbox_fence(&mut fence)?;
+    let blocked_seq = handle.join().expect("emitter thread");
+    assert!(
+        blocked_seq.get() > hi.get(),
+        "a fence-blocked emitter ({}) commits above the frozen hi ({})",
+        blocked_seq.get(),
+        hi.get()
     );
     Ok(())
 }

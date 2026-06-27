@@ -1,0 +1,31 @@
+# P4 Incremental Vertical Slice Code Review
+
+## Findings
+
+### BLOCKER 1. Incremental compatibility stamps are stamped but not enforced
+
+The P4 contract says incremental apply must run preconditions before mutating the active generation, including the content-compatibility stamps that distinguish ordinary incrementals from rebaseline work. The implementation only partially enforces that boundary.
+
+On the producer side, `latest_package_for_corpus` returns only the sequence/link/generation/window fields (`crates/jurisearch-storage/src/package_catalog.rs:137-144`, `:156-158`), and `build_incremental_inner` accepts that row without comparing the new `IncrementalParams` to the previous catalog stamps (`crates/jurisearch-package-build/src/incremental.rs:128-148`). The manifest is then stamped directly from the caller-supplied params (`crates/jurisearch-package-build/src/incremental.rs:401-405`, `:432-435`). That means a caller can build an ordinary incremental over a baseline/catalog row with a different `embedding_fingerprint` or `builder_versions`.
+
+On the client side, `apply_incremental` locks `corpus_state`, but selects only `sequence`, last package identity, `active_generation`, and `baseline_id` (`crates/jurisearch-syncd/src/apply.rs:766-783`). The subsequent checks cover idempotency, sequence, chain link, baseline, and generation (`crates/jurisearch-syncd/src/apply.rs:785-840`), but never compare the cursor's `schema_version`, `embedding_fingerprint`, or `builder_versions` to `manifest.apply.preconditions` / `manifest.compatibility`. `advance_corpus_cursor` also advances only the sequence and package identity (`crates/jurisearch-storage/src/incremental.rs:307-324`), so a mismatched incremental can commit without ever proving the cursor's content-compatibility state matched the signed preconditions.
+
+Impact: a producer CLI/configuration bug can build, catalog, and apply an ordinary incremental with incompatible embedding or builder stamps. Whole-corpus row digests can still pass if the changed rows happen to match the producer's table state, while the package chain has crossed a boundary that should require a rebaseline or at least a hard precondition rejection. This weakens the P4 "preconditions before apply" guarantee and the P0/P4 content-compatibility split.
+
+Concrete fix: extend `LatestPackage` / `latest_package_for_corpus` to return `schema_version`, `embedding_fingerprint`, and `builder_versions`, and have `build_incremental_inner` reject params that differ from the previous package row unless a future rebaseline path is being used. In `apply_incremental`, select those same fields from `jurisearch_control.corpus_state FOR UPDATE` and compare them to the signed preconditions before `apply_incremental_files`; use the existing specific reject codes where possible (`EmbeddingFingerprintMismatch`, `BuilderVersionMismatch`, `SchemaAhead`/`DigestMismatch`). Add regression tests for both sides: baseline with fingerprint A then incremental params fingerprint B must fail to build, and a tampered cursor fingerprint/builder version must fail before any incremental rows are applied.
+
+### WARN 1. The outbox high-water fence is held across the full package build, not just the snapshot freeze
+
+The new fence solves the bigserial allocation-order hazard, but the hold time is much broader than the contract in the helper docs. `release_outbox_fence` says to release once the build snapshot has been established so new emitters may proceed while the repeatable-read snapshot remains fixed (`crates/jurisearch-storage/src/outbox.rs:54-56`). In `build_incremental`, however, the exclusive fence is acquired before `build_incremental_inner` and released only after the whole inner build returns (`crates/jurisearch-package-build/src/incremental.rs:107-115`). The inner build keeps running through `hi` capture, scope reads, row materialisation, JSONL file writes, postcondition digest reads, transaction commit, manifest write, and catalog insert (`crates/jurisearch-package-build/src/incremental.rs:141-363`). `build_baseline` similarly holds the fence through the full COPY payload loop and releases it only after the snapshot transaction commits (`crates/jurisearch-package-build/src/baseline.rs:113-184`).
+
+Correctness is conservative here: it should not skip lower `change_seq` rows. The operational risk is that every outbox-emitting mutation can block at `emit_change` for the duration of a large baseline/incremental build, after the mutation has already performed its data writes. That turns the P4 high-water fence into a global ingest commit stall and makes the intended "new ingest during build lands in the next package" behavior closer to "new ingest waits for the build to finish".
+
+Concrete fix: scope the exclusive fence to the minimum critical section. Acquire it, start the repeatable-read transaction, run the first snapshot-establishing query and `current_change_seq_with_client`, then release the fence while continuing materialisation from the same transaction. For baseline, capture `change_seq_high` immediately after the snapshot is established instead of after the payload loop if early release is desired. Add a concurrency test where an emitter blocked by the fence cannot create a row `<= hi`, while another emitter after release can commit during materialisation and is picked up by the following package.
+
+## Checked P4 Invariants
+
+- Diff materialisation is scope-driven and coalesced: document scopes widen to `ChunksWithEmbeddings`, narrow `ChunkEmbeddings` is dominated by the wider set, `ZoneUnits` and `DecisionZones` replace-sets are present, and artifact file names are manifest-declared JSONL names rather than `<table>.copybin` assumptions.
+- Incremental apply targets the active generation in one transaction, checks sequence ordering with `sequence_gap`, applies delete/upsert/replace-set operations, verifies replace-set digests from generation rows, validates whole-corpus postconditions inside the same transaction, and advances the cursor only after those checks.
+- The loopback acceptance test covers valid_to replication, stale-chunk removal, out-of-order rejection, re-apply no-op, and producer/client digest convergence. I did not rerun the managed-PG suites in this pass; the brief reports them green.
+
+VERDICT: FIXES_REQUIRED

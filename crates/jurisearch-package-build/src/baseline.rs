@@ -110,13 +110,25 @@ pub fn build_baseline(
     // mutation the payload missed (or vice versa) under concurrent ingest. The first query establishes
     // the snapshot; every read below sees exactly that point in time.
     let mut db = producer.client()?;
+    // P4 D7 fence (WARN-1: minimal critical section): a DEDICATED connection holds the exclusive outbox
+    // fence ONLY while the build snapshot is established + `hi` frozen — so `hi` is a true commit-order
+    // high-water mark — then releases it, so concurrent ingest is not blocked through the whole COPY
+    // phase. The snapshot transaction (on `db`) stays fixed at `hi` for the rest of the build.
+    let mut fence_conn = producer.client()?;
+    jurisearch_storage::outbox::acquire_outbox_fence(&mut fence_conn)?;
     let mut tx = db
         .build_transaction()
         .isolation_level(postgres::IsolationLevel::RepeatableRead)
         .read_only(true)
         .start()?;
 
-    // The §5.4 QA digests over the producer's authoritative tables = the package postconditions.
+    // P4 r2 WARN-1: keep the fence's critical section MINIMAL. `current_change_seq_with_client` is a
+    // single-row read, so it both establishes the REPEATABLE READ snapshot and freezes `hi` cheaply —
+    // do it FIRST, then RELEASE the fence immediately. The expensive full-corpus digest pass (and every
+    // COPY/BM25/schema read below) then runs OUTSIDE the fence window on that same fixed snapshot, so a
+    // large baseline no longer stalls concurrent ingest commits through the digest phase.
+    let change_seq_high = current_change_seq_with_client(&mut tx)?.get();
+    jurisearch_storage::outbox::release_outbox_fence(&mut fence_conn)?;
     let digests = corpus_table_digests_with_client(&mut tx, corpus, DigestSource::ProducerPublic)?;
     let mut row_counts: BTreeMap<String, u64> = BTreeMap::new();
     let mut table_digests: BTreeMap<String, String> = BTreeMap::new();
@@ -139,8 +151,11 @@ pub fn build_baseline(
         reader.read_to_end(&mut bytes)?;
         drop(reader);
 
-        let file_name = artifact::payload_file_name(table);
-        std::fs::write(artifact::payload_file_path(artifact_dir, table), &bytes)?;
+        let file_name = artifact::baseline_file_name(table);
+        std::fs::write(
+            artifact::payload_file_path(artifact_dir, &file_name),
+            &bytes,
+        )?;
         let file_digest = digest_bytes(&bytes);
         let row_count = row_counts.get(*table).copied().unwrap_or(0);
         total_rows += row_count;
@@ -152,6 +167,7 @@ pub fn build_baseline(
             count: row_count,
         });
         files.push(PayloadFile {
+            file_name,
             table: (*table).to_owned(),
             columns,
             op: EventKind::Upsert,
@@ -162,13 +178,12 @@ pub fn build_baseline(
         });
     }
 
-    // A digest-of-digests over the payload, ordered by apply order — the SHARED definition the consumer
-    // recomputes to prove the manifest's aggregate digest matches the payload. (Real tarball/artifact
+    // The aggregate over the per-file `name=digest` pairs — the SHARED definition the consumer recomputes
+    // to prove the manifest's aggregate digest matches the payload it actually read. (Real tarball/artifact
     // hashing arrives with transport in a later phase.)
-    let payload_digest = artifact::aggregate_payload_digest(&per_file_digests, APPLY_ORDER);
+    let payload_digest = artifact::aggregate_payload_digest(&per_file_digests);
 
-    // Frozen from the SAME snapshot as the payload — the catalog window the first incremental diffs from.
-    let change_seq_high = current_change_seq_with_client(&mut tx)?.get();
+    // (`change_seq_high` was frozen under the fence above.) These reads share the same fixed snapshot.
     let bm25_indexes = query_bm25_index_names(&mut tx)?;
     let schema_migration_bundle_digest =
         jurisearch_storage::migrations::schema_bundle_digest(&mut tx)?;
@@ -291,6 +306,8 @@ pub fn build_baseline(
             package_kind: PackageKind::Baseline.as_str(),
             baseline_id: &params.baseline_id,
             generation: &generation,
+            // A baseline covers the whole window up to its frozen high-water mark: (0, high].
+            included_change_seq_low: 0,
             included_change_seq_high: i64::try_from(change_seq_high).unwrap_or(i64::MAX),
             previous_package_id: None,
             previous_package_digest: None,

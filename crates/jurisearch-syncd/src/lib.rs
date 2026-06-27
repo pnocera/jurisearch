@@ -9,6 +9,6 @@ pub mod apply;
 mod error;
 pub mod status;
 
-pub use apply::{BaselineApplyOutcome, apply_baseline};
+pub use apply::{BaselineApplyOutcome, IncrementalApplyOutcome, apply_baseline, apply_incremental};
 pub use error::SyncError;
 pub use status::{CorpusStatus, corpus_status};

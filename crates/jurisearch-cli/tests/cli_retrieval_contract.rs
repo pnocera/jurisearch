@@ -365,7 +365,7 @@ fn fetch_passes_readiness_and_reads_the_active_generation_not_stale_public()
             &ActivationStamps {
                 sequence: 1,
                 baseline_id: "core-cli-g0001",
-                schema_version: 21,
+                schema_version: 22,
                 embedding_fingerprint: "bge-m3:1024:normalize:true",
                 builder_versions: &serde_json::Value::Null,
                 last_package_id: None,
@@ -451,7 +451,7 @@ fn fetch_part_online_resolves_judilibre_metadata_from_the_active_generation()
             &ActivationStamps {
                 sequence: 1,
                 baseline_id: "core-part-g0001",
-                schema_version: 21,
+                schema_version: 22,
                 embedding_fingerprint: "bge-m3:1024:normalize:true",
                 builder_versions: &serde_json::Value::Null,
                 last_package_id: None,
@@ -561,7 +561,7 @@ fn cite_resolves_identifiers_against_the_active_generation_not_stale_public()
             &ActivationStamps {
                 sequence: 1,
                 baseline_id: "core-cite-g0001",
-                schema_version: 21,
+                schema_version: 22,
                 embedding_fingerprint: "bge-m3:1024:normalize:true",
                 builder_versions: &serde_json::Value::Null,
                 last_package_id: None,

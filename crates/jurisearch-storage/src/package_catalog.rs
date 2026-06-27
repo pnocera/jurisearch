@@ -19,6 +19,8 @@ pub struct PackageCatalogRow<'a> {
     pub package_kind: &'a str,
     pub baseline_id: &'a str,
     pub generation: &'a str,
+    /// The frozen outbox window this package covers (plan P4 D1): `(low, high]`. A baseline is `(0, high]`.
+    pub included_change_seq_low: i64,
     pub included_change_seq_high: i64,
     pub previous_package_id: Option<&'a str>,
     pub previous_package_digest: Option<&'a str>,
@@ -48,10 +50,10 @@ pub fn insert_package_catalog_row<C: GenericClient>(
         .execute(
             "INSERT INTO package_catalog \
                  (corpus, package_sequence, package_id, package_kind, baseline_id, generation, \
-                  included_change_seq_high, previous_package_id, previous_package_digest, \
-                  package_digest, manifest_digest, schema_version, embedding_fingerprint, \
-                  builder_versions, status) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::text::jsonb,$15) \
+                  included_change_seq_low, included_change_seq_high, previous_package_id, \
+                  previous_package_digest, package_digest, manifest_digest, schema_version, \
+                  embedding_fingerprint, builder_versions, status) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::text::jsonb,$16) \
              ON CONFLICT (package_id) DO NOTHING;",
             &[
                 &row.corpus,
@@ -60,6 +62,7 @@ pub fn insert_package_catalog_row<C: GenericClient>(
                 &row.package_kind,
                 &row.baseline_id,
                 &row.generation,
+                &row.included_change_seq_low,
                 &row.included_change_seq_high,
                 &row.previous_package_id,
                 &row.previous_package_digest,
@@ -80,8 +83,8 @@ pub fn insert_package_catalog_row<C: GenericClient>(
     let existing = client
         .query_one(
             "SELECT corpus, package_sequence, package_kind, baseline_id, generation, \
-                    included_change_seq_high, package_digest, manifest_digest, schema_version, \
-                    embedding_fingerprint \
+                    included_change_seq_low, included_change_seq_high, package_digest, \
+                    manifest_digest, schema_version, embedding_fingerprint \
              FROM package_catalog WHERE package_id = $1;",
             &[&row.package_id],
         )
@@ -91,6 +94,7 @@ pub fn insert_package_catalog_row<C: GenericClient>(
         && existing.get::<_, String>("package_kind") == row.package_kind
         && existing.get::<_, String>("baseline_id") == row.baseline_id
         && existing.get::<_, String>("generation") == row.generation
+        && existing.get::<_, i64>("included_change_seq_low") == row.included_change_seq_low
         && existing.get::<_, i64>("included_change_seq_high") == row.included_change_seq_high
         && existing
             .get::<_, Option<String>>("package_digest")
@@ -122,7 +126,95 @@ pub fn write_package_catalog_row(
     postgres: &ManagedPostgres,
     row: &PackageCatalogRow<'_>,
 ) -> Result<(), StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
     insert_package_catalog_row(&mut client, row)
+}
+
+/// The newest catalog row for a corpus — the chain link + window seed for the next incremental
+/// (plan P4 D2): the next package's `lo = included_change_seq_high`,
+/// `expected_client_from_sequence = package_sequence`, and `previous_package_*` come from here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatestPackage {
+    pub package_sequence: i64,
+    pub package_id: String,
+    pub package_digest: Option<String>,
+    pub baseline_id: String,
+    pub generation: String,
+    pub included_change_seq_high: i64,
+    /// Content-compatibility stamps (plan P4 BLOCKER): the next ordinary incremental MUST match these,
+    /// or it has crossed a boundary that needs a re-baseline, not an incremental.
+    pub schema_version: i32,
+    pub embedding_fingerprint: String,
+    pub builder_versions: serde_json::Value,
+}
+
+/// Read the newest (highest `package_sequence`) catalog row for `corpus`, or `None` if none exists.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn latest_package_for_corpus<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+) -> Result<Option<LatestPackage>, StorageError> {
+    let row = client
+        .query_opt(
+            "SELECT package_sequence, package_id, package_digest, baseline_id, generation, \
+                    included_change_seq_high, schema_version, embedding_fingerprint, builder_versions \
+             FROM package_catalog WHERE corpus = $1 \
+             ORDER BY package_sequence DESC LIMIT 1;",
+            &[&corpus],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    Ok(row.map(|row| LatestPackage {
+        package_sequence: row.get("package_sequence"),
+        package_id: row.get("package_id"),
+        package_digest: row.get("package_digest"),
+        baseline_id: row.get("baseline_id"),
+        generation: row.get("generation"),
+        included_change_seq_high: row.get("included_change_seq_high"),
+        schema_version: row.get("schema_version"),
+        embedding_fingerprint: row.get("embedding_fingerprint"),
+        builder_versions: row.get("builder_versions"),
+    }))
+}
+
+/// The base of the per-corpus package-BUILD advisory lock (plan P4 D1: serialize concurrent builds of
+/// the SAME corpus so two builders never read the same previous catalog row and race the next
+/// `package_sequence`). Used as `pg_advisory_lock(BASE, hashtext(corpus))`; cross-corpus builds are
+/// independent (different second key).
+pub const PACKAGE_BUILD_LOCK_BASE: i32 = 0x6a72_6231; // "jrb1"
+
+/// Acquire the per-corpus package-build lock (SESSION-scoped; the caller releases it). Held across a
+/// corpus's "read latest catalog → build → write next catalog" so the per-corpus chain is serial.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn acquire_corpus_build_lock(
+    client: &mut postgres::Client,
+    corpus: &str,
+) -> Result<(), StorageError> {
+    client
+        .execute(
+            "SELECT pg_advisory_lock($1, hashtext($2));",
+            &[&PACKAGE_BUILD_LOCK_BASE, &corpus],
+        )
+        .map(|_| ())
+        .map_err(StorageError::PostgresClient)
+}
+
+/// Release the per-corpus package-build lock taken by [`acquire_corpus_build_lock`].
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn release_corpus_build_lock(
+    client: &mut postgres::Client,
+    corpus: &str,
+) -> Result<(), StorageError> {
+    client
+        .execute(
+            "SELECT pg_advisory_unlock($1, hashtext($2));",
+            &[&PACKAGE_BUILD_LOCK_BASE, &corpus],
+        )
+        .map(|_| ())
+        .map_err(StorageError::PostgresClient)
 }
