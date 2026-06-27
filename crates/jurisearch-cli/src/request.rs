@@ -10,6 +10,10 @@
 
 use std::path::PathBuf;
 
+use jurisearch_core::site_request::{
+    SiteCiteArgs, SiteCompareArgs, SiteContextArgs, SiteRelatedArgs, SiteSearchArgs,
+};
+
 use crate::*;
 
 /// `search` request: the whole-decision/zone retrieval input. Serde defaults MUST mirror the clap
@@ -105,6 +109,36 @@ impl SearchArgs {
     }
 }
 
+/// Adapt a contract-owned site request (parsed via `Operation::parse_args`) onto the shared CLI request
+/// surface, so the site handlers reuse the SAME `resolve_search_input` path as the local adapters. The
+/// site DTO has no `zone` (a client/online concern the site rejects) and no `index_dir` (server-owned),
+/// so both are `None` here; the enum fields map through the reverse `From` conversions.
+impl From<SiteSearchArgs> for SearchRequest {
+    fn from(args: SiteSearchArgs) -> Self {
+        SearchRequest {
+            query: args.query,
+            kind: args.kind.into(),
+            mode: args.mode.into(),
+            format: args.format.into(),
+            group_by: args.group_by.into(),
+            top_k: args.top_k,
+            cursor: args.cursor,
+            as_of: args.as_of,
+            rrf_lexical_weight: args.rrf_lexical_weight,
+            rrf_dense_weight: args.rrf_dense_weight,
+            probes: args.probes,
+            court: args.court,
+            formation: args.formation,
+            publication: args.publication,
+            decided_from: args.decided_from,
+            decided_to: args.decided_to,
+            zone: None,
+            authority_weight: args.authority_weight,
+            index_dir: None,
+        }
+    }
+}
+
 /// `fetch` request: version-pinned stable IDs plus the optional decision-part overlay.
 #[derive(Debug, Deserialize)]
 pub(crate) struct FetchRequest {
@@ -154,6 +188,20 @@ impl CiteArgs {
     }
 }
 
+/// Adapt a contract-owned site cite request onto the shared CLI surface. The site never probes online
+/// (`online: false`) and is server-owned (`index_dir: None`).
+impl From<SiteCiteArgs> for CiteRequest {
+    fn from(args: SiteCiteArgs) -> Self {
+        CiteRequest {
+            cite: args.cite,
+            strict: args.strict,
+            online: false,
+            as_of: args.as_of,
+            index_dir: None,
+        }
+    }
+}
+
 /// `context` request: structural neighbourhood (ancestry, siblings) for a document.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ContextRequest {
@@ -173,6 +221,18 @@ impl ContextArgs {
             siblings: self.siblings,
             as_of: self.as_of,
             index_dir,
+        }
+    }
+}
+
+/// Adapt a contract-owned site context request onto the shared CLI surface (`index_dir: None`).
+impl From<SiteContextArgs> for ContextRequest {
+    fn from(args: SiteContextArgs) -> Self {
+        ContextRequest {
+            id: args.id,
+            siblings: args.siblings,
+            as_of: args.as_of,
+            index_dir: None,
         }
     }
 }
@@ -203,6 +263,19 @@ impl RelatedArgs {
     }
 }
 
+/// Adapt a contract-owned site related request onto the shared CLI surface (`index_dir: None`).
+impl From<SiteRelatedArgs> for RelatedRequest {
+    fn from(args: SiteRelatedArgs) -> Self {
+        RelatedRequest {
+            id: args.id,
+            rel: args.rel,
+            limit: args.limit,
+            depth: args.depth,
+            index_dir: None,
+        }
+    }
+}
+
 /// `compare` request: aligned bm25/dense/hybrid retriever comparison for one query.
 #[derive(Debug, Deserialize)]
 pub(crate) struct CompareRequest {
@@ -225,6 +298,19 @@ impl CompareArgs {
             top_k: self.top_k,
             as_of: self.as_of,
             index_dir,
+        }
+    }
+}
+
+/// Adapt a contract-owned site compare request onto the shared CLI surface (`index_dir: None`).
+impl From<SiteCompareArgs> for CompareRequest {
+    fn from(args: SiteCompareArgs) -> Self {
+        CompareRequest {
+            query: args.query,
+            kind: args.kind.into(),
+            top_k: args.top_k,
+            as_of: args.as_of,
+            index_dir: None,
         }
     }
 }

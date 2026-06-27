@@ -32,6 +32,14 @@ impl ErrorObject {
         }
     }
 
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: ErrorCode::Internal,
+            message: message.into(),
+            suggestions: Vec::new(),
+        }
+    }
+
     pub fn not_implemented(command: &str) -> Self {
         Self {
             code: ErrorCode::NotImplemented,

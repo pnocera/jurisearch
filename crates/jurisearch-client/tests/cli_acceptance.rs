@@ -121,3 +121,67 @@ fn the_binary_rejects_a_malformed_url_with_a_clear_diagnostic() {
         "the diagnostic explains the missing port"
     );
 }
+
+#[test]
+fn the_binary_rejects_an_unknown_operation_locally_via_the_shared_seam() {
+    // The endpoint is well-formed (port 1, never connected) so the failure is the LOCAL contract check
+    // (`Operation::parse_command`), not a connection error — the client uses the same seam as the server.
+    let output = client()
+        .args(["--server", "tcp://127.0.0.1:1", "bogus-op", "{}"])
+        .output()
+        .expect("run client");
+    assert_eq!(output.status.code(), Some(2), "a usage error → exit 2");
+    assert!(output.stdout.is_empty(), "no round-trip, nothing rendered");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("not a site query operation"),
+        "the contract's own diagnostic names the bad operation"
+    );
+}
+
+#[test]
+fn the_binary_rejects_unsupported_status_args_locally_via_the_shared_seam() {
+    // `status` takes no args, but it goes through the SAME strict seam: a non-empty payload is rejected
+    // locally (before any connection) like every other operation — not silently forwarded.
+    let output = client()
+        .args([
+            "--server",
+            "tcp://127.0.0.1:1",
+            "status",
+            r#"{"bogus":true}"#,
+        ])
+        .output()
+        .expect("run client");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("invalid status args"),
+        "the strict-DTO diagnostic rejects the unsupported status field"
+    );
+}
+
+#[test]
+fn the_binary_rejects_an_unsupported_field_locally_via_the_shared_seam() {
+    // A server-owned field (`index_dir`) is REJECTED by the strict contract DTO before any connection —
+    // the same rejection the site handler would produce, but fail-fast at the client.
+    let output = client()
+        .args([
+            "--server",
+            "tcp://127.0.0.1:1",
+            "search",
+            r#"{"query":"x","index_dir":"/tmp"}"#,
+        ])
+        .output()
+        .expect("run client");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("index_dir"),
+        "the strict-DTO diagnostic names the unsupported field"
+    );
+}

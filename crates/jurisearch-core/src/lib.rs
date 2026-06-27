@@ -9,5 +9,6 @@ pub mod operation;
 pub mod retrieval;
 pub mod schema;
 pub mod session;
+pub mod site_request;
 
 pub const SCHEMA_VERSION: &str = "1";

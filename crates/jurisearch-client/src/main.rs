@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use jurisearch_client::{resolve_endpoint, send_request};
+use jurisearch_core::operation::Operation;
 use jurisearch_core::session::SessionRequest;
 use jurisearch_render::render_session_response;
 use serde_json::json;
@@ -50,6 +51,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     if !args.is_object() {
         return Err("args must be a JSON object (e.g. `{\"ids\":[\"cass:X\"]}`)".to_owned());
     }
+    // Validate the command + args against the SAME contract-owned seam the site handlers use
+    // (`Operation::parse_args`), so a typo or unsupported field fails FAST locally with the contract's
+    // own message instead of a server round-trip. The original `args` are forwarded UNCHANGED — the
+    // server re-validates and materializes defaults, so this pre-check never alters the served bytes.
+    let operation =
+        Operation::parse_command(&cli.command).map_err(|error| error.message.clone())?;
+    operation
+        .parse_args(&args)
+        .map_err(|error| error.message.clone())?;
     let request = SessionRequest {
         id: Some(json!("jurisearch-client")),
         command: cli.command,

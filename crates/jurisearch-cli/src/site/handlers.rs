@@ -1,12 +1,17 @@
-//! work/09 P4 — the site operation handlers. Each is a THIN adapter: validate the wire args, open ONE
-//! read snapshot through the server-owned store, validate the writer-owned readiness STAMP on that
-//! snapshot ([`ensure_site_readiness`], work/09 P4-4B / codex Q1 — no coverage recompute, no write), then
-//! call a side-effect-free `jurisearch-query` builder (or a snapshot-bound storage primitive) and return
-//! the result body. No `index_dir`, no write, no local rendering, no environment probing, no online
-//! enrichment (a network concern rejected at the boundary). The boundary→input resolution
-//! (`resolve_*_input`) is shared with the CLI one-shot adapters, so the two surfaces stay byte-identical.
+//! work/09 P4 — the site operation handlers. Each is a THIN adapter: parse the wire args through the
+//! contract-owned seam ([`Operation::parse_args`] — ONE authority for request defaults + field
+//! validation, shared with a future thin client), open ONE read snapshot through the server-owned store,
+//! validate the writer-owned readiness STAMP on that snapshot ([`ensure_site_readiness`], work/09 P4-4B /
+//! codex Q1 — no coverage recompute, no write), then call a side-effect-free `jurisearch-query` builder
+//! (or a snapshot-bound storage primitive) and return the result body. No `index_dir`, no write, no local
+//! rendering, no environment probing, no online enrichment (a network concern rejected at the boundary
+//! because the strict site DTOs carry no such field). The parsed site DTO maps onto the shared CLI
+//! request surface (`SearchRequest::from`, …) so the boundary→input resolution (`resolve_*_input`) is the
+//! SAME path as the CLI one-shot adapters — the two surfaces stay byte-identical.
 
 use jurisearch_core::error::ErrorObject;
+use jurisearch_core::operation::Operation;
+use jurisearch_core::site_request::SiteRequest;
 use jurisearch_query::{
     CiteInput, FetchInput, build_cite, build_compare, build_context, build_fetch, build_related,
     build_search, enforce_strict_citation, parse_citation_target, storage_error_object,
@@ -14,7 +19,6 @@ use jurisearch_query::{
 use jurisearch_storage::citation::{CitationLookupQuery, citation_lookup_in_snapshot};
 use jurisearch_storage::ingest_accounting::load_query_readiness_in_snapshot;
 use jurisearch_storage::query::ReadSnapshot;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
@@ -36,23 +40,24 @@ fn ensure_site_readiness(snapshot: &mut dyn ReadSnapshot) -> Result<(), ErrorObj
         .map_err(storage_error_object)
 }
 
-/// The site `fetch` wire args. STRICT (`deny_unknown_fields`) and strongly typed: `ids` must be an array
-/// of strings, and an unsupported option (`part`/`online`/…) is REJECTED rather than silently dropped —
-/// a caller is never told an option was honored when the site surface ignored it. (The site surface is
-/// base fetch only; the `--part`/online decision-zone overlay is a client/online concern.)
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SiteFetchArgs {
-    ids: Vec<String>,
+/// Destructure the contract-owned [`SiteRequest`] for the handler's own operation. A variant mismatch is
+/// impossible (each handler calls `parse_args` with its OWN [`Operation`]); the guard keeps it total
+/// without an `unreachable!` panic on the site service.
+fn site_request_mismatch(operation: &str) -> ErrorObject {
+    ErrorObject::internal(format!("site dispatch produced a non-{operation} request"))
 }
 
-/// `fetch`: exact, version-pinned document fetch over a read snapshot.
+/// `fetch`: exact, version-pinned document fetch over a read snapshot. The strict contract DTO rejects an
+/// unsupported option (`part`/`online`/…) at the seam — never silently dropped, so a caller is never told
+/// an option was honored when the site surface ignored it. (The site surface is base fetch only; the
+/// `--part`/online decision-zone overlay is a client/online concern.)
 pub(crate) struct FetchHandler;
 
 impl OperationHandler for FetchHandler {
     fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
-        let parsed: SiteFetchArgs = serde_json::from_value(args.clone())
-            .map_err(|error| ErrorObject::bad_input(format!("invalid fetch args: {error}")))?;
+        let SiteRequest::Fetch(parsed) = Operation::Fetch.parse_args(args)? else {
+            return Err(site_request_mismatch("fetch"));
+        };
         if parsed.ids.is_empty() {
             return Err(ErrorObject::bad_input(
                 "fetch requires at least one stable ID",
@@ -69,20 +74,17 @@ impl OperationHandler for FetchHandler {
     }
 }
 
-/// `search`: hybrid/bm25/dense retrieval over the read snapshot. Rejects `--zone` (Cassation-only
-/// client/online concern, not the shared read path); shares boundary resolution with the CLI adapter.
+/// `search`: hybrid/bm25/dense retrieval over the read snapshot. The strict contract DTO rejects `zone`
+/// (a Cassation-only client/online concern, not the shared read path) at the seam; the parsed args map
+/// onto the shared `SearchRequest` so boundary resolution is the SAME path as the CLI adapter.
 pub(crate) struct SearchHandler;
 
 impl OperationHandler for SearchHandler {
     fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
-        let req: SearchRequest = serde_json::from_value(args.clone())
-            .map_err(|error| ErrorObject::bad_input(format!("invalid search args: {error}")))?;
-        if req.zone.is_some() {
-            return Err(ErrorObject::bad_input(
-                "zone search is not available on the site service (a Cassation-only client/online \
-                 concern); omit `zone`",
-            ));
-        }
+        let SiteRequest::Search(parsed) = Operation::Search.parse_args(args)? else {
+            return Err(site_request_mismatch("search"));
+        };
+        let req = SearchRequest::from(parsed);
         validate_search_common(&req)?;
         let input = resolve_search_input(&req)?;
         let mut snapshot = ctx.store.begin_snapshot().map_err(storage_error_object)?;
@@ -97,14 +99,12 @@ pub(crate) struct CiteHandler;
 
 impl OperationHandler for CiteHandler {
     fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
-        let req: CiteRequest = serde_json::from_value(args.clone())
-            .map_err(|error| ErrorObject::bad_input(format!("invalid cite args: {error}")))?;
-        if req.online {
-            return Err(ErrorObject::bad_input(
-                "online citation verification is not available on the site service (a client/online \
-                 concern); omit `online`",
-            ));
-        }
+        // The strict contract DTO rejects `online` at the seam (it carries no such field); the parsed args
+        // map onto the shared `CiteRequest` with `online: false`.
+        let SiteRequest::Cite(parsed) = Operation::Cite.parse_args(args)? else {
+            return Err(site_request_mismatch("cite"));
+        };
+        let req = CiteRequest::from(parsed);
         if req.cite.trim().is_empty() {
             return Err(ErrorObject::bad_input("cite requires a non-empty citation"));
         }
@@ -146,8 +146,10 @@ pub(crate) struct ContextHandler;
 
 impl OperationHandler for ContextHandler {
     fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
-        let req: ContextRequest = serde_json::from_value(args.clone())
-            .map_err(|error| ErrorObject::bad_input(format!("invalid context args: {error}")))?;
+        let SiteRequest::Context(parsed) = Operation::Context.parse_args(args)? else {
+            return Err(site_request_mismatch("context"));
+        };
+        let req = ContextRequest::from(parsed);
         let input = resolve_context_input(&req)?;
         let mut snapshot = ctx.store.begin_snapshot().map_err(storage_error_object)?;
         ensure_site_readiness(&mut *snapshot)?;
@@ -160,8 +162,10 @@ pub(crate) struct RelatedHandler;
 
 impl OperationHandler for RelatedHandler {
     fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
-        let req: RelatedRequest = serde_json::from_value(args.clone())
-            .map_err(|error| ErrorObject::bad_input(format!("invalid related args: {error}")))?;
+        let SiteRequest::Related(parsed) = Operation::Related.parse_args(args)? else {
+            return Err(site_request_mismatch("related"));
+        };
+        let req = RelatedRequest::from(parsed);
         let input = resolve_related_input(&req)?;
         let mut snapshot = ctx.store.begin_snapshot().map_err(storage_error_object)?;
         ensure_site_readiness(&mut *snapshot)?;
@@ -174,8 +178,10 @@ pub(crate) struct CompareHandler;
 
 impl OperationHandler for CompareHandler {
     fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
-        let req: CompareRequest = serde_json::from_value(args.clone())
-            .map_err(|error| ErrorObject::bad_input(format!("invalid compare args: {error}")))?;
+        let SiteRequest::Compare(parsed) = Operation::Compare.parse_args(args)? else {
+            return Err(site_request_mismatch("compare"));
+        };
+        let req = CompareRequest::from(parsed);
         let input = resolve_compare_input(&req)?;
         let mut snapshot = ctx.store.begin_snapshot().map_err(storage_error_object)?;
         ensure_site_readiness(&mut *snapshot)?;
@@ -193,7 +199,12 @@ pub(crate) struct HealthHandler {
 }
 
 impl OperationHandler for HealthHandler {
-    fn handle(&self, ctx: &ServerContext, _args: &Value) -> Result<Value, ErrorObject> {
+    fn handle(&self, ctx: &ServerContext, args: &Value) -> Result<Value, ErrorObject> {
+        // `status` carries no args, but they go through the SAME strict seam as every other operation: a
+        // non-empty payload is an unsupported field, rejected here rather than silently accepted.
+        let SiteRequest::Status = Operation::Status.parse_args(args)? else {
+            return Err(site_request_mismatch("status"));
+        };
         let mut snapshot = ctx.store.begin_snapshot().map_err(storage_error_object)?;
         let corpora: Vec<Value> = snapshot
             .active_corpora()
@@ -364,6 +375,23 @@ mod tests {
             )
             .expect_err("an online cite must be rejected by the site service");
         assert!(error.message.contains("online"), "{}", error.message);
+    }
+
+    #[test]
+    fn health_rejects_unsupported_status_args() {
+        // `status` is strict like every other operation: a non-empty payload is rejected before any read.
+        let store = EmptyStore;
+        let embedder = PanicEmbedder;
+        let error = HealthHandler {
+            max_read_connections: 4,
+        }
+        .handle(&ctx(&store, &embedder), &json!({ "bogus": true }))
+        .expect_err("a non-empty status payload must be rejected");
+        assert!(
+            error.message.contains("invalid status args"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

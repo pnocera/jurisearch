@@ -276,17 +276,34 @@ payload, never a package `Reject`).
   addressed by service URL; identical rendering; clear errors on unreachable / version-skew; optional
   `--local` dev fallback). LAN exposure: bind the query service to the trusted site network (URL, **no
   auth** per decision); protocol-version negotiation rejects skewed peers loudly. Ops: systemd units
-  (syncd, query service, local bge-m3) + config; site-PG backup/restore guidance. A two-host acceptance
-  run (producer → site server → thin client) as ops evidence.
+  (syncd, query service, local bge-m3) + config; site-PG backup/restore guidance. Acceptance evidence,
+  by layer: (a) the serve-site SERVICE path — handlers, dispatch, the writer-owned read gate, the full
+  operation set, and one-shot render parity — is proven by the AUTOMATED in-process E2E, which ALSO
+  proves protocol-version skew rejection (`…rejects_an_old_servers_unversioned_reply` + the transport
+  response-envelope skew tests); (b) the shipped `jurisearch-client` operator surface — the contract seam
+  (each leg asserts the contract's OWN diagnostic, not just a non-zero exit) + connection/URL diagnostics
+  — is proven by a checked-in SINGLE-HOST operated capture of the real binary
+  (`scripts/single-host-acceptance.sh`). The
+  shipped serve-site PROCESS run (bind + DB connect + embedder-from-env + answering status/fetch/search +
+  a fetch-hash) requires an operator-provisioned site DB + embedder; the SAME script runs it where those
+  prerequisites exist, as does the genuine TWO-physical-host operator RUNBOOK (`05-two-host-acceptance.md`).
+  Neither the shipped-serve-site-process run nor the two-host run is a checked-in CI/dev gate.
 - **Invariants under test.** The thin client links **no** storage/embed/ingest (dependency-cone check);
   version-skew fails loudly; the thin client renders identically to the one-shot CLI.
 - **Negative tests.** Thin client vs an old/new server (skew) → clear rejection; server unreachable →
   clear error; `cargo tree` assert (no heavy crates in the client cone).
-- **Verification.** Dependency-cone test; thin-client e2e vs the service; two-host operated run.
+- **Verification.** Dependency-cone test; thin-client e2e vs the service (automated, in-process); the
+  single-host operated capture of the shipped CLIENT binary. The shipped serve-site PROCESS run and the
+  two-host operated run are operator runbook steps (field, prerequisite-gated), not automated gates.
 - **Risk & rollback.** Packaging; rollback = the local heavy CLI remains usable.
 - **Deferrals.** HA / scale-out (out of scope; seams preserved per 02 §10).
-- **Done-when.** A thin client on a second machine queries the site service by URL and renders
-  identically; the two-host acceptance is recorded.
+- **Done-when.** The serve-site service path renders identically to the one-shot CLI over the full
+  operation set, AND protocol-version skew is rejected loudly — both proven by the automated in-process
+  E2E. The shipped thin client speaks the versioned protocol with correct contract + connection/URL
+  diagnostics (checked-in single-host capture of the real binary; skew stays automated-test evidence).
+  The shipped serve-site PROCESS run and the genuine two-host physical run are operator runbook steps
+  (executed + OBSERVED blocks filled in the field where the DB/embedder prerequisites exist), not CI/dev
+  gates.
 
 ---
 

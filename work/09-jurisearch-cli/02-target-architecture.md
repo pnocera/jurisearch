@@ -339,7 +339,9 @@ coherent milestone and (per project discipline) codex-reviewed before the next.
 6. **Thin client** — the structurally separate client artifact, rendering identically to the
    one-shot CLI.
 7. **Operationalization** — configuration, service units, health/observability, site-PG
-   backup/restore, and an end-to-end two-host acceptance run (producer → site server → thin client).
+   backup/restore. Acceptance is the automated in-process E2E + a single-host operated capture of the
+   shipped binaries; the end-to-end two-host run (producer → site server → thin client) is an operator
+   field runbook, not a CI/dev gate.
 
 ---
 

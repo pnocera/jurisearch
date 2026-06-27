@@ -895,6 +895,19 @@ impl From<CliKind> for LegalKind {
     }
 }
 
+// Reverse: the contract enum carried by the dependency-light site DTOs back onto the clap surface, so a
+// site request parsed via `Operation::parse_args` reuses the SAME `resolve_*_input` path as the one-shot
+// and session adapters (one resolution authority, byte-identical with the local surfaces).
+impl From<LegalKind> for CliKind {
+    fn from(kind: LegalKind) -> Self {
+        match kind {
+            LegalKind::Code => Self::Code,
+            LegalKind::Decision => Self::Decision,
+            LegalKind::All => Self::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CliSearchMode {
@@ -909,6 +922,16 @@ impl From<CliSearchMode> for RetrievalMode {
             CliSearchMode::Hybrid => Self::Hybrid,
             CliSearchMode::Bm25 => Self::Bm25,
             CliSearchMode::Dense => Self::Dense,
+        }
+    }
+}
+
+impl From<RetrievalMode> for CliSearchMode {
+    fn from(mode: RetrievalMode) -> Self {
+        match mode {
+            RetrievalMode::Hybrid => Self::Hybrid,
+            RetrievalMode::Bm25 => Self::Bm25,
+            RetrievalMode::Dense => Self::Dense,
         }
     }
 }
@@ -929,6 +952,15 @@ impl From<CliGroupBy> for GroupBy {
     }
 }
 
+impl From<GroupBy> for CliGroupBy {
+    fn from(group_by: GroupBy) -> Self {
+        match group_by {
+            GroupBy::Chunk => Self::Chunk,
+            GroupBy::Document => Self::Document,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CliOutputFormat {
@@ -941,6 +973,15 @@ impl From<CliOutputFormat> for OutputFormat {
         match format {
             CliOutputFormat::Concise => Self::Concise,
             CliOutputFormat::Detailed => Self::Detailed,
+        }
+    }
+}
+
+impl From<OutputFormat> for CliOutputFormat {
+    fn from(format: OutputFormat) -> Self {
+        match format {
+            OutputFormat::Concise => Self::Concise,
+            OutputFormat::Detailed => Self::Detailed,
         }
     }
 }
