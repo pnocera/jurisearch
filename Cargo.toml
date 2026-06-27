@@ -7,8 +7,10 @@ members = [
     "crates/jurisearch-official-api",
     "crates/jurisearch-package",
     "crates/jurisearch-package-build",
+    "crates/jurisearch-render",
     "crates/jurisearch-storage",
     "crates/jurisearch-syncd",
+    "crates/jurisearch-transport",
 ]
 resolver = "3"
 

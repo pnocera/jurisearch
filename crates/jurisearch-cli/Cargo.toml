@@ -16,7 +16,9 @@ jurisearch-core = { path = "../jurisearch-core" }
 jurisearch-embed = { path = "../jurisearch-embed" }
 jurisearch-ingest = { path = "../jurisearch-ingest" }
 jurisearch-official-api = { path = "../jurisearch-official-api" }
+jurisearch-render = { path = "../jurisearch-render" }
 jurisearch-storage = { path = "../jurisearch-storage" }
+jurisearch-transport = { path = "../jurisearch-transport" }
 postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true

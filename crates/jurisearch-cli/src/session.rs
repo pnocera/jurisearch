@@ -14,6 +14,7 @@ use jurisearch_core::contract::{agent_help, command_session_excluded};
 use jurisearch_core::error::ErrorObject;
 use jurisearch_core::schema::compiled_schema;
 use jurisearch_core::session::{SessionRequest, SessionResponse};
+use jurisearch_transport::{TransportError, decode_bare_request_line};
 
 use crate::args::*;
 use crate::output::write_session_response;
@@ -96,12 +97,17 @@ pub(crate) fn run_jsonl(args: JsonlArgs) -> anyhow::Result<()> {
     let mut stdout = io::stdout().lock();
     for line in stdin.lock().lines() {
         let line = line.context("failed to read JSONL stdin")?;
-        let (response, should_exit) = match serde_json::from_str::<SessionRequest>(&line) {
+        let (response, should_exit) = match decode_bare_request_line(&line) {
             Ok(request) => dispatch_session_request(request),
             Err(error) => {
+                // Preserve the exact legacy message bytes ("malformed JSONL request: <serde>").
+                let detail = match &error {
+                    TransportError::Malformed(inner) => inner.clone(),
+                    other => other.to_string(),
+                };
                 let response = SessionResponse::err(
                     None,
-                    ErrorObject::bad_input(format!("malformed JSONL request: {error}")),
+                    ErrorObject::bad_input(format!("malformed JSONL request: {detail}")),
                 );
                 if args.fatal {
                     write_session_response(&mut stdout, &response)?;

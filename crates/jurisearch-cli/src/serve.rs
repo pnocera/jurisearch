@@ -11,7 +11,11 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use jurisearch_core::error::ErrorObject;
-use jurisearch_core::session::{SessionRequest, SessionResponse};
+use jurisearch_core::session::SessionResponse;
+use jurisearch_transport::{
+    MAX_LINE_BYTES, TransportError, decode_bare_request_line, encode_bare_response_line,
+    read_bounded_line,
+};
 
 use crate::args::ServeArgs;
 use crate::output::emit_error;
@@ -32,43 +36,6 @@ pub(crate) fn inject_server_index_dir(args: &mut Value, default_index_dir: &Opti
     }
 }
 
-/// Max bytes for one request line on the socket; oversize requests are rejected and the connection
-/// closed, so a client can't exhaust memory with an unbounded line.
-pub(crate) const SERVE_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
-
-/// Read one newline-terminated request, bounded to `max` bytes. `Ok(None)` at EOF; an oversize line
-/// is an `InvalidData` error (the caller replies bad_input and closes).
-pub(crate) fn read_bounded_line<R: BufRead>(
-    reader: &mut R,
-    max: usize,
-) -> io::Result<Option<String>> {
-    let mut buf: Vec<u8> = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        match reader.read(&mut byte)? {
-            0 => {
-                return Ok(if buf.is_empty() {
-                    None
-                } else {
-                    Some(String::from_utf8_lossy(&buf).into_owned())
-                });
-            }
-            _ => {
-                if byte[0] == b'\n' {
-                    return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
-                }
-                buf.push(byte[0]);
-                if buf.len() > max {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "request line exceeds the size limit",
-                    ));
-                }
-            }
-        }
-    }
-}
-
 /// Serve the JSONL request protocol over one socket, sequentially (the index's advisory lock means
 /// one request holds the index at a time). Reuses `dispatch_session_request` — the same transport-
 /// neutral handler the warm session uses — so results are byte-identical to the one-shot CLI.
@@ -78,42 +45,53 @@ pub(crate) fn serve_jsonl<R: BufRead, W: Write>(
     default_index_dir: &Option<String>,
 ) -> io::Result<()> {
     loop {
-        let line = match read_bounded_line(&mut reader, SERVE_MAX_REQUEST_BYTES) {
+        let line = match read_bounded_line(&mut reader, MAX_LINE_BYTES) {
             Ok(Some(line)) => line,
             Ok(None) => break,
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                let response =
-                    SessionResponse::err(None, ErrorObject::bad_input(error.to_string()));
-                let _ = writeln!(
-                    writer,
-                    "{}",
-                    serde_json::to_string(&response).unwrap_or_default()
+            // An oversize line: reply (same bytes as the legacy framing message) and close so the
+            // listener can accept the next client.
+            Err(TransportError::Oversize) => {
+                let response = SessionResponse::err(
+                    None,
+                    ErrorObject::bad_input(TransportError::Oversize.to_string()),
                 );
-                break; // close the connection so the listener can accept the next client
+                let _ = write!(writer, "{}", encode_bare_response_line(&response));
+                break;
             }
-            Err(error) => return Err(error),
+            // A genuine read failure propagates as before.
+            Err(TransportError::Io(error)) => return Err(error),
+            // `read_bounded_line` yields only `Oversize`/`Io`; handle anything else defensively.
+            Err(other) => {
+                let response =
+                    SessionResponse::err(None, ErrorObject::bad_input(other.to_string()));
+                let _ = write!(writer, "{}", encode_bare_response_line(&response));
+                break;
+            }
         };
         if line.trim().is_empty() {
             continue;
         }
-        let (response, should_exit) = match serde_json::from_str::<SessionRequest>(&line) {
+        // The local `serve` surface speaks the BARE (version-free) frame — its legacy compatibility
+        // with existing agent workflows is preserved. The versioned site envelope is a separate
+        // codec entry point used only by the site service (work/09 P4).
+        let (response, should_exit) = match decode_bare_request_line(&line) {
             Ok(mut request) => {
                 inject_server_index_dir(&mut request.args, default_index_dir);
                 dispatch_session_request(request)
             }
-            Err(error) => (
+            Err(TransportError::Malformed(inner)) => (
                 SessionResponse::err(
                     None,
-                    ErrorObject::bad_input(format!("malformed request: {error}")),
+                    ErrorObject::bad_input(format!("malformed request: {inner}")),
                 ),
                 false,
             ),
+            Err(error) => (
+                SessionResponse::err(None, ErrorObject::bad_input(error.to_string())),
+                false,
+            ),
         };
-        let encoded = serde_json::to_string(&response).unwrap_or_else(|_| {
-            r#"{"ok":false,"error":{"code":"internal","message":"failed to encode response"}}"#
-                .to_owned()
-        });
-        writeln!(writer, "{encoded}")?;
+        write!(writer, "{}", encode_bare_response_line(&response))?;
         writer.flush()?;
         if should_exit {
             break;
@@ -197,5 +175,41 @@ pub(crate) fn run_serve(args: ServeArgs, index_dir: Option<&Path>) -> anyhow::Re
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::serve_jsonl;
+
+    /// Drive `serve_jsonl` over in-memory buffers and return the exact bytes it wrote to the socket.
+    fn serve(input: &str) -> String {
+        let mut output: Vec<u8> = Vec::new();
+        serve_jsonl(input.as_bytes(), &mut output, &None).expect("serve_jsonl");
+        String::from_utf8(output).expect("utf8 output")
+    }
+
+    #[test]
+    fn serve_jsonl_exit_writes_exact_compact_bytes() {
+        // Raw socket bytes: compact JSON, field order id/ok/result, exactly one trailing newline.
+        let out = serve(
+            r#"{"id":"x","command":"exit"}
+"#,
+        );
+        assert_eq!(
+            out,
+            "{\"id\":\"x\",\"ok\":true,\"result\":{\"bye\":true}}\n"
+        );
+    }
+
+    #[test]
+    fn serve_jsonl_malformed_then_valid_emits_exact_bytes() {
+        let out = serve("not json\n{\"id\":\"y\",\"command\":\"exit\"}\n");
+        // Full socket bytes: the local serve malformed prefix is `malformed request: ` (NOT the
+        // session path's `malformed JSONL request: ` and NOT doubled with the codec's own frame
+        // text), the serde detail + `suggestions` are preserved, then the valid `exit` is acked.
+        let malformed = r#"{"ok":false,"error":{"code":"bad_input","message":"malformed request: expected ident at line 1 column 2","suggestions":["Run `jurisearch help agent` for accepted commands and flags."]}}"#;
+        let exit_ack = r#"{"id":"y","ok":true,"result":{"bye":true}}"#;
+        assert_eq!(out, format!("{malformed}\n{exit_ack}\n"));
     }
 }

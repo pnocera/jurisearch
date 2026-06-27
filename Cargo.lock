@@ -983,7 +983,9 @@ dependencies = [
  "jurisearch-embed",
  "jurisearch-ingest",
  "jurisearch-official-api",
+ "jurisearch-render",
  "jurisearch-storage",
+ "jurisearch-transport",
  "postgres",
  "predicates",
  "serde",
@@ -1073,10 +1075,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-render"
+version = "0.1.0"
+dependencies = [
+ "jurisearch-core",
+ "serde_json",
+]
+
+[[package]]
 name = "jurisearch-storage"
 version = "0.1.0"
 dependencies = [
  "fs2",
+ "jurisearch-core",
  "jurisearch-ingest",
  "jurisearch-package",
  "postgres",
@@ -1098,6 +1109,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "jurisearch-transport"
+version = "0.1.0"
+dependencies = [
+ "jurisearch-core",
+ "serde_json",
  "thiserror",
 ]
 

@@ -1,6 +1,15 @@
-//! Retrieval query/option types (GroupBy/RetrievalMode/cursor, filters, query structs) + RRF weights.
+//! Retrieval query/option types (cursor, filters, query structs) + RRF weights.
+//!
+//! The pure-data request vocabulary `GroupBy` / `RetrievalMode` / `RetrievalOptions` now lives in the
+//! dependency-light contract crate (`jurisearch_core::retrieval`) so the wire contract and storage
+//! share ONE definition; it is re-exported here so existing `jurisearch_storage::retrieval::{…}`
+//! call sites are unchanged. The env/manifest *interpretation* of those options
+//! (`effective_rrf_weights`/`effective_probes`/`rrf_weights`) and the SQL-adjacent query structs
+//! stay here.
 
 use super::*;
+
+pub use jurisearch_core::retrieval::{GroupBy, RetrievalMode, RetrievalOptions};
 
 // Dense ANN candidates are post-filtered by document validity, so fetch a
 // wider pool before assigning gap-free dense ranks.
@@ -37,36 +46,6 @@ pub fn rrf_weights() -> (f64, f64) {
         weight("JURISEARCH_RRF_LEXICAL_WEIGHT", DEFAULT_RRF_LEXICAL_WEIGHT),
         weight("JURISEARCH_RRF_DENSE_WEIGHT", DEFAULT_RRF_DENSE_WEIGHT),
     )
-}
-
-/// Result granularity: one row per matching chunk, or one row per article (its best chunk).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GroupBy {
-    Chunk,
-    Document,
-}
-
-impl GroupBy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chunk => "chunk",
-            Self::Document => "document",
-        }
-    }
-}
-
-/// Per-request retrieval tuning. `None` means "use the environment/default", so existing callers
-/// are unaffected. Carried as immutable request state (NOT process env), so warm sessions and a
-/// future server can serve concurrent requests with different weights/probes deterministically.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RetrievalOptions {
-    pub rrf_lexical_weight: Option<f64>,
-    pub rrf_dense_weight: Option<f64>,
-    pub ivfflat_probes: Option<u32>,
-    /// Decision-only authority rerank weight (`crate::authority`). `None`/unset and `<= 0.0` are inert
-    /// (the OFF path is byte-identical), so existing callers and `RetrievalOptions::default()` never
-    /// trigger authority reranking. Only finite `> 0.0` enables it. No environment fallback in v1.
-    pub authority_weight: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -205,31 +184,6 @@ pub enum RetrievalCursor<'a> {
         score: &'a str,
         document_id: &'a str,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetrievalMode {
-    Hybrid,
-    Bm25,
-    Dense,
-}
-
-impl RetrievalMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Hybrid => "hybrid",
-            Self::Bm25 => "bm25",
-            Self::Dense => "dense",
-        }
-    }
-
-    pub fn uses_lexical(self) -> bool {
-        matches!(self, Self::Hybrid | Self::Bm25)
-    }
-
-    pub fn uses_dense(self) -> bool {
-        matches!(self, Self::Hybrid | Self::Dense)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

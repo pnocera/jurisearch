@@ -15,10 +15,11 @@ use jurisearch_core::session::SessionResponse;
 use crate::errors::dependency_unavailable;
 
 /// Pretty-render a JSON value with a single trailing newline. These are the exact bytes
-/// written to an artifact file, and they match what [`write_json`] emits to stdout
-/// (`to_writer_pretty` + `\n`), so `eval --out FILE` and stdout stay byte-identical.
+/// written to an artifact file, and they match what [`write_json`] emits to stdout, so
+/// `eval --out FILE` and stdout stay byte-identical. The formatting authority is
+/// [`jurisearch_render::render_value_pretty`] — the same one the thin client renders through.
 pub(crate) fn render_artifact(value: &Value) -> Result<String, serde_json::Error> {
-    Ok(format!("{}\n", serde_json::to_string_pretty(value)?))
+    jurisearch_render::render_value_pretty(value)
 }
 
 /// Print an artifact to stdout, and additionally write it to `out` when given.
@@ -59,10 +60,10 @@ pub(crate) fn emit_error(error: ErrorObject) -> anyhow::Result<()> {
 }
 
 pub(crate) fn write_json(value: &Value) -> anyhow::Result<()> {
+    let rendered = jurisearch_render::render_value_pretty(value)?;
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    serde_json::to_writer_pretty(&mut handle, value)?;
-    handle.write_all(b"\n")?;
+    handle.write_all(rendered.as_bytes())?;
     Ok(())
 }
 
@@ -70,8 +71,7 @@ pub(crate) fn write_session_response(
     stdout: &mut io::StdoutLock<'_>,
     response: &SessionResponse,
 ) -> anyhow::Result<()> {
-    serde_json::to_writer(&mut *stdout, response)?;
-    stdout.write_all(b"\n")?;
+    stdout.write_all(jurisearch_transport::encode_bare_response_line(response).as_bytes())?;
     stdout.flush()?;
     Ok(())
 }

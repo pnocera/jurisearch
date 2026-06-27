@@ -45,4 +45,33 @@ impl SessionResponse {
             error,
         }
     }
+
+    /// True for the `Ok` variant.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
+
+    /// The correlation id echoed back, if any (present on both variants).
+    pub fn id(&self) -> Option<&Value> {
+        match self {
+            Self::Ok { id, .. } | Self::Err { id, .. } => id.as_ref(),
+        }
+    }
+
+    /// The success result body, or `None` on the error variant. Lets a dependency-light renderer
+    /// (`jurisearch-render`) unwrap a response without reaching into private fields.
+    pub fn result(&self) -> Option<&Value> {
+        match self {
+            Self::Ok { result, .. } => Some(result),
+            Self::Err { .. } => None,
+        }
+    }
+
+    /// The error object, or `None` on the success variant.
+    pub fn error(&self) -> Option<&ErrorObject> {
+        match self {
+            Self::Err { error, .. } => Some(error),
+            Self::Ok { .. } => None,
+        }
+    }
 }
