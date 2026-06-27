@@ -1,0 +1,40 @@
+# JuriSearch local embedding endpoint — bge-m3 served by llama.cpp's OpenAI-compatible server (work/09
+# P6). The site query service embeds dense queries against THIS local endpoint (loopback only); no
+# external embedding API by decision. Start this BEFORE jurisearch-site (which probes it at startup).
+#
+# Install: copy to /etc/systemd/system/, create /etc/jurisearch/bge-m3.env, then
+#   systemctl daemon-reload && systemctl enable --now jurisearch-bge-m3
+#
+# bge-m3.env must set (example):
+#   JURISEARCH_BGE_M3_MODEL=/srv/jurisearch/models/bge-m3-Q8_0.gguf
+#   JURISEARCH_BGE_M3_PORT=8081
+
+[Unit]
+Description=JuriSearch local embedding endpoint (bge-m3 via llama.cpp)
+Documentation=https://github.com/pnocera/jurisearch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/jurisearch/bge-m3.env
+# llama.cpp's server in embedding mode, bound to LOOPBACK only (the site service connects locally). Adjust
+# the binary path / flags to your llama.cpp build; `--pooling cls` + normalization must match the
+# embedding fingerprint the corpus was built with (bge-m3: cls pooling, L2-normalized, 1024-d).
+ExecStart=/usr/local/bin/llama-server \
+  --model ${JURISEARCH_BGE_M3_MODEL} \
+  --embeddings \
+  --pooling cls \
+  --host 127.0.0.1 \
+  --port ${JURISEARCH_BGE_M3_PORT}
+Restart=on-failure
+RestartSec=5
+
+# Hardening: a local inference server needs only its model file + loopback.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

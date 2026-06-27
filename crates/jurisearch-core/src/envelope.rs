@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::session::SessionRequest;
+use crate::session::{SessionRequest, SessionResponse};
 
 /// The wire protocol version. Serialized transparently (a bare integer), so an envelope is
 /// `{"proto": 1, "request": {…}}`.
@@ -33,6 +33,27 @@ impl ProtocolEnvelope {
         Self {
             proto: PROTOCOL_VERSION,
             request,
+        }
+    }
+}
+
+/// A framed site RESPONSE: the version-carrying wrapper around a [`SessionResponse`] (work/09 P6). The
+/// site service replies with this (NOT a bare response), so the thin client validates the SERVER's
+/// protocol version on every reply and fails loudly on skew — symmetric with the request envelope. A
+/// bare/unversioned reply is rejected as an old/incompatible server. The local `session`/`batch`/`serve`
+/// surfaces still reply BARE (version-free by design); this envelope rides only on the site path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProtocolResponseEnvelope {
+    pub proto: ProtocolVersion,
+    pub response: SessionResponse,
+}
+
+impl ProtocolResponseEnvelope {
+    /// Wrap a response at this build's protocol version.
+    pub fn new(response: SessionResponse) -> Self {
+        Self {
+            proto: PROTOCOL_VERSION,
+            response,
         }
     }
 }

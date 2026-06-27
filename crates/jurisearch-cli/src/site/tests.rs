@@ -104,9 +104,11 @@ fn round_trip(
     )
     .map_err(StorageError::Io)?;
     let line = String::from_utf8(output).expect("utf8 response");
-    let response: SessionResponse =
-        serde_json::from_str(line.trim()).map_err(StorageError::Json)?;
-    Ok(response)
+    // The site service replies with a VERSIONED response envelope (work/09 P6); unwrap it to the
+    // SessionResponse the assertions check.
+    let envelope = jurisearch_transport::decode_site_response_envelope_line(line.trim())
+        .map_err(|error| StorageError::Io(std::io::Error::other(error.to_string())))?;
+    Ok(envelope.response)
 }
 
 fn site_line(command: &str, args: serde_json::Value) -> String {
@@ -420,5 +422,154 @@ fn concurrent_dispatch_opens_one_independent_snapshot_per_request() {
         ids.len(),
         REQUESTS,
         "every request received its OWN (distinct) snapshot id"
+    );
+}
+
+// ---- work/09 P6: thin client over TCP (the single-host "two-host acceptance" slice) ----------------
+
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+
+/// work/09 P6 acceptance (single-host topology): a query-ready site is served over a loopback TCP port,
+/// and the THIN CLIENT (`jurisearch-client`, a structurally-separate artifact) queries it BY URL,
+/// rendering byte-identically to the in-process site path — which the 4B e2e already proved equals the
+/// one-shot CLI. So: thin client over TCP == in-process site == one-shot CLI. (The producer→syncd
+/// catch-up that populates the site is covered by P5's daemon acceptance; this proves the serve→client
+/// →render leg + the versioned protocol over a real socket.)
+#[test]
+fn the_thin_client_queries_the_site_over_tcp_with_one_shot_render_parity()
+-> Result<(), StorageError> {
+    let Ok(pg_config) = PgConfig::discover() else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-p6-site.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    ready_site(&postgres)?;
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
+    let embedder = StubEmbedder {
+        fingerprint: "fp".to_owned(),
+        dimension: 1024,
+    };
+    // The baseline byte-shape: the in-process site dispatch render (== one-shot, per the 4B e2e).
+    let in_process_fetch = round_trip(
+        &backend,
+        &embedder,
+        &site_line("fetch", json!({"ids": ["cass:SITE"]})),
+    )?;
+    let expected_fetch_render =
+        jurisearch_render::render_session_response(&in_process_fetch).expect("render");
+
+    // Serve the site over a loopback TCP port (the LAN-exposable surface, bound to loopback here). The
+    // server thread OWNS the read-role store + embedder + dispatcher and serves a fixed number of
+    // connections (the thin client opens one per request).
+    let store = backend.read_handle()?;
+    let dispatcher = build_dispatcher(4);
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(StorageError::Io)?;
+    let addr = listener.local_addr().map_err(StorageError::Io)?;
+    let server = std::thread::spawn(move || {
+        let ctx = ServerContext {
+            store: &store,
+            embedder: &embedder,
+        };
+        for _ in 0..2 {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let Ok(reader_half) = stream.try_clone() else {
+                        continue;
+                    };
+                    let _ = serve_site_connection(
+                        BufReader::new(reader_half),
+                        stream,
+                        &dispatcher,
+                        &ctx,
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let endpoint = jurisearch_client::parse_endpoint(&format!("tcp://{addr}"))
+        .expect("the loopback tcp URL parses");
+
+    // fetch over the wire: byte-identical render to the in-process site path (== one-shot CLI).
+    let fetch = jurisearch_client::send_request(
+        &endpoint,
+        &SessionRequest {
+            id: Some(json!("client")),
+            command: "fetch".to_owned(),
+            args: json!({"ids": ["cass:SITE"]}),
+        },
+    )
+    .expect("the thin client fetch succeeds over TCP");
+    assert!(fetch.is_ok(), "thin-client fetch ok: {fetch:?}");
+    let client_fetch_render = jurisearch_render::render_session_response(&fetch).expect("render");
+    assert_eq!(
+        client_fetch_render, expected_fetch_render,
+        "the thin client renders byte-identically to the in-process site path (== one-shot CLI)"
+    );
+    assert!(client_fetch_render.contains("cass:SITE"));
+
+    // status over the wire: the health surface answers the thin client too.
+    let status = jurisearch_client::send_request(
+        &endpoint,
+        &SessionRequest {
+            id: Some(json!("client")),
+            command: "status".to_owned(),
+            args: json!({}),
+        },
+    )
+    .expect("the thin client status succeeds over TCP");
+    assert!(status.is_ok());
+    assert_eq!(
+        status.result().expect("status")["service"].as_str(),
+        Some("jurisearch-site")
+    );
+
+    server.join().expect("server thread");
+    Ok(())
+}
+
+/// work/09 P6: the thin client REJECTS an old/incompatible server that replies with a BARE (unversioned)
+/// response — protocol skew fails loudly, never silently accepted. No PG needed (a fake server).
+#[test]
+fn the_thin_client_rejects_an_old_servers_unversioned_reply() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            // Read the (versioned) request line, then reply BARE — like a pre-P6 server.
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            let bare = jurisearch_transport::encode_bare_response_line(&SessionResponse::ok(
+                Some(json!("client")),
+                json!({}),
+            ));
+            let _ = stream.write_all(bare.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+    let endpoint = jurisearch_client::parse_endpoint(&format!("tcp://{addr}")).expect("url");
+    let result = jurisearch_client::send_request(
+        &endpoint,
+        &SessionRequest {
+            id: Some(json!("client")),
+            command: "status".to_owned(),
+            args: json!({}),
+        },
+    );
+    server.join().expect("server thread");
+    assert!(
+        matches!(result, Err(jurisearch_client::ClientError::ProtocolSkew(_))),
+        "a bare reply from an old server must be a loud protocol-skew error: {result:?}"
     );
 }

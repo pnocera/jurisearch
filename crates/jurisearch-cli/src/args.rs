@@ -410,8 +410,8 @@ pub(crate) struct ServeSiteArgs {
     /// Bind a Unix-domain socket at this path. Provide this OR --tcp.
     #[arg(long)]
     pub(crate) socket: Option<PathBuf>,
-    /// Bind a loopback TCP listener at host:port (e.g. 127.0.0.1:8099). Provide this OR --socket. The
-    /// site service is loopback/UDS-only until work/09 P6 (LAN exposure).
+    /// Bind a TCP listener at host:port (e.g. 127.0.0.1:8099). Provide this OR --socket. Loopback binds
+    /// freely; a non-loopback (LAN) bind requires --allow-lan (the service has NO client auth).
     #[arg(long)]
     pub(crate) tcp: Option<String>,
     /// The site PostgreSQL host (the shared server). Defaults to loopback.
@@ -438,6 +438,15 @@ pub(crate) struct ServeSiteArgs {
     /// blocks for a permit; lexical-only requests never embed. Defaults to the worker count.
     #[arg(long)]
     pub(crate) max_concurrent_embeds: Option<usize>,
+    /// Permit a NON-LOOPBACK `--tcp` bind on the trusted site network (work/09 P6). The site service
+    /// has NO client authentication (trusted LAN / Tailscale only, by decision), so an off-loopback
+    /// bind is refused unless this is set, and the address must be a private/CGNAT/ULA range.
+    #[arg(long)]
+    pub(crate) allow_lan: bool,
+    /// Additionally permit a WILDCARD bind (`0.0.0.0` / `::`, all interfaces) under `--allow-lan`.
+    /// Binding all interfaces with no auth is a distinct risk and must be confirmed explicitly.
+    #[arg(long)]
+    pub(crate) allow_wildcard_lan: bool,
 }
 
 #[derive(Debug, Args)]

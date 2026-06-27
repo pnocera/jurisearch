@@ -3,8 +3,9 @@
 //! capped by a counting semaphore so the worker count is the hard upper bound on simultaneous
 //! connections AND simultaneous read-role connections (each request opens + drops ONE read snapshot —
 //! this is a bounded fresh-connection model, NOT a reuse pool). A single `Send + Sync` query embedder is
-//! shared across workers, with a separate semaphore bounding in-flight embeds. 4B stays loopback/UDS-only
-//! (off-host LAN exposure is P6); the read identity is least-privilege by construction.
+//! shared across workers, with a separate semaphore bounding in-flight embeds. Loopback/UDS bind freely;
+//! a non-loopback (trusted-LAN) bind is an explicit `--allow-lan` operator act (work/09 P6 — the service
+//! has NO client authentication); the read identity is least-privilege by construction.
 
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
@@ -209,6 +210,57 @@ enum BoundListener {
     Unix(std::os::unix::net::UnixListener, PathBuf),
 }
 
+/// Whether `ip` is a trusted-LAN range the unauthenticated site service may bind under `--allow-lan`:
+/// RFC1918 IPv4 (10/8, 172.16/12, 192.168/16), CGNAT/Tailscale `100.64.0.0/10`, or IPv6 ULA `fc00::/7`
+/// (which covers Tailscale's `fd7a:…`). Loopback + wildcard are handled separately by the caller.
+fn is_trusted_lan_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_private() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(v6) => (v6.octets()[0] & 0xfe) == 0xfc,
+    }
+}
+
+/// Decide whether a `--tcp` bind to `addr` is permitted (work/09 P6). Loopback is always allowed (no
+/// warning). A non-loopback bind requires `--allow-lan`; a WILDCARD (`0.0.0.0`/`::`) additionally
+/// requires `--allow-wildcard-lan`; a specific non-loopback address must be a trusted-LAN range (the
+/// service has NO client authentication). Returns a `bad_input` `ErrorObject` when refused.
+fn check_tcp_bind(
+    addr: std::net::SocketAddr,
+    allow_lan: bool,
+    allow_wildcard_lan: bool,
+) -> Result<(), ErrorObject> {
+    let ip = addr.ip();
+    if ip.is_loopback() {
+        return Ok(());
+    }
+    if !allow_lan {
+        return Err(ErrorObject::bad_input(format!(
+            "refusing to bind non-loopback address {addr}: the site service has NO client \
+             authentication; pass --allow-lan to expose it on a TRUSTED LAN / Tailscale network"
+        )));
+    }
+    if ip.is_unspecified() {
+        if !allow_wildcard_lan {
+            return Err(ErrorObject::bad_input(format!(
+                "refusing to bind WILDCARD address {addr} (all interfaces) with no authentication: \
+                 pass --allow-wildcard-lan to confirm, or bind a specific trusted address"
+            )));
+        }
+        return Ok(());
+    }
+    if !is_trusted_lan_ip(ip) {
+        return Err(ErrorObject::bad_input(format!(
+            "refusing to bind {addr}: not a trusted-LAN range (RFC1918, 100.64.0.0/10 CGNAT/Tailscale, \
+             or fc00::/7 ULA). The unauthenticated site service must bind only a private/Tailscale address"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate the mutually-exclusive transport arguments and BIND the listener. This runs before the
 /// embedding stack is probed, so a malformed invocation (neither/both of `--tcp`/`--socket`), a
 /// non-loopback bind, or a stale/occupied socket fails with the expected `bad_input` rather than a
@@ -217,6 +269,8 @@ enum BoundListener {
 fn bind_site_listener(
     tcp: Option<&str>,
     socket: Option<&std::path::Path>,
+    allow_lan: bool,
+    allow_wildcard_lan: bool,
 ) -> anyhow::Result<Option<BoundListener>> {
     match (tcp, socket) {
         (Some(_), Some(_)) | (None, None) => {
@@ -231,13 +285,17 @@ fn bind_site_listener(
                 .map_err(|error| anyhow::anyhow!("invalid --tcp address {addr}: {error}"))?
                 .next()
                 .ok_or_else(|| anyhow::anyhow!("--tcp address {addr} did not resolve"))?;
-            // 4B is loopback-only: off-host exposure (the unauthenticated LAN bind) is P6.
-            if !resolved.ip().is_loopback() {
-                emit_error(ErrorObject::bad_input(format!(
-                    "refusing to bind non-loopback address {resolved}: the site service is \
-                     loopback/UDS-only until work/09 P6 (LAN exposure)"
-                )))?;
+            // Loopback is always allowed; a non-loopback (LAN) bind is an EXPLICIT operator act
+            // (--allow-lan), restricted to trusted ranges, with a loud no-auth warning (work/09 P6).
+            if let Err(error) = check_tcp_bind(resolved, allow_lan, allow_wildcard_lan) {
+                emit_error(error)?;
                 return Ok(None);
+            }
+            if !resolved.ip().is_loopback() {
+                eprintln!(
+                    "⚠️  jurisearch serve-site: binding {resolved} with NO CLIENT AUTHENTICATION — \
+                     trusted LAN / Tailscale only. Do NOT expose this to an untrusted network."
+                );
             }
             let listener = std::net::TcpListener::bind(resolved)
                 .map_err(|error| anyhow::anyhow!("failed to bind TCP {resolved}: {error}"))?;
@@ -281,7 +339,13 @@ pub(crate) fn run_serve_site(args: ServeSiteArgs) -> anyhow::Result<()> {
     let max_embeds = args.max_concurrent_embeds.unwrap_or(workers).max(1);
 
     // 1. Transport validation + bind (BEFORE the embedding stack is touched).
-    let Some(bound) = bind_site_listener(args.tcp.as_deref(), args.socket.as_deref())? else {
+    let Some(bound) = bind_site_listener(
+        args.tcp.as_deref(),
+        args.socket.as_deref(),
+        args.allow_lan,
+        args.allow_wildcard_lan,
+    )?
+    else {
         return Ok(());
     };
 
@@ -346,4 +410,66 @@ pub(crate) fn run_serve_site(args: ServeSiteArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_tcp_bind;
+
+    fn addr(s: &str) -> std::net::SocketAddr {
+        s.parse().expect("socket addr")
+    }
+
+    #[test]
+    fn loopback_binds_without_any_flag() {
+        assert!(check_tcp_bind(addr("127.0.0.1:8099"), false, false).is_ok());
+        assert!(check_tcp_bind(addr("[::1]:8099"), false, false).is_ok());
+    }
+
+    #[test]
+    fn a_non_loopback_bind_requires_allow_lan() {
+        let err = check_tcp_bind(addr("192.168.1.10:8099"), false, false)
+            .expect_err("non-loopback without --allow-lan is refused");
+        assert!(err.message.contains("--allow-lan"), "{}", err.message);
+    }
+
+    #[test]
+    fn trusted_lan_ranges_bind_under_allow_lan() {
+        // RFC1918, CGNAT/Tailscale (100.64/10), IPv6 ULA (fc00::/7).
+        for a in [
+            "10.0.0.5:8099",
+            "172.16.3.4:8099",
+            "192.168.1.10:8099",
+            "100.100.20.30:8099",
+            "[fd7a:115c:a1e0::1]:8099",
+        ] {
+            assert!(
+                check_tcp_bind(addr(a), true, false).is_ok(),
+                "trusted LAN address {a} should bind under --allow-lan"
+            );
+        }
+    }
+
+    #[test]
+    fn a_public_address_is_refused_even_under_allow_lan() {
+        let err = check_tcp_bind(addr("8.8.8.8:8099"), true, false)
+            .expect_err("a public address is never a trusted LAN");
+        assert!(err.message.contains("trusted-LAN range"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_wildcard_bind_needs_the_second_flag() {
+        assert!(
+            check_tcp_bind(addr("0.0.0.0:8099"), true, false).is_err(),
+            "wildcard without --allow-wildcard-lan is refused"
+        );
+        assert!(
+            check_tcp_bind(addr("0.0.0.0:8099"), true, true).is_ok(),
+            "wildcard binds with both flags"
+        );
+        assert!(
+            check_tcp_bind(addr("[::]:8099"), true, true).is_ok(),
+            "IPv6 wildcard binds with both flags"
+        );
+    }
 }

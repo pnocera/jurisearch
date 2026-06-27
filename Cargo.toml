@@ -2,6 +2,7 @@
 members = [
     "crates/jurisearch-core",
     "crates/jurisearch-cli",
+    "crates/jurisearch-client",
     "crates/jurisearch-embed",
     "crates/jurisearch-ingest",
     "crates/jurisearch-official-api",

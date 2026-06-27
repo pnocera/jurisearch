@@ -1,0 +1,57 @@
+# JuriSearch site query service — the read-only, versioned-protocol query server (work/09 P4/P6). Thin
+# clients on the trusted LAN connect to it BY URL (no client authentication, by decision — trusted
+# network / Tailscale only). It connects to the shared site PostgreSQL as the LEAST-PRIVILEGE read role
+# and embeds dense queries against the local bge-m3 endpoint.
+#
+# Install: copy to /etc/systemd/system/, create /etc/jurisearch/site.env, then
+#   systemctl daemon-reload && systemctl enable --now jurisearch-site
+#
+# site.env must set (example):
+#   JURISEARCH_SITE_BIND=100.100.20.30:8099   # the Tailscale/RFC1918 address:port to expose
+#   JURISEARCH_SITE_WORKERS=8
+#   JURISEARCH_DB_HOST=127.0.0.1
+#   JURISEARCH_DB_NAME=jurisearch
+#   JURISEARCH_READ_USER=jurisearch_read
+#   # The embedder config the local bge-m3 endpoint is served at (read by serve-site at startup):
+#   JURISEARCH_EMBED_PROVIDER=openai_compatible
+#   JURISEARCH_EMBED_BASE_URL=http://127.0.0.1:8081
+#   JURISEARCH_EMBED_MODEL=bge-m3
+#   JURISEARCH_EMBED_DIMENSION=1024
+#   JURISEARCH_EMBED_TOKENIZER_JSON=/srv/jurisearch/models/bge-m3-tokenizer.json
+#
+# For a LOCAL-only deployment (thin client on the same host), drop --tcp/--allow-lan and use
+#   --socket /run/jurisearch/jurisearch-site.sock   (the `--local` client shorthand resolves a UDS).
+
+[Unit]
+Description=JuriSearch site query service (read-only; versioned site protocol)
+Documentation=https://github.com/pnocera/jurisearch
+After=network-online.target postgresql.service jurisearch-bge-m3.service
+Wants=network-online.target jurisearch-bge-m3.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/jurisearch/site.env
+# --allow-lan is REQUIRED for the non-loopback bind (the service has NO client auth; it prints a loud
+# warning every off-loopback start). The address must be a trusted-LAN range (RFC1918 / 100.64.0.0/10
+# Tailscale-CGNAT / fc00::/7 ULA). The read user is SELECT-only by construction.
+ExecStart=/usr/local/bin/jurisearch serve-site \
+  --tcp ${JURISEARCH_SITE_BIND} \
+  --allow-lan \
+  --db-host ${JURISEARCH_DB_HOST} \
+  --db-name ${JURISEARCH_DB_NAME} \
+  --db-user ${JURISEARCH_READ_USER} \
+  --workers ${JURISEARCH_SITE_WORKERS}
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening: a read-only query server needs DB + embedding-endpoint connectivity only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RuntimeDirectory=jurisearch
+
+[Install]
+WantedBy=multi-user.target

@@ -9,18 +9,20 @@
 //!   local fallback: `encode_bare_request_line` / `decode_bare_request_line` (client→server) and
 //!   `encode_bare_response_line` / `decode_bare_response_line` (server→client). Version-free **by
 //!   design** (existing agent workflows send a bare `{id, command, args}`);
-//! * **versioned** site frames — `encode_site_envelope_line` / `decode_site_envelope_line` carry a
-//!   [`ProtocolEnvelope`] so a skewed or unversioned peer is rejected **loudly** (`TransportError`),
-//!   never silently degraded. The site *response* is a bare `SessionResponse` (decoded with
-//!   `decode_bare_response_line`); the version rides on the request envelope, which is sufficient to
-//!   detect skew in either direction.
+//! * **versioned** site frames — BOTH directions carry a protocol version so a skewed or unversioned
+//!   peer is rejected **loudly** (`TransportError`), never silently degraded:
+//!   `encode_site_envelope_line` / `decode_site_envelope_line` ([`ProtocolEnvelope`], request) and
+//!   `encode_site_response_envelope_line` / `decode_site_response_envelope_line`
+//!   ([`ProtocolResponseEnvelope`], response). The thin client's [`JsonlClient`] speaks ONLY this
+//!   versioned pair, so it validates the SERVER's version on every reply (a bare reply from an old
+//!   server is rejected as skew) — symmetric with the request envelope (work/09 P6).
 //!
 //! Listener binding, idle/read/write timeouts, server-owned context binding (`index_dir` stripping),
 //! and dispatch all stay in the **server composition layer**, NOT in this codec.
 
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 
-use jurisearch_core::envelope::{PROTOCOL_VERSION, ProtocolEnvelope};
+use jurisearch_core::envelope::{PROTOCOL_VERSION, ProtocolEnvelope, ProtocolResponseEnvelope};
 use jurisearch_core::session::{SessionRequest, SessionResponse};
 
 /// Max bytes for one request line; an oversize line is rejected and the caller closes the
@@ -115,9 +117,9 @@ pub fn encode_bare_response_line(response: &SessionResponse) -> String {
     format!("{json}\n")
 }
 
-/// Decode a **bare** `SessionResponse` line — what the thin client reads back from the service (both
-/// the local and the site paths return a bare response). This is the response-side codec authority,
-/// so the `JsonlClient` (work/09 P6) reuses it instead of an ad-hoc `serde_json::from_str`.
+/// Decode a **bare** `SessionResponse` line — the LOCAL `session`/`batch`/`serve` reply shape (and a
+/// low-level test helper). The SITE path uses the VERSIONED [`decode_site_response_envelope_line`]
+/// instead (work/09 P6), so the thin client never accepts a bare site reply.
 pub fn decode_bare_response_line(line: &str) -> Result<SessionResponse, TransportError> {
     serde_json::from_str(line).map_err(|error| TransportError::Malformed(error.to_string()))
 }
@@ -148,6 +150,71 @@ pub fn decode_site_envelope_line(line: &str) -> Result<ProtocolEnvelope, Transpo
 pub fn encode_site_envelope_line(envelope: &ProtocolEnvelope) -> String {
     let json = serde_json::to_string(envelope).unwrap_or_else(|_| ENCODE_FALLBACK.to_owned());
     format!("{json}\n")
+}
+
+/// Encode a versioned site RESPONSE frame (work/09 P6). The site service writes this for EVERY reply
+/// (including framing/protocol errors with a null id), so the thin client can validate the server's
+/// protocol version on every response.
+pub fn encode_site_response_envelope_line(envelope: &ProtocolResponseEnvelope) -> String {
+    let json = serde_json::to_string(envelope).unwrap_or_else(|_| ENCODE_FALLBACK.to_owned());
+    format!("{json}\n")
+}
+
+/// Decode a versioned site RESPONSE frame (work/09 P6). Mirrors [`decode_site_envelope_line`]: rejects
+/// malformed JSON, a missing `proto` (a bare/old-server reply — [`TransportError::Unversioned`]), and a
+/// `proto` this build does not speak ([`TransportError::UnsupportedVersion`]). This is what lets the thin
+/// client refuse a skewed/old server instead of silently accepting a bare response.
+pub fn decode_site_response_envelope_line(
+    line: &str,
+) -> Result<ProtocolResponseEnvelope, TransportError> {
+    let value: serde_json::Value =
+        serde_json::from_str(line).map_err(|error| TransportError::Malformed(error.to_string()))?;
+    if value.get("proto").is_none() {
+        return Err(TransportError::Unversioned);
+    }
+    let envelope: ProtocolResponseEnvelope = serde_json::from_value(value)
+        .map_err(|error| TransportError::Malformed(error.to_string()))?;
+    if envelope.proto != PROTOCOL_VERSION {
+        return Err(TransportError::UnsupportedVersion {
+            got: envelope.proto.0,
+            supported: PROTOCOL_VERSION.0,
+        });
+    }
+    Ok(envelope)
+}
+
+/// The protocol-level thin-client (work/09 P6): one request → one response over an already-open
+/// `BufRead + Write` stream, using ONLY the VERSIONED site frames. It owns framing + the bounded read +
+/// version validation; endpoint parsing, dialing, and rendering live in `jurisearch-client`. Reusing
+/// this keeps the client free of any ad-hoc codec and guarantees it fails loudly on protocol skew.
+pub struct JsonlClient<R: BufRead, W: Write> {
+    reader: R,
+    writer: W,
+}
+
+impl<R: BufRead, W: Write> JsonlClient<R, W> {
+    /// Build a client over the read/write halves of an open connection (e.g. a `TcpStream::try_clone`
+    /// pair, or a `UnixStream` split).
+    pub fn new(reader: R, writer: W) -> Self {
+        Self { reader, writer }
+    }
+
+    /// Send one request (wrapped at this build's protocol version) and read the single versioned site
+    /// response, validating the server's protocol version. A bare/unversioned or skewed reply is a
+    /// [`TransportError`]; an EOF before a reply is a [`TransportError::Io`] (connection closed).
+    pub fn request(&mut self, request: &SessionRequest) -> Result<SessionResponse, TransportError> {
+        let envelope = ProtocolEnvelope::new(request.clone());
+        self.writer
+            .write_all(encode_site_envelope_line(&envelope).as_bytes())?;
+        self.writer.flush()?;
+        let line = read_bounded_line(&mut self.reader, MAX_LINE_BYTES)?.ok_or_else(|| {
+            TransportError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "site service closed the connection before replying",
+            ))
+        })?;
+        Ok(decode_site_response_envelope_line(line.trim())?.response)
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +355,79 @@ mod tests {
             transport_err.to_string(),
             "request line exceeds the size limit"
         );
+    }
+
+    // ---- work/09 P6: versioned site RESPONSE envelope + JsonlClient ----------------------------------
+
+    #[test]
+    fn site_response_envelope_round_trips() {
+        let response = SessionResponse::ok(Some(json!("r1")), json!({ "documents": [] }));
+        let line = encode_site_response_envelope_line(&ProtocolResponseEnvelope::new(response));
+        let decoded = decode_site_response_envelope_line(line.trim()).expect("decode envelope");
+        assert_eq!(decoded.proto, PROTOCOL_VERSION);
+        assert!(decoded.response.is_ok());
+    }
+
+    #[test]
+    fn the_response_decoder_rejects_an_unversioned_reply() {
+        // A bare (old-server) response line carries no `proto` → loud skew rejection.
+        let bare = encode_bare_response_line(&SessionResponse::ok(Some(json!("r1")), json!({})));
+        let error = decode_site_response_envelope_line(bare.trim())
+            .expect_err("an unversioned site reply must be rejected");
+        assert!(matches!(error, TransportError::Unversioned), "{error:?}");
+    }
+
+    #[test]
+    fn the_response_decoder_rejects_a_skewed_version() {
+        // A higher (or lower) `proto` than this build speaks → UnsupportedVersion.
+        let skewed = json!({ "proto": PROTOCOL_VERSION.0 + 1,
+            "response": { "ok": true, "id": "r1", "result": {} } });
+        let error = decode_site_response_envelope_line(&skewed.to_string())
+            .expect_err("a skewed server version must be rejected");
+        assert!(
+            matches!(error, TransportError::UnsupportedVersion { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn jsonl_client_round_trips_a_versioned_request_and_response() {
+        use std::io::Cursor;
+        // The "server" pre-frames one versioned response; the client writes its versioned request.
+        let server_reply = encode_site_response_envelope_line(&ProtocolResponseEnvelope::new(
+            SessionResponse::ok(
+                Some(json!("req-1")),
+                json!({ "service": "jurisearch-site" }),
+            ),
+        ));
+        let reader = Cursor::new(server_reply.into_bytes());
+        let mut written: Vec<u8> = Vec::new();
+        let mut client = JsonlClient::new(reader, &mut written);
+        let response = client.request(&sample_request()).expect("round trip");
+        assert!(response.is_ok());
+        assert_eq!(
+            response.result().unwrap()["service"].as_str(),
+            Some("jurisearch-site")
+        );
+        // The client wrote a VERSIONED request envelope (not a bare request).
+        let sent = String::from_utf8(written).unwrap();
+        let envelope = decode_site_envelope_line(sent.trim()).expect("the request is versioned");
+        assert_eq!(envelope.proto, PROTOCOL_VERSION);
+        assert_eq!(envelope.request.command, "search");
+    }
+
+    #[test]
+    fn jsonl_client_rejects_a_bare_server_reply() {
+        use std::io::Cursor;
+        // An OLD/incompatible server replies BARE (no proto) → the client fails loudly (skew), never
+        // accepts it as a valid site response.
+        let bare = encode_bare_response_line(&SessionResponse::ok(Some(json!("req-1")), json!({})));
+        let reader = Cursor::new(bare.into_bytes());
+        let mut written: Vec<u8> = Vec::new();
+        let mut client = JsonlClient::new(reader, &mut written);
+        let error = client
+            .request(&sample_request())
+            .expect_err("a bare server reply must be rejected as skew");
+        assert!(matches!(error, TransportError::Unversioned), "{error:?}");
     }
 }

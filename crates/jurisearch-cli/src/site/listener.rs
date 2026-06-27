@@ -1,21 +1,28 @@
-//! work/09 P4 (4A) — the site listener: a UDS/loopback accept loop that frames versioned site requests,
-//! dispatches them through the [`SiteDispatcher`], and writes back compact `SessionResponse` JSONL. The
-//! skeleton serves connections sequentially over ONE pooled read-role connection (the bounded worker and
-//! read pools arrive with 4B). Decoding — and its loud rejection of unversioned/skewed frames — happens
+//! work/09 P4/P6 — the site listener: a UDS/loopback accept loop that frames VERSIONED site requests,
+//! dispatches them through the [`SiteDispatcher`], and writes back a VERSIONED site response envelope
+//! (work/09 P6 — so a thin client validates the server's protocol version on every reply, including
+//! framing/protocol errors). Decoding — and its loud rejection of unversioned/skewed frames — happens
 //! BEFORE dispatch, so a malformed frame never reaches a handler.
 
 use std::io::{BufRead, Write};
 
+use jurisearch_core::envelope::ProtocolResponseEnvelope;
 use jurisearch_core::error::ErrorObject;
 use jurisearch_core::session::SessionResponse;
 use jurisearch_transport::{
-    decode_site_envelope_line, encode_bare_response_line, read_bounded_line,
+    decode_site_envelope_line, encode_site_response_envelope_line, read_bounded_line,
 };
 
 use super::dispatcher::{ServerContext, SiteDispatcher};
 
 /// The maximum site request line, matching the local session loop's bound.
 pub(crate) const MAX_SITE_LINE_BYTES: usize = 1 << 20;
+
+/// Frame a response into a VERSIONED site response line (work/09 P6): every site reply carries this
+/// build's protocol version, so a skewed/old server is detectable by the thin client.
+fn site_response_line(response: SessionResponse) -> String {
+    encode_site_response_envelope_line(&ProtocolResponseEnvelope::new(response))
+}
 
 /// Serve one site connection to completion: read versioned request lines, dispatch each, write one
 /// response line per request. A framing/version error yields a single error response (the request id is
@@ -38,7 +45,7 @@ pub(crate) fn serve_site_connection<R: BufRead, W: Write>(
                 match decode_site_envelope_line(trimmed) {
                     Ok(envelope) => {
                         let response = dispatcher.dispatch(ctx, &envelope.request);
-                        writer.write_all(encode_bare_response_line(&response).as_bytes())?;
+                        writer.write_all(site_response_line(response).as_bytes())?;
                         writer.flush()?;
                     }
                     // Framing-level failure (unversioned/skewed/malformed): the frame never reaches the
@@ -52,7 +59,7 @@ pub(crate) fn serve_site_connection<R: BufRead, W: Write>(
                                 "malformed or unversioned site request frame: {transport_error}"
                             )),
                         );
-                        let _ = writer.write_all(encode_bare_response_line(&response).as_bytes());
+                        let _ = writer.write_all(site_response_line(response).as_bytes());
                         let _ = writer.flush();
                         break;
                     }
@@ -64,7 +71,7 @@ pub(crate) fn serve_site_connection<R: BufRead, W: Write>(
                     None,
                     ErrorObject::bad_input(format!("site request frame error: {transport_error}")),
                 );
-                let _ = writer.write_all(encode_bare_response_line(&response).as_bytes());
+                let _ = writer.write_all(site_response_line(response).as_bytes());
                 let _ = writer.flush();
                 break;
             }
@@ -140,7 +147,12 @@ mod tests {
             1,
             "exactly one (error) line is written: {text}"
         );
-        let response: SessionResponse = serde_json::from_str(lines[0]).unwrap();
-        assert!(!response.is_ok(), "the single line is the framing error");
+        // The reply is a VERSIONED site response envelope (work/09 P6), not a bare response.
+        let envelope = jurisearch_transport::decode_site_response_envelope_line(lines[0])
+            .expect("a versioned site response envelope");
+        assert!(
+            !envelope.response.is_ok(),
+            "the single line is the framing error"
+        );
     }
 }

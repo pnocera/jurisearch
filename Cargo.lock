@@ -979,6 +979,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "flate2",
+ "jurisearch-client",
  "jurisearch-core",
  "jurisearch-embed",
  "jurisearch-ingest",
@@ -996,6 +997,18 @@ dependencies = [
  "tempfile",
  "toml",
  "url",
+]
+
+[[package]]
+name = "jurisearch-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jurisearch-core",
+ "jurisearch-render",
+ "jurisearch-transport",
+ "serde_json",
 ]
 
 [[package]]

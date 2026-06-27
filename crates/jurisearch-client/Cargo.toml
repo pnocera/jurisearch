@@ -1,0 +1,29 @@
+[package]
+name = "jurisearch-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The STRUCTURALLY-SEPARATE thin client (work/09 P6): connects to a site query service by URL, speaks the
+# versioned site protocol, and renders responses identically to the one-shot CLI. It depends ONLY on the
+# three dependency-light base crates (contract/transport/render) — NO storage/embed/ingest/cli stack (a
+# dependency-cone test enforces this). The local heavy CLI remains the rollback path.
+
+[lib]
+name = "jurisearch_client"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jurisearch-client"
+path = "src/main.rs"
+
+[dependencies]
+jurisearch-core = { path = "../jurisearch-core" }
+jurisearch-transport = { path = "../jurisearch-transport" }
+jurisearch-render = { path = "../jurisearch-render" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
