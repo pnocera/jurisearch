@@ -94,7 +94,7 @@ fn mutate(
     let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
     tx.batch_execute(sql)
         .map_err(StorageError::PostgresClient)?;
-    let ctx = OutboxContext::new("mutation-run", 23);
+    let ctx = OutboxContext::new("mutation-run", 24);
     emit_change(
         &mut tx,
         &ctx,

@@ -21,7 +21,7 @@ pub fn schema_bundle_digest<C: GenericClient>(client: &mut C) -> Result<String, 
     Ok(jurisearch_package::canonical::digest_bytes(agg.as_bytes()))
 }
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 23;
+pub const CURRENT_SCHEMA_VERSION: i32 = 24;
 
 struct Migration {
     version: i32,
@@ -1070,6 +1070,56 @@ CREATE TABLE IF NOT EXISTS jurisearch_control.license_token (
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 23), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 24,
+        name: "app_reference_model",
+        // Plan P8 (writable-app reference model, design §8.2/§8.3): a thin REFERENCE IMPLEMENTATION
+        // the writable app uses to point at server data via SOFT, validated references — ordinary
+        // columns + validation state, NEVER a hard cross-schema FK into the generation/server tables
+        // (a hard FK would turn every re-baseline into a writable-schema migration). It lives in
+        // `jurisearch_app` precisely because that schema is PRESERVED across server re-baselines; the
+        // server reload never writes it. The validator re-resolves each row against the corpus's active
+        // generation AFTER the cursor advances and stamps only the `resolved_*` / `validation_status`
+        // columns. `anchor_json` carries document/article-level offsets/quote-hashes for chunk/zone
+        // references (derived identities are anchored, not pinned by `chunk_id`/`zone_unit_id`).
+        sql: r#"
+CREATE TABLE IF NOT EXISTS jurisearch_app.app_reference (
+    reference_id bigserial PRIMARY KEY,
+    target_kind text NOT NULL CHECK (
+        target_kind IN ('document_version','logical_article','decision','chunk','zone_unit')
+    ),
+    corpus text NOT NULL,
+    document_id text,
+    source text,
+    source_uid text,
+    version_group text,
+    as_of_date date,
+    anchor_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+    resolved_document_id text,
+    resolved_generation text,
+    resolved_schema_version integer,
+    validated_at timestamptz,
+    validation_status text NOT NULL DEFAULT 'unvalidated' CHECK (
+        validation_status IN ('unvalidated','resolved','changed','missing','invalid')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS app_reference_status_idx
+    ON jurisearch_app.app_reference (corpus, validation_status);
+CREATE INDEX IF NOT EXISTS app_reference_pin_idx
+    ON jurisearch_app.app_reference (corpus, document_id);
+CREATE INDEX IF NOT EXISTS app_reference_logical_idx
+    ON jurisearch_app.app_reference (corpus, source, version_group, as_of_date);
+CREATE INDEX IF NOT EXISTS app_reference_logical_uid_idx
+    ON jurisearch_app.app_reference (corpus, source, source_uid, as_of_date);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 24), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

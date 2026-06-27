@@ -838,7 +838,7 @@ fn an_emitter_blocked_by_the_fence_commits_above_the_frozen_high_water() -> Resu
     let handle = std::thread::spawn(move || {
         let mut emitter = postgres::Client::connect(&conn, postgres::NoTls).unwrap();
         let mut tx = emitter.transaction().unwrap();
-        let ctx = OutboxContext::new("blocked-emitter", 23);
+        let ctx = OutboxContext::new("blocked-emitter", 24);
         let seq = emit_change(
             &mut tx,
             &ctx,

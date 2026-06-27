@@ -122,7 +122,7 @@ fn mutate(
     let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
     tx.batch_execute(sql)
         .map_err(StorageError::PostgresClient)?;
-    let ctx = OutboxContext::new("mutation-run", 23);
+    let ctx = OutboxContext::new("mutation-run", 24);
     emit_change(
         &mut tx,
         &ctx,
@@ -141,7 +141,7 @@ fn install_second_corpus(client: &ManagedPostgres) -> Result<(), StorageError> {
     let stamps = ActivationStamps {
         sequence: 1,
         baseline_id: "inpi-2026-g0001",
-        schema_version: 23,
+        schema_version: 24,
         embedding_fingerprint: "fpi",
         builder_versions: &bv,
         last_package_id: Some("inpi-1-1"),
