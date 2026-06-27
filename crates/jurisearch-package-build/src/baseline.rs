@@ -422,7 +422,9 @@ fn build_media_package(
             uncompressed_payload_digest: payload_digest.clone(),
             per_file_digests,
             canonicalisation_algorithm: "jcs-sha256".to_owned(),
-            signature_algorithm: "stub".to_owned(),
+            // The DESCRIPTIVE algorithm field tracks the signer (plan P6) — the authoritative one is
+            // `Signed.signature.algorithm`. No more hard-coded "stub" under a real signer.
+            signature_algorithm: signer.algorithm().to_owned(),
             transparency_log_index: None,
         },
         apply: ApplyContract {

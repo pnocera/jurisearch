@@ -15,5 +15,6 @@ pub mod package_catalog;
 pub mod projection;
 pub mod retrieval;
 pub mod runtime;
+pub mod trust;
 pub mod zone_retrieval;
 pub mod zone_units;

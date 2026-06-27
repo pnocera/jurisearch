@@ -21,7 +21,7 @@ pub fn schema_bundle_digest<C: GenericClient>(client: &mut C) -> Result<String, 
     Ok(jurisearch_package::canonical::digest_bytes(agg.as_bytes()))
 }
 
-pub const CURRENT_SCHEMA_VERSION: i32 = 22;
+pub const CURRENT_SCHEMA_VERSION: i32 = 23;
 
 struct Migration {
     version: i32,
@@ -1027,6 +1027,49 @@ ALTER TABLE package_catalog
 
 INSERT INTO index_manifest(key, value, updated_at)
 VALUES ('schema', jsonb_build_object('schema_version', 22), now())
+ON CONFLICT (key) DO UPDATE
+SET value = excluded.value,
+    updated_at = excluded.updated_at;
+"#,
+    },
+    Migration {
+        version: 23,
+        name: "client_trust_store",
+        // Plan P6 (Trust & gating): the client's local trust state — producer verifying keys and
+        // installed license tokens — lives in `jurisearch_control` next to `corpus_state`, so it
+        // survives generation swaps / re-baselines and is read by `syncd` at apply time. It is NOT
+        // replicated corpus data and never lives in a generation schema.
+        //
+        // `trust_anchor`: the producer public keys this client accepts, keyed by (key_id, key_epoch,
+        // purpose) — rotation-tolerant (an old epoch verifies while still installed; removing a row
+        // revokes it). `license_token`: producer/licensing-signed entitlement assertions; PK is
+        // (corpus, tier, license_epoch, audience) so renewals, staged epochs, and multiple
+        // tiers/audiences coexist (NOT one-token-per-corpus). The signed token bytes are kept in
+        // `token_json` and re-verified on every use.
+        sql: r#"
+CREATE TABLE IF NOT EXISTS jurisearch_control.trust_anchor (
+    key_id text NOT NULL,
+    key_epoch integer NOT NULL,
+    algorithm text NOT NULL,
+    public_key_hex text NOT NULL,
+    purpose text NOT NULL DEFAULT 'package',
+    installed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (key_id, key_epoch, purpose)
+);
+
+CREATE TABLE IF NOT EXISTS jurisearch_control.license_token (
+    corpus text NOT NULL,
+    tier text NOT NULL,
+    license_epoch integer NOT NULL,
+    audience text NOT NULL DEFAULT '',
+    not_after text,
+    token_json jsonb NOT NULL,
+    installed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (corpus, tier, license_epoch, audience)
+);
+
+INSERT INTO index_manifest(key, value, updated_at)
+VALUES ('schema', jsonb_build_object('schema_version', 23), now())
 ON CONFLICT (key) DO UPDATE
 SET value = excluded.value,
     updated_at = excluded.updated_at;

@@ -6,7 +6,6 @@
 use std::io::Write;
 use std::path::Path;
 
-use jurisearch_package::canonical::canonical_digest;
 use jurisearch_package::compat::Version;
 use jurisearch_package::manifest::EmbeddedManifest;
 use jurisearch_package::manifest::embedded::PayloadFormat;
@@ -145,14 +144,17 @@ fn apply_media_package(
     check_extensions(client, manifest)?;
     check_copy_binary_guard(client, manifest)?;
 
-    // 3. Per-file digests (§11.1): every payload file must match its declared digest before load.
+    // 2b. Entitlement precondition (§11.3, plan P6): a non-open package needs a valid installed license
+    //     token covering its corpus/tier — checked BEFORE any payload work.
+    crate::trust::check_entitlement(client, manifest)?;
+
+    // 3. Per-file digests (§11.1): every payload file (and the aggregate `artifact_sha256`) must match
+    //    its declared digest — checked from bytes read off disk, AFTER the embedded signature above
+    //    (plan P6 r1: no redundant "internal canonical digest" step; the signature already covers the
+    //    canonical manifest bytes, so a separate `canonical_digest(manifest)` proved nothing).
     verify_per_file_digests(artifact_dir, manifest)?;
 
-    // 4. Canonicalisation precheck: the manifest must canonicalise (an integrity precondition).
-    canonical_digest(manifest)
-        .map_err(|error| SyncError::reject(RejectCode::DigestMismatch, error.to_string()))?;
-
-    // 5. Serialize the whole apply for this corpus under the per-corpus apply lock (plan P5 r1
+    // 4. Serialize the whole apply for this corpus under the per-corpus apply lock (plan P5 r1
     //    BLOCKER): no concurrent apply can build the same deterministic generation, and the retriable
     //    building-generation reset can never drop a generation another apply is actively loading. Held
     //    across idempotency → reset → create → load → build → switch; released on EVERY path.
@@ -820,10 +822,11 @@ pub fn apply_incremental(
         ));
     }
 
-    // Gates (no CopyBinary guard — JSONL is portable) + payload digests.
+    // Gates (no CopyBinary guard — JSONL is portable) + entitlement (§11.3, plan P6) + payload digests.
     check_client_version(manifest)?;
     check_schema_compatibility(client, manifest)?;
     check_extensions(client, manifest)?;
+    crate::trust::check_entitlement(client, manifest)?;
     verify_per_file_digests(artifact_dir, manifest)?;
 
     let package_id = manifest.identity.package_id.as_str();

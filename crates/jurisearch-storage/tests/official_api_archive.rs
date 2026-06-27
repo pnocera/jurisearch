@@ -24,7 +24,7 @@ fn official_api_responses_archive_round_trip() -> Result<(), StorageError> {
     let schema = postgres.execute_sql(
         "SELECT (value->>'schema_version') FROM index_manifest WHERE key = 'schema';",
     )?;
-    assert_eq!(schema.trim(), "22");
+    assert_eq!(schema.trim(), "23");
 
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;

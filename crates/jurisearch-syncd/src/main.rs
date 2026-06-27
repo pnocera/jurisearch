@@ -1,15 +1,16 @@
-//! `jurisearch-syncd` binary (plan P3 C2): a minimal consumer service skeleton — read a local artifact
-//! directory, apply a baseline onto the client index, and report `corpus status`. It owns the DB
-//! lifecycle (opens a durable managed Postgres at the index dir, runs migrations) rather than depending
-//! on a user closing a CLI session (contrast `serve.rs`). Trust is stubbed in P3 (`AcceptAllVerifier`);
-//! the real verifier lands in P6.
+//! `jurisearch-syncd` binary (plan P3 C2, hardened in P6): a minimal consumer service skeleton — read a
+//! local artifact directory, apply a baseline onto the client index, and report `corpus status`. It
+//! owns the DB lifecycle (opens a durable managed Postgres at the index dir, runs migrations). Trust is
+//! REAL (P6): the production apply path builds an Ed25519 verifier from the client's installed
+//! `trust_anchor` rows — never `AcceptAllVerifier`, which is reserved for tests/loopback.
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use jurisearch_package::crypto::AcceptAllVerifier;
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig};
-use jurisearch_syncd::{BaselineApplyOutcome, apply_baseline, corpus_status};
+use jurisearch_syncd::{
+    BaselineApplyOutcome, apply_baseline, corpus_status, load_package_verifier,
+};
 
 #[derive(Parser)]
 #[command(
@@ -44,7 +45,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Apply { artifact } => {
-            let outcome = apply_baseline(&postgres, &artifact, &AcceptAllVerifier)?;
+            // Production trust: the verifier is built from the client's installed trust anchors. An
+            // empty/broken trust store rejects every package (never an accept-all fallback).
+            let verifier = load_package_verifier(&postgres)?;
+            let outcome = apply_baseline(&postgres, &artifact, &verifier)?;
             match outcome {
                 BaselineApplyOutcome::Applied {
                     corpus,

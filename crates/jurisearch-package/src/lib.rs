@@ -6,8 +6,9 @@
 //! identity helpers, deterministic canonicalisation, and the `Signer`/`Verifier` trust seam. Both
 //! sides compile against it, so neither can drift.
 //!
-//! It is a **pure leaf crate**: types + serde + canonicalisation + traits only — **no I/O, no DB,
-//! no concrete crypto**. Storage, the CLI, and the client service all depend on it.
+//! It is a **pure leaf crate**: types + serde + canonicalisation + the trust seam — **no I/O, no DB**.
+//! Since P6 it also carries the concrete Ed25519 scheme behind the `Signer`/`Verifier` traits (still
+//! no I/O — key material is passed in). Storage, the CLI, and the client service all depend on it.
 //!
 //! Module map (→ design section):
 //! * [`sequence`] — `ChangeSeq` vs `PackageSequence`, the two non-interchangeable orderings (§5.1).
@@ -29,6 +30,7 @@ pub mod corpus;
 pub mod crypto;
 pub mod event;
 pub mod identity;
+pub mod license;
 pub mod manifest;
 pub mod package_kind;
 pub mod reject;
@@ -42,9 +44,12 @@ pub const PACKAGE_FORMAT_VERSION: u32 = 1;
 // Re-exports for the common surface, so dependents can `use jurisearch_package::{...}`.
 pub use compat::{CompatibilityStamps, Version};
 pub use corpus::{AttributionError, Corpus, corpus_for_source};
-pub use crypto::{KeyEpoch, KeyId, Signature, Signer, Verifier};
+pub use crypto::{
+    Ed25519Signer, Ed25519Verifier, KeyEpoch, KeyId, Signature, Signer, TrustAnchor, Verifier,
+};
 pub use event::{EventKind, ReplaceSet, ReplaceSetGroup, ScopeKind};
 pub use identity::{DocumentVersionId, LogicalArticleId, ResponseId};
+pub use license::{LicenseToken, tier_is_open};
 pub use manifest::{EmbeddedManifest, RemoteManifest};
 pub use package_kind::PackageKind;
 pub use reject::{RejectCode, RejectError};

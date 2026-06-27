@@ -460,7 +460,8 @@ fn build_incremental_inner(
             uncompressed_payload_digest: payload_digest.clone(),
             per_file_digests,
             canonicalisation_algorithm: "jcs-sha256".to_owned(),
-            signature_algorithm: "stub".to_owned(),
+            // Descriptive only; the authoritative algorithm is `Signed.signature.algorithm` (plan P6).
+            signature_algorithm: signer.algorithm().to_owned(),
             transparency_log_index: None,
         },
         apply: ApplyContract {

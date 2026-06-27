@@ -42,7 +42,7 @@ fn stamps() -> ActivationStamps<'static> {
     ActivationStamps {
         sequence: 1,
         baseline_id: "core-2026-06-26-g0001",
-        schema_version: 22,
+        schema_version: 23,
         embedding_fingerprint: "bge-m3:1024:cls:normalize=true",
         builder_versions: &serde_json::Value::Null,
         last_package_id: None,

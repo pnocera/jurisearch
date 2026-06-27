@@ -22,7 +22,7 @@ fn row<'a>(
         previous_package_digest: None,
         package_digest: Some(package_digest),
         manifest_digest: Some("sha256:manifest"),
-        schema_version: 22,
+        schema_version: 23,
         embedding_fingerprint: "fp",
         builder_versions,
         status: "built",

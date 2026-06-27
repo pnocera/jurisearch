@@ -8,6 +8,7 @@
 pub mod apply;
 mod error;
 pub mod status;
+pub mod trust;
 
 pub use apply::{
     BaselineApplyOutcome, IncrementalApplyOutcome, apply_baseline, apply_incremental,
@@ -15,3 +16,4 @@ pub use apply::{
 };
 pub use error::SyncError;
 pub use status::{CorpusStatus, corpus_status};
+pub use trust::{check_entitlement, install_verified_license_token, load_package_verifier};

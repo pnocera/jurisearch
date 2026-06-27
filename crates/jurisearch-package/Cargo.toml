@@ -5,11 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Pure contract crate: types + serde + canonicalisation + Signer/Verifier traits.
-# No I/O, no DB, no concrete crypto. The single source of truth for the producer<->client
-# package/manifest agreement (conception §3 DRY). Depended on by storage, cli, and the service.
+# Contract crate: types + serde + canonicalisation + Signer/Verifier traits, plus the concrete
+# Ed25519 trust scheme behind those traits (P6). No I/O, no DB. The single source of truth for the
+# producer<->client package/manifest agreement (conception §3 DRY). Depended on by storage, cli, service.
 
 [dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
