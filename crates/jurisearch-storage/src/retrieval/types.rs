@@ -184,6 +184,14 @@ pub enum RetrievalCursor<'a> {
         score: &'a str,
         document_id: &'a str,
     },
+    /// A multi-corpus fan-out keyset cursor (work/09 P3C): the cross-corpus RRF score, the owning corpus,
+    /// and the candidate id (chunk or document — the grouping is carried separately in the wire cursor's
+    /// `mc:<group>:…` prefix). Used only by the multi-corpus search path.
+    MultiCorpus {
+        score: &'a str,
+        corpus: &'a str,
+        id: &'a str,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]

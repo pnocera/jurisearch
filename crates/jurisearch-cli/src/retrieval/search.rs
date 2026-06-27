@@ -510,8 +510,20 @@ impl<'a> SearchExecution<'a> {
 
 #[derive(Debug)]
 pub(crate) enum ParsedSearchCursor {
-    Chunk { score: String, chunk_id: String },
-    Document { score: String, document_id: String },
+    Chunk {
+        score: String,
+        chunk_id: String,
+    },
+    Document {
+        score: String,
+        document_id: String,
+    },
+    /// A multi-corpus fan-out cursor `mc:<group>:<cross_score>:<corpus>:<id>` (work/09 P3C).
+    MultiCorpus {
+        score: String,
+        corpus: String,
+        id: String,
+    },
 }
 
 impl ParsedSearchCursor {
@@ -520,6 +532,9 @@ impl ParsedSearchCursor {
             Self::Chunk { score, chunk_id } => RetrievalCursor::Chunk { score, chunk_id },
             Self::Document { score, document_id } => {
                 RetrievalCursor::Document { score, document_id }
+            }
+            Self::MultiCorpus { score, corpus, id } => {
+                RetrievalCursor::MultiCorpus { score, corpus, id }
             }
         }
     }
@@ -539,13 +554,48 @@ pub(crate) fn validate_cursor_score(score: &str, tail: &str) -> Result<(), Error
     Ok(())
 }
 
-/// Parse the opaque cursor, tagged by grouping. A `doc:`-prefixed cursor is a document cursor; an
-/// unprefixed `<score>:<chunk_id>` is a chunk cursor. A cursor from the other grouping is rejected
-/// rather than silently mis-paging.
+/// Parse the opaque cursor, tagged by grouping. An `mc:`-prefixed cursor is a multi-corpus fan-out
+/// cursor; a `doc:`-prefixed cursor is a document cursor; an unprefixed `<score>:<chunk_id>` is a chunk
+/// cursor. A cursor from the other grouping is rejected rather than silently mis-paging.
 pub(crate) fn parse_search_cursor(
     cursor: &str,
     group_by: CliGroupBy,
 ) -> Result<ParsedSearchCursor, ErrorObject> {
+    if let Some(rest) = cursor.strip_prefix("mc:") {
+        // `mc:<group>:<cross_score>:<corpus>:<id>` — the id may itself contain ':' (e.g. `cass:D1#0`),
+        // so split into exactly four fields and keep the remainder as the id.
+        let parts: Vec<&str> = rest.splitn(4, ':').collect();
+        let [group, score, corpus, id] = parts.as_slice() else {
+            return Err(ErrorObject::bad_input(
+                "malformed multi-corpus cursor (expected mc:<group>:<score>:<corpus>:<id>)",
+            ));
+        };
+        let cursor_group = match *group {
+            "chunk" => CliGroupBy::Chunk,
+            "document" => CliGroupBy::Document,
+            other => {
+                return Err(ErrorObject::bad_input(format!(
+                    "multi-corpus cursor has an unknown grouping `{other}`"
+                )));
+            }
+        };
+        if cursor_group != group_by {
+            return Err(ErrorObject::bad_input(format!(
+                "this is a `{group}`-grouped multi-corpus cursor; rerun with --group-by {group}"
+            )));
+        }
+        validate_cursor_score(score, id)?;
+        if corpus.trim().is_empty() {
+            return Err(ErrorObject::bad_input(
+                "multi-corpus cursor is missing its corpus",
+            ));
+        }
+        return Ok(ParsedSearchCursor::MultiCorpus {
+            score: (*score).to_owned(),
+            corpus: (*corpus).to_owned(),
+            id: (*id).to_owned(),
+        });
+    }
     if let Some(rest) = cursor.strip_prefix("doc:") {
         if group_by != CliGroupBy::Document {
             return Err(ErrorObject::bad_input(

@@ -217,18 +217,19 @@ fn zone_coverage_is_read_through_the_request_snapshot_across_a_swap() -> Result<
 }
 
 #[test]
-fn a_query_snapshot_refuses_a_multi_corpus_topology_until_3c() -> Result<(), StorageError> {
-    let Some(pg_config) = discover_pg_config("p3b multi-corpus refusal")? else {
+fn a_multi_corpus_snapshot_opens_and_resolves_every_active_corpus() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("p3c multi-corpus open")? else {
         return Ok(());
     };
     let root = tempfile::Builder::new()
-        .prefix("jurisearch-p3b-multi.")
+        .prefix("jurisearch-p3c-multi.")
         .tempdir()
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
 
     // Activate `core`, then install a SECOND corpus row directly into the cursor so the resolver returns
-    // two active corpora (a real 2-corpus install is 3C; this is the minimal multi-corpus topology).
+    // two active corpora. work/09 3C LIFTED the single-corpus refusal: the snapshot now opens and
+    // resolves BOTH (a real 2-corpus install drives the full fan-out harness elsewhere).
     seed_core_with_title(&postgres, "GEN-A")?;
     let gen_a = create_generation_from_public(&postgres, "core", 1, Some("core-swap-g0001"))?;
     activate_generation(
@@ -244,13 +245,14 @@ fn a_query_snapshot_refuses_a_multi_corpus_topology_until_3c() -> Result<(), Sto
          VALUES ('inpi','inpi_g0001',1,'inpi-g0001',24,'fp');",
     )?;
 
-    let error = postgres
-        .begin_snapshot()
-        .map(|_| ())
-        .expect_err("a query snapshot must refuse a multi-corpus topology until 3C");
-    assert!(
-        error.to_string().to_lowercase().contains("multi-corpus"),
-        "the refusal names the 3C deferral: {error}"
+    let snapshot = postgres.begin_snapshot()?;
+    let corpora = snapshot.active_corpora();
+    assert_eq!(
+        corpora.len(),
+        2,
+        "the snapshot resolves both active corpora (3C)"
     );
+    let names: Vec<&str> = corpora.iter().map(|c| c.corpus.as_str()).collect();
+    assert!(names.contains(&"core") && names.contains(&"inpi"));
     Ok(())
 }

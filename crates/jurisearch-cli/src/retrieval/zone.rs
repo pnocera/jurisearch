@@ -54,6 +54,35 @@ pub(crate) fn ensure_zone_retrieval_readiness(
     Ok(())
 }
 
+/// work/09 P3C: multi-corpus `--zone` fan-out is deferred — `zone_candidates_in_snapshot` would
+/// otherwise read the `jurisearch_server` union views (no per-generation zone index). Fail closed for
+/// more than one active corpus; single-corpus zone search is unchanged. (`--zone` is Cour de cassation
+/// scope, single-corpus in practice.)
+pub(crate) fn reject_multi_corpus_zone(snapshot: &dyn ReadSnapshot) -> Result<(), ErrorObject> {
+    if snapshot.active_corpora().len() > 1 {
+        return Err(index_unavailable(
+            "multi-corpus `--zone` fan-out is not supported yet (work/09 3C deferral); zone search \
+             requires a single active corpus",
+        ));
+    }
+    Ok(())
+}
+
+/// A multi-corpus `mc:` cursor must never be replayed on the zone path (work/09 P3C): zone search is
+/// single-corpus, and `zone_candidates_in_snapshot` would otherwise SILENTLY drop the cursor (the
+/// single-corpus SQL has no multi-corpus keyset) and replay the first page. Reject it explicitly, like
+/// the main hybrid path does.
+pub(crate) fn reject_multi_corpus_zone_cursor(
+    cursor: &Option<ParsedSearchCursor>,
+) -> Result<(), ErrorObject> {
+    if matches!(cursor, Some(ParsedSearchCursor::MultiCorpus { .. })) {
+        return Err(ErrorObject::bad_input(
+            "multi-corpus cursors cannot be used with --zone; restart the zone search without a cursor",
+        ));
+    }
+    Ok(())
+}
+
 /// The snapshot-bound core of `search --zone`'s reads: zone candidate retrieval AND the response's
 /// `scope` coverage, run through the SAME [`ReadSnapshot`] so they cannot straddle a generation swap
 /// (work/09 P3B). Returns `(candidates_json, coverage_json)`. The readiness gate
@@ -98,6 +127,7 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
         .as_deref()
         .map(|cursor| parse_search_cursor(cursor, CliGroupBy::Document))
         .transpose()?;
+    reject_multi_corpus_zone_cursor(&after_cursor)?;
     let normalized_query_text = parade_query_text(&req.query);
     let query_text = if retrieval_mode.uses_lexical() {
         normalized_query_text.ok_or_else(|| {
@@ -123,6 +153,7 @@ pub(crate) fn zone_search_payload(req: SearchRequest, zone: CliZone) -> Result<V
     // retrieval, AND the response's `scope` coverage all observe the same served generation (a swap
     // mid-request can never mix gen-A candidates with gen-B coverage).
     let mut snapshot = postgres.begin_snapshot().map_err(storage_error_object)?;
+    reject_multi_corpus_zone(&*snapshot)?;
     ensure_zone_retrieval_readiness(&mut *snapshot, needs_dense, expected_fingerprint.as_deref())?;
 
     let as_of = req.as_of.clone().unwrap_or_else(today_utc);
@@ -350,6 +381,69 @@ mod snapshot_consistency_tests {
 
     fn candidate_count(candidates: &Value) -> usize {
         candidates["candidates"].as_array().map_or(0, Vec::len)
+    }
+
+    /// work/09 P3C: a multi-corpus `mc:` cursor is rejected on the zone path BEFORE any retrieval, so it
+    /// can never be silently dropped into a first-page replay (even under a single-corpus zone topology).
+    #[test]
+    fn zone_search_rejects_a_multi_corpus_cursor() {
+        // A real `mc:document:...` cursor parses to a MultiCorpus cursor (the id keeps its `:`)...
+        let parsed =
+            parse_search_cursor("mc:document:0.01639344:core:cass:D1", CliGroupBy::Document)
+                .expect("a well-formed mc: cursor parses");
+        assert!(matches!(parsed, ParsedSearchCursor::MultiCorpus { .. }));
+        // ...and the zone path rejects it loudly (the main hybrid path rejects it too).
+        let error = reject_multi_corpus_zone_cursor(&Some(parsed))
+            .expect_err("zone search must reject a multi-corpus cursor");
+        assert!(error.message.contains("multi-corpus"), "{}", error.message);
+        // A normal single-corpus cursor and no cursor both pass.
+        assert!(reject_multi_corpus_zone_cursor(&None).is_ok());
+    }
+
+    /// work/09 P3C: `search --zone` fails closed over a multi-corpus topology (fan-out deferred), and a
+    /// single-corpus topology passes the guard.
+    #[test]
+    fn multi_corpus_zone_search_fails_closed() {
+        let Ok(pg_config) = PgConfig::discover() else {
+            return;
+        };
+        let root = tempfile::Builder::new()
+            .prefix("jurisearch-p3c-zoneguard.")
+            .tempdir()
+            .unwrap();
+        let postgres = ManagedPostgres::start_durable(pg_config, root.path()).unwrap();
+
+        seed_decision_with_zone(&postgres, "cass:ZG", "zg-mot");
+        let generation =
+            create_generation_from_public(&postgres, "core", 1, Some("core-zg-g0001")).unwrap();
+        activate_generation(
+            &postgres,
+            "core",
+            &generation,
+            &stamps(1, "core-zg-g0001"),
+            None,
+        )
+        .unwrap();
+
+        // Single corpus → the guard passes.
+        {
+            let snapshot = postgres.begin_snapshot().unwrap();
+            assert!(reject_multi_corpus_zone(&*snapshot).is_ok());
+        }
+
+        // Install a second active corpus → the guard fails closed.
+        postgres
+            .execute_sql(
+                "INSERT INTO jurisearch_control.corpus_state \
+                   (corpus, active_generation, sequence, baseline_id, schema_version, \
+                    embedding_fingerprint) \
+                 VALUES ('inpi','inpi_g0001',1,'inpi-g0001',24,'fp');",
+            )
+            .unwrap();
+        let snapshot = postgres.begin_snapshot().unwrap();
+        let error = reject_multi_corpus_zone(&*snapshot)
+            .expect_err("multi-corpus --zone must fail closed (3C deferral)");
+        assert!(error.message.contains("multi-corpus"), "{}", error.message);
     }
 
     /// work/09 P3B (re-review fix): drives the FACTORED zone-search adapter core

@@ -114,7 +114,14 @@ Tests (storage + CLI): bm25 fused from both arms + plan hits physical gen schema
 non-overlapping across arms (page1 ∪ page2 = expected, no dup); each candidate carries `corpus`;
 fetch/context by-id reads from BOTH via the union-view default path; multi-corpus `--zone` → fail-closed.
 
-## Status
+## STATUS: implemented + in codex review r2 (r1 FIXES_REQUIRED: zone mc-cursor + deeper pagination — fixed)
+
+All green: query_fanout_p3c (bm25 fan-out+fusion, dense fail-closed, deep cursor-aware pagination over 6
+docs/corpus), query_snapshot_p3b (multi-corpus open), zone.rs (multi-corpus fail-closed + mc-cursor
+rejection), single-corpus byte-parity (cli_retrieval_contract 24, cli_byte_parity, storage 112, CLI bins
+73). Implementation in WORKING TREE, uncommitted (commit whole P3C on GO).
+
+## Status (detail)
 - [x] API: `ReadSnapshot::read_text_for_corpus` + len>1 default=`jurisearch_server,public`; refusal LIFTED
   (`query.rs`). P3B refusal test → `a_multi_corpus_snapshot_opens_and_resolves_every_active_corpus`.
   Tree GREEN (single-corpus unchanged). UNCOMMITTED (P3C is one review gate; commit only when complete).

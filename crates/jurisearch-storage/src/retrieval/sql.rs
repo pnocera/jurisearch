@@ -61,8 +61,12 @@ pub(super) fn cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> String {
                  AND r.chunk_id > {chunk_id}))"
             )
         }
-        // A document cursor never reaches the chunk-grouped query (the CLI rejects the mismatch).
-        Some(RetrievalCursor::Document { .. }) | None => String::new(),
+        // A document cursor never reaches the chunk-grouped query (the CLI rejects the mismatch); a
+        // multi-corpus cursor never reaches the single-corpus arm SQL (the fan-out runs arms with no
+        // cursor and keysets the FUSED stream in Rust).
+        Some(RetrievalCursor::Document { .. } | RetrievalCursor::MultiCorpus { .. }) | None => {
+            String::new()
+        }
     }
 }
 
@@ -79,7 +83,9 @@ pub(crate) fn document_cursor_predicate(cursor: Option<RetrievalCursor<'_>>) -> 
                  OR (cursor_score = {score}::numeric AND document_id > {document_id}))"
             )
         }
-        Some(RetrievalCursor::Chunk { .. }) | None => String::new(),
+        Some(RetrievalCursor::Chunk { .. } | RetrievalCursor::MultiCorpus { .. }) | None => {
+            String::new()
+        }
     }
 }
 
