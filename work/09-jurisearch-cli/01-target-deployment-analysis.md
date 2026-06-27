@@ -5,7 +5,7 @@ Scope: **analysis only — no design, no implementation plan.** This document an
 current system as it actually stands in the code, the gap to the envisioned deployment, the forces and
 constraints, the decision space with its trade-offs, and the feasibility/risks. The chosen target
 shape and its delivery sequencing live separately in
-[`2026-06-27-target-architecture.md`](2026-06-27-target-architecture.md); this is the reasoning beneath
+[`02-target-architecture.md`](02-target-architecture.md); this is the reasoning beneath
 it, not a restatement of its decisions.
 
 Where the code is cited it is ground truth, read this session. Throughput figures are memory-derived
@@ -260,6 +260,6 @@ correctness and service-boundary properties.**
 ## 9. What this analysis deliberately does not do
 
 It does not choose the target shape, specify schemas/APIs, or sequence the work — those are design and
-planning concerns captured in [`2026-06-27-target-architecture.md`](2026-06-27-target-architecture.md).
+planning concerns captured in [`02-target-architecture.md`](02-target-architecture.md).
 It also does not re-open the **work/08** producer/package decisions, which it treats as the established
 substrate this deployment consumes.

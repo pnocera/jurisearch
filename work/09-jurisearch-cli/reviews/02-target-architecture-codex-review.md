@@ -1,6 +1,6 @@
 # Target Architecture Review
 
-Review scope: `work/09-jurisearch-cli/2026-06-27-target-architecture.md`, checked against the current source in `/home/pierre/Work/jurisearch`.
+Review scope: `work/09-jurisearch-cli/02-target-architecture.md`, checked against the current source in `/home/pierre/Work/jurisearch`.
 
 ## Findings
 

@@ -5,7 +5,7 @@
 # Question: can query "readiness" move entirely to apply-time (writer-owned), with zero writes at query time?
 
 **Read this first for full context:** the target architecture document we are iterating on lives at
-`work/09-jurisearch-cli/2026-06-27-target-architecture.md`. Read it — especially **§6 (the strictly
+`work/09-jurisearch-cli/02-target-architecture.md`. Read it — especially **§6 (the strictly
 read-only query service + its "state is the writer's job" property)**, **§7 (the syncd writer /
 apply-time activation)**, and **§12 (the open "Readiness ownership" item)**. Settled decisions in that
 doc you should treat as fixed: the query service is strictly read-only; syncd is the *only* writer;
@@ -83,12 +83,12 @@ The current query-time write is an implementation artifact: `load_or_compute_que
 
 There are two design caveats to record in the target doc:
 
-1. The main chunk search path currently does **not** implement the §6 fingerprint preflight. It computes a query embedding and passes its fingerprint into dense SQL, which filters by `ce.embedding_fingerprint`, but a mismatch degrades to no dense matches rather than producing the clear compatibility error required by `work/09-jurisearch-cli/2026-06-27-target-architecture.md:147-156`.
-2. `index_manifest` is global, not per-corpus/per-generation. That is workable for the current single aggregate active-read signature, but it is under-specified for the doc's open multi-corpus question at `work/09-jurisearch-cli/2026-06-27-target-architecture.md:324-325`.
+1. The main chunk search path currently does **not** implement the §6 fingerprint preflight. It computes a query embedding and passes its fingerprint into dense SQL, which filters by `ce.embedding_fingerprint`, but a mismatch degrades to no dense matches rather than producing the clear compatibility error required by `work/09-jurisearch-cli/02-target-architecture.md:147-156`.
+2. `index_manifest` is global, not per-corpus/per-generation. That is workable for the current single aggregate active-read signature, but it is under-specified for the doc's open multi-corpus question at `work/09-jurisearch-cli/02-target-architecture.md:324-325`.
 
 ## What the current readiness path does
 
-The target architecture requires a strictly read-only service whose query-readiness/index-state bookkeeping is writer-owned, not a query side effect (`work/09-jurisearch-cli/2026-06-27-target-architecture.md:136-140`). Today, the read path violates that on a ready cache miss.
+The target architecture requires a strictly read-only service whose query-readiness/index-state bookkeeping is writer-owned, not a query side effect (`work/09-jurisearch-cli/02-target-architecture.md:136-140`). Today, the read path violates that on a ready cache miss.
 
 Entry points:
 
@@ -168,7 +168,7 @@ So yes: for the target readiness/compatibility preflight, the only input that is
 
 Yes. The current apply path is already structured for this.
 
-The target doc says syncd verifies and applies in a cursor-gated transaction (`work/09-jurisearch-cli/2026-06-27-target-architecture.md:182-185`) and builds indexes before activation, then repoints views and advances the cursor atomically (`work/09-jurisearch-cli/2026-06-27-target-architecture.md:186-189`). The source matches that intent:
+The target doc says syncd verifies and applies in a cursor-gated transaction (`work/09-jurisearch-cli/02-target-architecture.md:182-185`) and builds indexes before activation, then repoints views and advances the cursor atomically (`work/09-jurisearch-cli/02-target-architecture.md:186-189`). The source matches that intent:
 
 - `apply_media_package` documents the sequence as verify, load generation, build indexes, validate contract/postconditions, then atomic switch; it states the only globally visible mutation is `activate_generation_with_guard` (`crates/jurisearch-syncd/src/apply.rs:108-112`).
 - The locked apply body copies payload, builds generation indexes, validates index contract, assembles dense manifests, validates postconditions, builds `ActivationStamps`, and calls `activate_generation_with_guard` (`crates/jurisearch-syncd/src/apply.rs:219-264`).
