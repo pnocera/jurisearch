@@ -295,7 +295,17 @@ fn every_reject_code_is_produced_by_a_real_path() -> Result<(), StorageError> {
     });
     codes.insert(code_of(apply_incremental(&client, t.path(), &verifier)));
 
-    // WrongGeneration: hold the apply advisory lock on another connection → apply fails clean.
+    // WrongGeneration: an incremental whose `active_generation` precondition does not match the cursor
+    // (a GENUINE cursor/generation conflict — passes signature + from-sequence + chain link, then the
+    // precondition mismatch fires).
+    let t = tampered(inc1.path(), true, &pkg, |m| {
+        m.apply.preconditions.active_generation = Some("does-not-match".to_owned());
+    });
+    codes.insert(code_of(apply_incremental(&client, t.path(), &verifier)));
+
+    // Apply/switch advisory-lock contention is a TRANSIENT, RETRYABLE signal (work/09 P5, codex): it
+    // surfaces as `SyncError::LockBusy`, NOT a `WrongGeneration` reject — so the daemon backs off and
+    // retries instead of mis-classifying it as a permanent cursor conflict. (Not a §6.3 reject code.)
     {
         let mut holder = postgres::Client::connect(&client.connection_string(), postgres::NoTls)
             .map_err(StorageError::PostgresClient)?;
@@ -305,7 +315,11 @@ fn every_reject_code_is_produced_by_a_real_path() -> Result<(), StorageError> {
             &[&APPLY_ADVISORY_LOCK_KEY],
         )
         .map_err(StorageError::PostgresClient)?;
-        codes.insert(code_of(apply_incremental(&client, inc1.path(), &verifier)));
+        let busy = apply_incremental(&client, inc1.path(), &verifier);
+        assert!(
+            matches!(busy, Err(SyncError::LockBusy { .. })),
+            "apply-lock contention must be LockBusy (retryable), got {busy:?}"
+        );
         held.rollback().map_err(StorageError::PostgresClient)?;
     }
 

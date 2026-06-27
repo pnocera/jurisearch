@@ -911,9 +911,10 @@ pub fn apply_incremental(
         .map_err(SyncError::Postgres)?
         .get(0);
     if !locked {
-        return Err(SyncError::reject(
-            RejectCode::WrongGeneration,
-            "another apply holds the advisory lock".to_owned(),
+        // Transient contention — the daemon should back off + retry, NOT treat as a `WrongGeneration`
+        // reject (which also signals a real cursor/generation conflict).
+        return Err(SyncError::lock_busy(
+            "another apply holds the advisory lock",
         ));
     }
 

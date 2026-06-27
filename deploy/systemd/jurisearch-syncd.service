@@ -1,0 +1,56 @@
+# JuriSearch syncd — the consumer-side corpus sync DAEMON (work/09 P5).
+#
+# Polls the producer's signed manifest and applies catch-up (baseline/incremental) into the shared
+# site PostgreSQL, on a timer, as the SINGLE writer. It holds a daemon-lifetime advisory lease, so a
+# second instance refuses to start. Graceful shutdown is SIGTERM (it finishes the in-flight apply, then
+# stops); data-plane rejects (bad signature, missing entitlement, sequence gap) are logged and retried
+# on the next tick — they do NOT crash the daemon, so they never trigger a restart loop.
+#
+# Install: copy this unit to /etc/systemd/system/, create the EnvironmentFile below, then
+#   systemctl daemon-reload && systemctl enable --now jurisearch-syncd
+#
+# Structured JSON logs go to the journal (journalctl -u jurisearch-syncd -f).
+
+[Unit]
+Description=JuriSearch syncd (consumer corpus sync daemon)
+Documentation=https://github.com/pnocera/jurisearch
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Credentials + topology come from the environment file (kept out of `ps`). At minimum set:
+#   JURISEARCH_DB_HOST, JURISEARCH_DB_NAME, JURISEARCH_WRITER_USER, JURISEARCH_CORPUS,
+#   JURISEARCH_SOURCE_ROOT  (the published artifact root: <root>/<corpus>/manifest.json + packages/)
+# The writer authenticates on the trusted LAN/socket (peer/trust auth — no password by decision).
+EnvironmentFile=/etc/jurisearch/syncd.env
+ExecStart=/usr/local/bin/jurisearch-syncd \
+  --server-host ${JURISEARCH_DB_HOST} \
+  --server-db ${JURISEARCH_DB_NAME} \
+  --writer-user ${JURISEARCH_WRITER_USER} \
+  run \
+  --corpus ${JURISEARCH_CORPUS} \
+  --source-root ${JURISEARCH_SOURCE_ROOT} \
+  --interval-secs 30
+
+# Graceful: the daemon handles SIGTERM (the default KillSignal), draining the in-flight apply first.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+# Restart only on an unexpected exit (a FATAL such as a lost single-writer lease, or a crash). The
+# advisory lease releases when the process dies, so a restart cleanly re-acquires it.
+Restart=on-failure
+RestartSec=10
+
+# Hardening (the daemon needs DB connectivity + read access to the published artifact root only).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# NOTE: systemd does NOT expand environment variables in path directives like ReadOnlyPaths (only in
+# ExecStart). Set this to the SAME absolute path as $JURISEARCH_SOURCE_ROOT for your deployment (edit it
+# here or override in a drop-in: `systemctl edit jurisearch-syncd`). The default assumes the recommended
+# layout under /srv.
+ReadOnlyPaths=/srv/jurisearch/packages
+
+[Install]
+WantedBy=multi-user.target

@@ -1115,6 +1115,7 @@ dependencies = [
  "clap",
  "jurisearch-package",
  "jurisearch-storage",
+ "libc",
  "postgres",
  "serde",
  "serde_json",

@@ -889,6 +889,10 @@ pub enum StorageError {
     StorageLockBusy { path: PathBuf },
     #[error("another session owns the Postgres data-dir advisory lock for {data_dir} ({key})")]
     AdvisoryLockBusy { data_dir: PathBuf, key: i64 },
+    /// The package apply/switch advisory lock is held by another writer — a TRANSIENT contention the
+    /// caller (e.g. the syncd daemon) should back off and retry, NOT a permanent reject.
+    #[error("apply/switch advisory lock is busy: {message}")]
+    ApplyLockBusy { message: String },
     #[error(
         "missing extension assets for `{extension}` in pkglibdir={pkglibdir} extension_dir={extension_dir}"
     )]

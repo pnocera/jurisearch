@@ -6,6 +6,7 @@
 //! sub-responsibility is a module (SRP); P3 ships the **baseline** applier and `corpus status`.
 
 pub mod apply;
+pub mod daemon;
 mod error;
 pub mod planner;
 pub mod status;
@@ -15,10 +16,12 @@ pub use apply::{
     BaselineApplyOutcome, IncrementalApplyOutcome, apply_baseline, apply_incremental,
     apply_rebaseline,
 };
+pub use daemon::{Clock, CycleOutcome, DaemonConfig, ShutdownToken, SystemClock, run_daemon};
 pub use error::SyncError;
 pub use planner::{
     CatchupPlan, CatchupReport, CatchupSource, ClientCursor, DirectoryCatchupSource,
-    apply_media_auto, check_manifest_corpus, plan_catchup, read_client_cursor, run_catchup,
+    ManifestSource, PackageSource, apply_media_auto, check_manifest_corpus, fetch_verify_manifest,
+    plan_catchup, read_client_cursor, run_catchup,
 };
 pub use status::{CorpusStatus, corpus_status};
 pub use trust::{

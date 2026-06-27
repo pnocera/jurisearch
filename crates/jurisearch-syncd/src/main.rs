@@ -5,20 +5,22 @@
 //! from the client's installed `trust_anchor` rows, NEVER `AcceptAllVerifier`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use jurisearch_package::crypto::{KeyEpoch, KeyId, TrustAnchor};
-use jurisearch_package::manifest::RemoteManifest;
-use jurisearch_package::signed::Signed;
 use jurisearch_storage::backend::{
     ConnectionConfig, WriterConnection, WriterHandle, WriterVisibility,
 };
+use jurisearch_storage::generations::try_acquire_daemon_lock;
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig};
 use jurisearch_storage::trust::{LICENSE_PURPOSE, PACKAGE_PURPOSE};
 use jurisearch_syncd::{
-    BaselineApplyOutcome, CatchupPlan, CatchupReport, DirectoryCatchupSource, apply_baseline,
-    check_manifest_corpus, corpus_status, install_trust_anchor, install_verified_license_token,
-    load_package_verifier, plan_catchup, read_client_cursor, run_catchup,
+    BaselineApplyOutcome, CatchupPlan, CatchupReport, DaemonConfig, DirectoryCatchupSource,
+    ShutdownToken, SystemClock, apply_baseline, corpus_status, fetch_verify_manifest,
+    install_trust_anchor, install_verified_license_token, load_package_verifier, plan_catchup,
+    read_client_cursor, run_catchup, run_daemon,
 };
 
 #[derive(Parser)]
@@ -101,6 +103,32 @@ fn build_writer(cli: &Cli) -> anyhow::Result<WriterConn> {
     }
 }
 
+/// Install graceful-shutdown signal handling (work/09 P5): block SIGTERM + SIGINT process-wide, then
+/// spawn a thread that `sigwait`s for one and requests shutdown. `sigwait` runs in NORMAL thread context
+/// (NOT an async-signal handler), so it may safely take the [`ShutdownToken`]'s mutex/condvar to wake a
+/// sleeping daemon. MUST be called before spawning other threads so they inherit the blocked mask.
+fn install_signal_shutdown(shutdown: Arc<ShutdownToken>) {
+    // SAFETY: standard libc signal-mask setup; the sigset is zero-initialized then populated via the
+    // libc helpers, and the pointers are valid for the calls.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        std::thread::spawn(move || {
+            let mut signum: libc::c_int = 0;
+            if libc::sigwait(&set, &mut signum) == 0 {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({ "event": "signal", "signum": signum })
+                );
+                shutdown.request();
+            }
+        });
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Apply a single baseline artifact directory (low-level; prefer `update`).
@@ -129,6 +157,28 @@ enum Command {
         /// The `artifact_uri` base the producer published with (matches the manifest's URIs).
         #[arg(long, default_value = "media://")]
         uri_base: String,
+    },
+    /// Run the sync DAEMON (work/09 P5): poll→plan→verify→apply each corpus on a timer until SIGTERM/
+    /// SIGINT, holding a daemon-lifetime single-writer lease. The ONLY long-running writer.
+    Run {
+        /// The corpus/corpora to keep at head (repeatable).
+        #[arg(long = "corpus", required = true)]
+        corpora: Vec<String>,
+        /// The published root (`<root>/<corpus>/manifest.json` + `<root>/<corpus>/packages/...`).
+        #[arg(long)]
+        source_root: PathBuf,
+        /// The `artifact_uri` base the producer published with (matches the manifest's URIs).
+        #[arg(long, default_value = "media://")]
+        uri_base: String,
+        /// Poll interval (seconds) when everything is up to date.
+        #[arg(long, default_value_t = 30)]
+        interval_secs: u64,
+        /// First backoff (seconds) after a transient fault; doubles each consecutive retryable cycle.
+        #[arg(long, default_value_t = 2)]
+        min_backoff_secs: u64,
+        /// Backoff cap (seconds).
+        #[arg(long, default_value_t = 300)]
+        max_backoff_secs: u64,
     },
     /// Report the cursor authority's view of every installed corpus.
     Status {
@@ -204,17 +254,12 @@ fn main() -> anyhow::Result<()> {
             uri_base,
         } => {
             let verifier = load_package_verifier(conn)?;
-            let manifest_path = source_root.join(&corpus).join("manifest.json");
-            let signed: Signed<RemoteManifest> =
-                serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
-            signed
-                .verify(&verifier)
-                .map_err(|error| anyhow::anyhow!("remote manifest signature invalid: {error}"))?;
-            // The signed manifest must actually be FOR the requested corpus — a stale/misplaced
-            // manifest signed for another corpus must not advance the wrong corpus (P9 r1 WARN).
-            check_manifest_corpus(&signed.payload, &corpus)?;
+            // Fetch + verify the signed manifest through the SHARED helper (same verification the daemon
+            // uses): signature against installed anchors + the manifest is actually FOR this corpus.
+            let source = DirectoryCatchupSource::new(&source_root, uri_base);
+            let manifest = fetch_verify_manifest(&source, &verifier, &corpus)?;
             let cursor = read_client_cursor(conn, &corpus)?;
-            let plan = plan_catchup(&signed.payload, cursor.as_ref());
+            let plan = plan_catchup(&manifest, cursor.as_ref());
             match &plan {
                 CatchupPlan::UpToDate => println!("{corpus}: up to date"),
                 CatchupPlan::FreshBaseline(b) => {
@@ -231,7 +276,6 @@ fn main() -> anyhow::Result<()> {
                     anyhow::bail!("{corpus}: blocked ({code:?}): {reason}")
                 }
             }
-            let source = DirectoryCatchupSource::new(&source_root, uri_base);
             let report = run_catchup(conn, &source, &verifier, plan)?;
             match report {
                 CatchupReport::UpToDate => {}
@@ -240,6 +284,41 @@ fn main() -> anyhow::Result<()> {
                     println!("{corpus}: applied {applied} incremental(s)")
                 }
             }
+        }
+        Command::Run {
+            corpora,
+            source_root,
+            uri_base,
+            interval_secs,
+            min_backoff_secs,
+            max_backoff_secs,
+        } => {
+            let source = DirectoryCatchupSource::new(&source_root, uri_base);
+            // The daemon single-writer LEASE: a SESSION-level advisory lock on a DEDICATED connection,
+            // held for the whole lifetime (NEVER used for apply). A 2nd daemon finds it held and refuses
+            // to start — only one writer per database (work/09 P5, codex Q4).
+            let mut lock_client = writer.conn().writer_client()?;
+            if !try_acquire_daemon_lock(&mut lock_client)? {
+                anyhow::bail!(
+                    "another jurisearch-syncd daemon holds the single-writer lease on this database; \
+                     refusing to start a second writer"
+                );
+            }
+            // Graceful shutdown: SIGTERM/SIGINT → request shutdown (finishes the in-flight apply, then
+            // stops). Installed BEFORE any worker threads so the mask is inherited.
+            let shutdown = Arc::new(ShutdownToken::new());
+            install_signal_shutdown(Arc::clone(&shutdown));
+            let config = DaemonConfig {
+                corpora,
+                poll_interval: Duration::from_secs(interval_secs),
+                min_backoff: Duration::from_secs(min_backoff_secs.max(1)),
+                max_backoff: Duration::from_secs(max_backoff_secs.max(1)),
+                ..DaemonConfig::default()
+            };
+            let clock = SystemClock;
+            // Ping the lease connection each cycle; a dead connection means the lease is gone → FATAL.
+            let mut lock_alive = || lock_client.simple_query("SELECT 1;").is_ok();
+            run_daemon(conn, &source, &clock, &shutdown, &mut lock_alive, &config)?;
         }
         Command::Status { json } => {
             let statuses = corpus_status(conn)?;

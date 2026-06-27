@@ -27,6 +27,40 @@ use postgres::GenericClient;
 /// apply at a time, fail-clean rather than block behind a long reader).
 pub const APPLY_ADVISORY_LOCK_KEY: i64 = 0x6a75_7269_7331; // "juris1"
 
+/// The syncd DAEMON single-writer lease key (work/09 P5): a SESSION-level advisory lock held for the
+/// daemon's whole lifetime on a DEDICATED connection (distinct from the per-apply/switch lock above and
+/// the per-corpus apply lock), so only ONE syncd daemon writes to a given database. Global per database —
+/// one daemon owns the configured multi-corpus set.
+pub const SYNCD_DAEMON_LOCK_KEY: i64 = 0x6a75_7269_7333; // "juris3"
+
+/// Try to acquire the syncd daemon single-writer lease (non-blocking, SESSION-scoped). Returns `true` if
+/// acquired, `false` if another daemon already holds it. Held until released or the connection closes —
+/// so the holding connection MUST stay alive for the daemon's lifetime and MUST NOT be used for apply.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn try_acquire_daemon_lock(client: &mut postgres::Client) -> Result<bool, StorageError> {
+    let acquired: bool = client
+        .query_one(
+            "SELECT pg_try_advisory_lock($1);",
+            &[&SYNCD_DAEMON_LOCK_KEY],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .get(0);
+    Ok(acquired)
+}
+
+/// Release the syncd daemon single-writer lease (also released automatically when the connection closes).
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn release_daemon_lock(client: &mut postgres::Client) -> Result<(), StorageError> {
+    client
+        .execute("SELECT pg_advisory_unlock($1);", &[&SYNCD_DAEMON_LOCK_KEY])
+        .map(|_| ())
+        .map_err(StorageError::PostgresClient)
+}
+
 /// The stable namespace holding one view per replicated relation.
 pub const SERVER_VIEW_SCHEMA: &str = "jurisearch_server";
 /// The control namespace (cursor + registry), never swapped.
@@ -1043,7 +1077,7 @@ fn activate_generation_inner<C: WriterConnection + ?Sized>(
         .map_err(StorageError::PostgresClient)?
         .get(0);
     if !got {
-        return Err(StorageError::Generations {
+        return Err(StorageError::ApplyLockBusy {
             message: "another apply/switch holds the advisory lock".to_owned(),
         });
     }

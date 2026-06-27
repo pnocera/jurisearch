@@ -22,6 +22,8 @@ jurisearch-package = { path = "../jurisearch-package" }
 jurisearch-storage = { path = "../jurisearch-storage" }
 anyhow.workspace = true
 clap.workspace = true
+# Graceful shutdown: block SIGTERM/SIGINT + a sigwait thread (work/09 P5). No async runtime.
+libc = "0.2"
 postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true

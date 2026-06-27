@@ -383,6 +383,49 @@ pub trait CatchupSource {
     fn fetch_package(&self, entry: &RemotePackageEntry) -> Result<PathBuf, SyncError>;
 }
 
+/// Fetch the SIGNED remote manifest for a corpus (work/09 P5). A daemon-level seam ABOVE
+/// [`CatchupSource`] (which only fetches PLANNED artifacts) — the daemon polls the manifest to decide
+/// whether there is anything to plan. The filesystem implementation backs P5; the authenticated/TLS
+/// network implementation is P6/ops. Signature + corpus verification is done by [`fetch_verify_manifest`].
+pub trait ManifestSource {
+    /// Fetch the corpus's `Signed<RemoteManifest>` (UNVERIFIED — the caller verifies it).
+    ///
+    /// # Errors
+    /// [`SyncError::Io`] (a missing-but-coming manifest is a RETRYABLE publish-atomicity race) or
+    /// [`SyncError::Json`] on a malformed payload.
+    fn fetch_manifest(&self, corpus: &str) -> Result<Signed<RemoteManifest>, SyncError>;
+}
+
+/// The full daemon source: manifest polling + planned-artifact fetching. A blanket impl makes any type
+/// that is both a [`ManifestSource`] and a [`CatchupSource`] a `PackageSource`, so the daemon depends on
+/// ONE seam while [`run_catchup`] keeps its narrow `&dyn CatchupSource`.
+pub trait PackageSource: ManifestSource + CatchupSource {}
+impl<T: ManifestSource + CatchupSource> PackageSource for T {}
+
+/// Fetch + VERIFY a corpus's remote manifest (work/09 P5): fetch the `Signed<RemoteManifest>`, verify its
+/// signature against the installed trust anchors, and confirm it is actually FOR `corpus` (a
+/// stale/misplaced manifest signed for another corpus must never advance the wrong corpus). Returns the
+/// verified payload. Shared by the daemon and the one-shot `update` so both verify identically.
+///
+/// # Errors
+/// [`SyncError::Reject`] (`SignatureInvalid` / `WrongGeneration`) on a bad signature or corpus mismatch;
+/// [`SyncError::Io`]/`Json` from the source.
+pub fn fetch_verify_manifest(
+    source: &dyn ManifestSource,
+    verifier: &dyn Verifier,
+    corpus: &str,
+) -> Result<RemoteManifest, SyncError> {
+    let signed = source.fetch_manifest(corpus)?;
+    signed.verify(verifier).map_err(|error| {
+        SyncError::reject(
+            RejectCode::SignatureInvalid,
+            format!("remote manifest signature invalid: {error}"),
+        )
+    })?;
+    check_manifest_corpus(&signed.payload, corpus)?;
+    Ok(signed.payload)
+}
+
 /// A [`CatchupSource`] backed by a filesystem-published artifact root (plan P9). Resolves each signed
 /// `artifact_uri` (`<uri_base><corpus>/packages/<package_id>`) to a local directory under `root`,
 /// REJECTING any URI that does not carry the configured base or that contains a `..` traversal /
@@ -431,6 +474,16 @@ impl CatchupSource for DirectoryCatchupSource {
 
     fn fetch_package(&self, entry: &RemotePackageEntry) -> Result<PathBuf, SyncError> {
         self.resolve(&entry.artifact_uri)
+    }
+}
+
+impl ManifestSource for DirectoryCatchupSource {
+    fn fetch_manifest(&self, corpus: &str) -> Result<Signed<RemoteManifest>, SyncError> {
+        // `<root>/<corpus>/manifest.json` — the same layout the one-shot `update` reads (P9). A missing
+        // file surfaces as `SyncError::Io` (RETRYABLE: a producer mid-publish, not a permanent reject).
+        let path = self.root.join(corpus).join("manifest.json");
+        let bytes = std::fs::read(&path)?;
+        Ok(serde_json::from_slice(&bytes)?)
     }
 }
 
