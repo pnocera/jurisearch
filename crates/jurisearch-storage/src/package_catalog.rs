@@ -178,6 +178,79 @@ pub fn latest_package_for_corpus<C: GenericClient>(
     }))
 }
 
+/// A catalog row read back for the producer remote-manifest builder / `package list` (plan P9).
+#[derive(Debug, Clone)]
+pub struct CatalogRow {
+    pub package_sequence: i64,
+    pub package_id: String,
+    pub package_kind: String,
+    pub baseline_id: String,
+    pub generation: String,
+    pub included_change_seq_low: i64,
+    pub included_change_seq_high: i64,
+    pub package_digest: Option<String>,
+    /// The canonical EMBEDDED-manifest digest (distinct from the payload `package_digest`) — the
+    /// remote-manifest builder recomputes it to bind the published embedded manifest's full identity
+    /// (not just the payload bytes) to the catalog (plan P9 r1 BLOCKER).
+    pub manifest_digest: Option<String>,
+    pub schema_version: i32,
+    pub embedding_fingerprint: String,
+    pub builder_versions: serde_json::Value,
+    pub status: String,
+}
+
+/// Every catalog row for `corpus`, ordered by `package_sequence` (the retained chain the remote
+/// manifest is built over — NOT just the newest, plan P9).
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn catalog_rows_for_corpus<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+) -> Result<Vec<CatalogRow>, StorageError> {
+    let rows = client
+        .query(
+            "SELECT package_sequence, package_id, package_kind, baseline_id, generation, \
+                    included_change_seq_low, included_change_seq_high, package_digest, manifest_digest, \
+                    schema_version, embedding_fingerprint, builder_versions, status \
+             FROM package_catalog WHERE corpus = $1 ORDER BY package_sequence;",
+            &[&corpus],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| CatalogRow {
+            package_sequence: row.get("package_sequence"),
+            package_id: row.get("package_id"),
+            package_kind: row.get("package_kind"),
+            baseline_id: row.get("baseline_id"),
+            generation: row.get("generation"),
+            included_change_seq_low: row.get("included_change_seq_low"),
+            included_change_seq_high: row.get("included_change_seq_high"),
+            package_digest: row.get("package_digest"),
+            manifest_digest: row.get("manifest_digest"),
+            schema_version: row.get("schema_version"),
+            embedding_fingerprint: row.get("embedding_fingerprint"),
+            builder_versions: row.get("builder_versions"),
+            status: row.get("status"),
+        })
+        .collect())
+}
+
+/// The newest MEDIA root (`baseline`/`rebaseline`) for `corpus` — the active baseline the remote
+/// manifest advertises and the supersession point for the retained incremental chain (plan P9 Q5).
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn latest_media_package_for_corpus<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+) -> Result<Option<CatalogRow>, StorageError> {
+    Ok(catalog_rows_for_corpus(client, corpus)?
+        .into_iter()
+        .rfind(|row| row.package_kind == "baseline" || row.package_kind == "rebaseline"))
+}
+
 /// The base of the per-corpus package-BUILD advisory lock (plan P4 D1: serialize concurrent builds of
 /// the SAME corpus so two builders never read the same previous catalog row and race the next
 /// `package_sequence`). Used as `pg_advisory_lock(BASE, hashtext(corpus))`; cross-corpus builds are

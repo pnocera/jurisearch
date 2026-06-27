@@ -1060,6 +1060,9 @@ dependencies = [
 name = "jurisearch-package-build"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
  "jurisearch-package",
  "jurisearch-storage",
  "jurisearch-syncd",

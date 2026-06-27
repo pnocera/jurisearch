@@ -17,8 +17,10 @@ pub use apply::{
 };
 pub use error::SyncError;
 pub use planner::{
-    CatchupPlan, CatchupReport, CatchupSource, ClientCursor, apply_media_auto, plan_catchup,
-    read_client_cursor, run_catchup,
+    CatchupPlan, CatchupReport, CatchupSource, ClientCursor, DirectoryCatchupSource,
+    apply_media_auto, check_manifest_corpus, plan_catchup, read_client_cursor, run_catchup,
 };
 pub use status::{CorpusStatus, corpus_status};
-pub use trust::{check_entitlement, install_verified_license_token, load_package_verifier};
+pub use trust::{
+    check_entitlement, install_trust_anchor, install_verified_license_token, load_package_verifier,
+};

@@ -88,6 +88,26 @@ pub enum CatchupPlan {
     Blocked { code: RejectCode, reason: String },
 }
 
+/// Guard that a verified remote manifest is actually FOR `corpus` (plan P9 r1 WARN): a stale or
+/// misplaced `manifest.json` signed for a different corpus must not be applied just because it sits at
+/// the requested corpus's path — the applier uses the EMBEDDED manifest's corpus, so a mismatch could
+/// advance the wrong corpus. Call this after verifying the manifest signature, before planning.
+///
+/// # Errors
+/// [`SyncError`] with [`RejectCode::WrongGeneration`] if the manifest's corpus differs.
+pub fn check_manifest_corpus(manifest: &RemoteManifest, corpus: &str) -> Result<(), SyncError> {
+    if manifest.corpus.as_str() != corpus {
+        return Err(SyncError::reject(
+            RejectCode::WrongGeneration,
+            format!(
+                "remote manifest is for corpus `{}`, not the requested `{corpus}`",
+                manifest.corpus.as_str()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Decide catch-up for a corpus from a SIGNED-then-verified remote manifest + the local cursor
 /// (`None` = corpus not installed). Pure: the only client facts used are [`CLIENT_VERSION`] and
 /// [`CURRENT_SCHEMA_VERSION`]; thresholds come from the manifest's `catchup_policy` (tunable without a
@@ -361,6 +381,57 @@ pub trait CatchupSource {
     /// # Errors
     /// [`SyncError`] on a fetch failure.
     fn fetch_package(&self, entry: &RemotePackageEntry) -> Result<PathBuf, SyncError>;
+}
+
+/// A [`CatchupSource`] backed by a filesystem-published artifact root (plan P9). Resolves each signed
+/// `artifact_uri` (`<uri_base><corpus>/packages/<package_id>`) to a local directory under `root`,
+/// REJECTING any URI that does not carry the configured base or that contains a `..` traversal /
+/// absolute component — a fetch source can never escape the published root. Real TLS/HTTP transport is
+/// the ops boundary; this proves the data contract end-to-end.
+#[derive(Debug, Clone)]
+pub struct DirectoryCatchupSource {
+    root: PathBuf,
+    uri_base: String,
+}
+
+impl DirectoryCatchupSource {
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>, uri_base: impl Into<String>) -> Self {
+        Self {
+            root: root.into(),
+            uri_base: uri_base.into(),
+        }
+    }
+
+    fn resolve(&self, artifact_uri: &str) -> Result<PathBuf, SyncError> {
+        let relative = artifact_uri.strip_prefix(&self.uri_base).ok_or_else(|| {
+            SyncError::reject(
+                RejectCode::DigestMismatch,
+                format!("artifact_uri `{artifact_uri}` does not carry the configured base"),
+            )
+        })?;
+        let relative = Path::new(relative);
+        let safe = relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+        if !safe {
+            return Err(SyncError::reject(
+                RejectCode::DigestMismatch,
+                format!("artifact_uri `{artifact_uri}` is not a safe relative path"),
+            ));
+        }
+        Ok(self.root.join(relative))
+    }
+}
+
+impl CatchupSource for DirectoryCatchupSource {
+    fn fetch_baseline(&self, baseline: &BaselineRef) -> Result<PathBuf, SyncError> {
+        self.resolve(&baseline.artifact_uri)
+    }
+
+    fn fetch_package(&self, entry: &RemotePackageEntry) -> Result<PathBuf, SyncError> {
+        self.resolve(&entry.artifact_uri)
+    }
 }
 
 /// The result of executing a [`CatchupPlan`].
@@ -775,6 +846,21 @@ mod tests {
         assert!(matches!(
             plan_catchup(&m, Some(&cursor(2))),
             CatchupPlan::Blocked {
+                code: RejectCode::WrongGeneration,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_corpus_guard_rejects_a_manifest_for_a_different_corpus() {
+        let m = chain_manifest(); // corpus = "core"
+        assert!(check_manifest_corpus(&m, "core").is_ok());
+        let err = check_manifest_corpus(&m, "inpi")
+            .expect_err("a wrong-corpus manifest must be rejected");
+        assert!(matches!(
+            err,
+            SyncError::Reject {
                 code: RejectCode::WrongGeneration,
                 ..
             }

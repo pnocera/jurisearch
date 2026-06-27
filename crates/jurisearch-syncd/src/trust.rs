@@ -3,7 +3,7 @@
 //! tokens. The production binary uses [`load_package_verifier`] — NEVER `AcceptAllVerifier`.
 
 use jurisearch_package::RejectCode;
-use jurisearch_package::crypto::Ed25519Verifier;
+use jurisearch_package::crypto::{Ed25519Verifier, TrustAnchor};
 use jurisearch_package::license::{LicenseToken, tier_is_open};
 use jurisearch_package::manifest::EmbeddedManifest;
 use jurisearch_package::signed::Signed;
@@ -14,6 +14,22 @@ use jurisearch_storage::trust::{
 };
 
 use crate::error::SyncError;
+
+/// Install a producer verifying key the client trusts, for `purpose` (`"package"` or `"license"`) —
+/// the `trust install-anchor` bootstrap (plan P9). Without this the production client cannot establish
+/// trust except via tests/manual SQL.
+///
+/// # Errors
+/// [`SyncError`] on a DB error.
+pub fn install_trust_anchor(
+    client: &ManagedPostgres,
+    anchor: &TrustAnchor,
+    purpose: &str,
+) -> Result<(), SyncError> {
+    let mut db = client.client()?;
+    jurisearch_storage::trust::install_trust_anchor(&mut db, anchor, purpose)?;
+    Ok(())
+}
 
 /// Build the PACKAGE-signature verifier from the client's installed trust anchors. This is NEVER an
 /// accept-all fallback: an empty trust store yields a verifier that rejects every signature
