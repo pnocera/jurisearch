@@ -10,7 +10,7 @@ use jurisearch_storage::{
         create_generation_schema, drop_retired_generation, generation_name, generation_schema,
         populate_generation_from_public, reset_building_generation,
     },
-    ingest_accounting::load_or_compute_query_readiness,
+    ingest_accounting::load_query_readiness,
     retrieval::{
         ContextDocumentsQuery, FetchDocumentsQuery, context_documents_json, fetch_documents_json,
     },
@@ -26,9 +26,9 @@ fn seed_public_core(postgres: &ManagedPostgres) -> Result<(), StorageError> {
          VALUES ('cass:GEN1','cass','decision','cass:GEN1','Cass','Arret', \
            'la responsabilite du transporteur','2024-01-01','sha256:g1','{}'); \
          INSERT INTO chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
-           source_payload_hash, chunk_builder_version) \
+           source_payload_hash, chunk_builder_version, embedding_fingerprint) \
          VALUES ('cass:GEN1#0','cass:GEN1',0,'la responsabilite du transporteur', \
-           'ctx responsabilite','sha256:c','c1');",
+           'ctx responsabilite','sha256:c','c1','fp');",
     )?;
     let vector = vector_literal(3);
     postgres.execute_sql(&format!(
@@ -43,7 +43,7 @@ fn stamps() -> ActivationStamps<'static> {
         sequence: 1,
         baseline_id: "core-2026-06-26-g0001",
         schema_version: 24,
-        embedding_fingerprint: "bge-m3:1024:cls:normalize=true",
+        embedding_fingerprint: "fp",
         builder_versions: &serde_json::Value::Null,
         last_package_id: None,
         last_package_digest: None,
@@ -524,11 +524,12 @@ fn activating_with_none_against_an_installed_corpus_is_rejected() -> Result<(), 
 }
 
 #[test]
-fn query_readiness_resolves_to_the_active_generation_and_a_public_cache_cannot_authorize_it()
+fn query_readiness_is_writer_stamped_and_a_not_ready_generation_cannot_activate()
 -> Result<(), StorageError> {
-    // r2 BLOCKER fix: the query-readiness gate (the same `load_or_compute_query_readiness` the CLI
-    // calls via `ensure_query_readiness`) must measure the ACTIVE generation, and a readiness report
-    // cached against `public` must NOT authorize a generation.
+    // work/09 P3A: readiness is WRITER-owned. A ready generation's activation stamps readiness (the
+    // read path is then a pure lookup), and a generation whose coverage is incomplete CANNOT activate
+    // — the writer-owned gate aborts the switch with the cursor unchanged, so the read path never sees
+    // a not-ready active generation (and never recomputes on read).
     let Some(pg_config) = discover_pg_config("generations readiness")? else {
         return Ok(());
     };
@@ -538,39 +539,44 @@ fn query_readiness_resolves_to_the_active_generation_and_a_public_cache_cannot_a
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
     seed_public_core(&postgres)?;
-    // Stamp the chunk's embedding fingerprint to match its embedding row so public is fully
-    // query-ready (projection 1/1 AND embedding 1/1).
-    postgres.execute_sql(
-        "UPDATE public.chunks SET embedding_fingerprint = 'fp' WHERE chunk_id = 'cass:GEN1#0';",
-    )?;
-
-    // Producer compute: caches a fully-ready report under the `public` signature.
-    let (producer, from_cache) = load_or_compute_query_readiness(&postgres)?;
-    assert!(!from_cache, "first compute is not a cache hit");
-    assert_eq!(producer.embedding_coverage.covered, 1);
 
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
+
+    // A READY generation activates: the writer stamps readiness, and the read path looks it up.
     let g1 = create_generation_schema(&mut client, "core", 1, None)?;
     populate_generation_from_public(&mut client, "core", &g1)?;
-    // Make the GENERATION not query-ready (drop its embedding) while public stays fully ready.
+    activate_generation(&postgres, "core", &g1, &stamps(), None)?;
+    let report = load_query_readiness(&postgres)?;
+    assert_eq!(report.projection_coverage.covered, 1);
+    assert_eq!(report.embedding_coverage.covered, 1);
+    assert_eq!(report.embedding_coverage.total, 1);
+
+    // A NOT-ready generation (its dense embeddings dropped) cannot activate: the gate aborts the
+    // switch with the cursor unchanged.
+    let g2 = create_generation_schema(&mut client, "core", 2, None)?;
+    populate_generation_from_public(&mut client, "core", &g2)?;
     postgres.execute_sql(&format!(
         "DELETE FROM {}.chunk_embeddings;",
-        generation_schema("core", 1)
+        generation_schema("core", 2)
     ))?;
-    activate_generation(&postgres, "core", &g1, &stamps(), None)?;
-
-    // The gate resolves to the generation: the public-signature cache must NOT short-circuit, and the
-    // recomputed coverage reflects the generation's missing embedding (not stale public's 1/1).
-    let (report, from_cache) = load_or_compute_query_readiness(&postgres)?;
+    let stamps2 = ActivationStamps {
+        sequence: 2,
+        ..stamps()
+    };
+    let error = activate_generation(&postgres, "core", &g2, &stamps2, Some(1)).unwrap_err();
     assert!(
-        !from_cache,
-        "a public-signature cache must not authorize the active generation"
+        error.to_string().to_lowercase().contains("coverage"),
+        "incomplete coverage aborts activation: {error}"
     );
-    assert_eq!(report.embedding_coverage.total, 1);
+    // The cursor never moved off the ready generation, and its stamp still resolves.
     assert_eq!(
-        report.embedding_coverage.covered, 0,
-        "readiness reads the generation (0 embedded), not stale public (1)"
+        active_generation_schema(&mut client, "core")?.as_deref(),
+        Some(generation_schema("core", 1).as_str())
+    );
+    assert_eq!(
+        load_query_readiness(&postgres)?.embedding_coverage.covered,
+        1
     );
     Ok(())
 }
@@ -600,8 +606,8 @@ fn france_eval_gold_and_revision_follow_the_active_generation_not_stale_public()
          VALUES ('cass:FR1','cass','decision','cass:FR1','Cass','Arret','{gen_body}', \
            '2024-01-01','sha256:fr1','{{}}'); \
          INSERT INTO chunks (chunk_id, document_id, chunk_index, chunk_kind, body, \
-           contextualized_body, source_payload_hash, chunk_builder_version) \
-         VALUES ('cass:FR1#0','cass:FR1',0,'decision_summary','{gen_body}','ctx','sha256:c','c1');"
+           contextualized_body, source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('cass:FR1#0','cass:FR1',0,'decision_summary','{gen_body}','ctx','sha256:c','c1','fp');"
     ))?;
     let vector = vector_literal(3);
     postgres.execute_sql(&format!(
@@ -672,14 +678,23 @@ fn citation_lookup_resolves_decision_identifiers_against_the_active_generation()
         .map_err(StorageError::Io)?;
     let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
 
-    // A cass decision carrying an ECLI + pourvoi in its canonical record.
+    // A cass decision carrying an ECLI + pourvoi in its canonical record, with a chunk + embedding so
+    // the generation is query-ready (the work/09 P3A apply-time coverage gate requires it).
     postgres.execute_sql(
         "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
            valid_from, source_payload_hash, canonical_json) \
          VALUES ('cass:DEC1','cass','decision','JURITEXT000000000001','Cass','Arret','corps', \
            '2024-01-01','sha256:dec1', \
-           '{\"ecli\":\"ECLI:FR:CCASS:2024:C100001\",\"case_numbers\":[\"22-21.812\"]}');",
+           '{\"ecli\":\"ECLI:FR:CCASS:2024:C100001\",\"case_numbers\":[\"22-21.812\"]}'); \
+         INSERT INTO chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
+           source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('cass:DEC1#0','cass:DEC1',0,'corps','ctx corps','sha256:cd1','c1','fp');",
     )?;
+    let vector = vector_literal(3);
+    postgres.execute_sql(&format!(
+        "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES ('cass:DEC1#0','fp','{vector}'::vector,'m',1024);"
+    ))?;
     let generation = create_generation_from_public(&postgres, "core", 1, None)?;
     activate_generation(&postgres, "core", &generation, &stamps(), None)?;
     // Empty public: only the generation holds the decision now.

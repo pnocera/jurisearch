@@ -438,9 +438,16 @@ fn fetch_part_online_resolves_judilibre_metadata_from_the_active_generation()
                '{\"ecli\":\"ECLI:FR:CCASS:2024:C100001\",\"case_numbers\":[\"22-21.812\"]}'); \
              INSERT INTO chunks \
                 (chunk_id, document_id, chunk_index, body, contextualized_body, source_payload_hash, \
-                 chunk_builder_version) \
-             VALUES ('cass:DEC1#0','cass:DEC1',0,'Corps de la decision.','ctx','sha256:c','c1');",
+                 chunk_builder_version, embedding_fingerprint) \
+             VALUES ('cass:DEC1#0','cass:DEC1',0,'Corps de la decision.','ctx','sha256:c','c1', \
+               'bge-m3:1024:normalize:true');",
         )?;
+        // A matching embedding so the generation is fully query-ready (work/09 P3A apply-time gate).
+        let vector = (0..1024).map(|_| "0.01").collect::<Vec<_>>().join(",");
+        postgres.execute_sql(&format!(
+            "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             VALUES ('cass:DEC1#0','bge-m3:1024:normalize:true','[{vector}]'::vector,'bge-m3',1024);"
+        ))?;
 
         let generation =
             create_generation_from_public(&postgres, "core", 1, Some("core-part-g0001"))?;
@@ -549,8 +556,15 @@ fn cite_resolves_identifiers_against_the_active_generation_not_stale_public()
              VALUES \
                 ('chunk:civil-1240:0', 'legi:LEGIARTI000006419320@1804-02-21', 0, \
                  'Responsabilite civile courante.', 'Code civil > Article 1240', \
-                 'sha256:civil-1240', 'chunker:v0', NULL);",
+                 'sha256:civil-1240', 'chunker:v0', 'bge-m3:1024:normalize:true');",
         )?;
+        // A matching embedding so the generation is fully query-ready (the work/09 P3A apply-time
+        // coverage gate requires complete projection AND dense coverage to activate).
+        let vector = (0..1024).map(|_| "0.01").collect::<Vec<_>>().join(",");
+        postgres.execute_sql(&format!(
+            "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+             VALUES ('chunk:civil-1240:0','bge-m3:1024:normalize:true','[{vector}]'::vector,'bge-m3',1024);"
+        ))?;
 
         let generation =
             create_generation_from_public(&postgres, "core", 1, Some("core-cite-g0001"))?;

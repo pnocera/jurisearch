@@ -23,7 +23,7 @@ fn stamps() -> ActivationStamps<'static> {
         sequence: 1,
         baseline_id: "core-2026-06-27-g0001",
         schema_version: 24,
-        embedding_fingerprint: "bge-m3:1024:cls:normalize=true",
+        embedding_fingerprint: "fp",
         builder_versions: &serde_json::Value::Null,
         last_package_id: None,
         last_package_digest: None,
@@ -35,8 +35,17 @@ fn seed_one_document(postgres: &ManagedPostgres) -> Result<(), StorageError> {
         "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
            valid_from, source_payload_hash, canonical_json) \
          VALUES ('cass:ROLE1','cass','decision','cass:ROLE1','Cass','Arret','corps', \
-           '2024-01-01','sha256:r1','{}');",
+           '2024-01-01','sha256:r1','{}'); \
+         INSERT INTO chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
+           source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('cass:ROLE1#0','cass:ROLE1',0,'corps','ctx corps','sha256:cr1','c1','fp');",
     )?;
+    // A matching embedding so the generation is fully query-ready (work/09 P3A apply-time gate).
+    let vector = (0..1024).map(|_| "0.01").collect::<Vec<_>>().join(",");
+    postgres.execute_sql(&format!(
+        "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES ('cass:ROLE1#0','fp','[{vector}]'::vector,'m',1024);"
+    ))?;
     Ok(())
 }
 

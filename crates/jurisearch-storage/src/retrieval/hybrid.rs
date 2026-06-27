@@ -2,10 +2,58 @@
 
 use super::*;
 
+/// Fail-closed embedding-fingerprint preflight (work/09 P3A): before any dense/hybrid retrieval,
+/// require that the query's embedding fingerprint matches the **active generation's** fingerprint
+/// (`corpus_state.embedding_fingerprint`). Today a mismatch is merely a SQL filter that returns zero
+/// dense rows, so hybrid silently degrades to lexical and explicit-dense returns a false no-results;
+/// this turns that into a clear error BEFORE retrieval. Single-corpus in 3A: no active corpus keeps the
+/// legacy `public` path, and more than one active corpus is deferred to 3C (multi-corpus fan-out).
+fn ensure_embedding_fingerprint_compatible(
+    postgres: &ManagedPostgres,
+    query: &HybridCandidateQuery<'_>,
+) -> Result<(), StorageError> {
+    if !query.retrieval_mode.uses_dense() {
+        return Ok(());
+    }
+    let mut client = postgres.client()?;
+    let rows = client
+        .query(
+            "SELECT embedding_fingerprint FROM jurisearch_control.corpus_state ORDER BY corpus;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    match rows.as_slice() {
+        // No active corpus: the `public` producer/local working set — keep the legacy path (the
+        // active-generation preflight is a site/client concern).
+        [] => Ok(()),
+        [row] => {
+            let active: String = row.get(0);
+            if query.embedding_fingerprint == Some(active.as_str()) {
+                Ok(())
+            } else {
+                Err(StorageError::Retrieval {
+                    message: format!(
+                        "embedding_fingerprint_mismatch: query fingerprint {:?} does not match the \
+                         active generation fingerprint `{active}`; refusing dense/hybrid retrieval \
+                         (it would silently degrade to lexical or return false no-results)",
+                        query.embedding_fingerprint
+                    ),
+                })
+            }
+        }
+        _ => Err(StorageError::Retrieval {
+            message: "multi-corpus embedding-fingerprint preflight is deferred to work/09 3C \
+                      (multi-corpus fan-out)"
+                .to_owned(),
+        }),
+    }
+}
+
 pub fn hybrid_candidates_json(
     postgres: &ManagedPostgres,
     query: &HybridCandidateQuery<'_>,
 ) -> Result<String, StorageError> {
+    ensure_embedding_fingerprint_compatible(postgres, query)?;
     let query_text = sql_string_literal(query.query_text);
     let as_of = sql_string_literal(query.as_of);
     let retrieval_mode = sql_string_literal(query.retrieval_mode.as_str());

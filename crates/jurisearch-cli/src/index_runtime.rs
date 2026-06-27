@@ -98,11 +98,11 @@ pub(crate) fn ensure_query_readiness(
     postgres: &ManagedPostgres,
     gate: QueryReadinessGate,
 ) -> Result<(), ErrorObject> {
-    // One round-trip on the hot path: a manifest cache hit skips the full-corpus coverage
-    // aggregations (a count(DISTINCT) over ~1.74M documents plus a count over ~1.85M chunks). The
-    // cache is only populated when the index is fully ready and is invalidated by ingest/embed runs.
-    let (readiness, _from_cache) =
-        load_or_compute_query_readiness(postgres).map_err(storage_error_object)?;
+    // work/09 P3A: an installed (client) topology is a read-only LOOKUP of the writer-owned readiness
+    // stamp (a missing/stale stamp errors — the writer must have stamped at apply time); the `public`
+    // producer/local working set keeps the legacy compute-on-read cache. Either way no write on the
+    // read path for an installed topology.
+    let readiness = resolve_query_readiness(postgres).map_err(storage_error_object)?;
     let projection_coverage = readiness.projection_coverage;
     let embedding_coverage = readiness.embedding_coverage;
 

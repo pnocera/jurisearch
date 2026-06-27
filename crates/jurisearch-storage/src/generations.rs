@@ -1207,6 +1207,13 @@ fn activate_generation_inner<C: WriterConnection + ?Sized>(
 
     rebuild_server_views(&mut tx)?;
 
+    // Writer-owned readiness stamp (work/09 P3A): compute projection + dense coverage over the new
+    // active generation and upsert the `query_readiness` stamp with the post-switch signature, in THIS
+    // transaction. INCOMPLETE coverage returns an error → the whole switch rolls back, cursor unchanged
+    // (so the read path's stamp lookup never sees a not-ready topology). Runs before the read-visibility
+    // probe (as the writer, not under `SET ROLE`).
+    crate::ingest_accounting::stamp_query_readiness(&mut tx, generation)?;
+
     // Fail-closed read-visibility postcondition (design §3.2): probe — AS the read role — that the new
     // active topology is actually readable. A missing grant / schema usage / view-owner privilege
     // aborts the transaction here, so the cursor never advances onto a topology the read role cannot

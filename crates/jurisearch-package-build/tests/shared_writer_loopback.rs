@@ -18,7 +18,9 @@ use jurisearch_storage::backend::{
 };
 use jurisearch_storage::outbox::{OutboxContext, OutboxEvent, emit_change, scope_kind};
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
-use jurisearch_syncd::{BaselineApplyOutcome, apply_baseline, apply_incremental, corpus_status};
+use jurisearch_syncd::{
+    BaselineApplyOutcome, IncrementalApplyOutcome, apply_baseline, apply_incremental, corpus_status,
+};
 
 fn vector(seed: &str) -> String {
     format!(
@@ -227,6 +229,14 @@ fn writer_role_applies_baseline_and_incremental_and_read_role_sees_them() -> Res
         "read role sees the incremental's valid_to change"
     );
 
+    // work/09 P3A: the writer RE-STAMPED readiness at the incremental (sequence 2), so the read role's
+    // readiness LOOKUP resolves with NO write — proving the read path performs no query-time recompute
+    // under the SELECT-only identity (a write attempt would fail; the lookup succeeds).
+    let report =
+        jurisearch_storage::ingest_accounting::load_query_readiness_with_client(&mut read)?;
+    assert_eq!(report.embedding_coverage.covered, 1);
+    assert_eq!(report.projection_coverage.covered, 1);
+
     Ok(())
 }
 
@@ -308,6 +318,224 @@ fn activation_through_writer_fails_without_read_membership() -> Result<(), Stora
         cursor.trim(),
         "0",
         "a failed activation leaves the cursor unchanged"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn an_incremental_that_breaks_coverage_rolls_back_cursor_unchanged() -> Result<(), StorageError> {
+    let Ok(pg_config) = PgConfig::discover() else {
+        return Ok(());
+    };
+
+    // Producer + a clean baseline applied to a fresh client (cursor at sequence 1, fully ready).
+    let (_proot, producer) = start("js-p3a-inc-producer.", &pg_config)?;
+    seed_producer(&producer)?;
+    let base_art = tempfile::Builder::new()
+        .prefix("js-p3a-inc-base.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    build_baseline(
+        &producer,
+        "core",
+        base_art.path(),
+        &StubSigner,
+        &baseline_params(),
+    )
+    .expect("baseline build");
+
+    let (_croot, client) = start("js-p3a-inc-client.", &pg_config)?;
+    provision_client(&client)?;
+    let backend = ManagedPostgresBackend::new(
+        &client,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
+    let writer = backend.writer_handle()?;
+    apply_baseline(&writer, base_art.path(), &AcceptAllVerifier).expect("baseline apply");
+    assert_eq!(corpus_status(&writer)?[0].sequence, 1);
+
+    // Mutate the producer so the incremental is internally valid (a new decision + its chunk, scoped and
+    // emitted) but leaves the chunk WITHOUT an embedding under the active fingerprint — so applying it
+    // would make the active generation dense-incomplete. The restamp gate must refuse, inside the apply
+    // transaction, AFTER advancing the cursor — proving the whole diff rolls back.
+    mutate(
+        &producer,
+        "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
+           valid_from, valid_to, source_payload_hash, canonical_json) \
+         VALUES ('cass:D2','cass','decision','cass:D2','Cass','Arret','corps2','2024-02-01',NULL, \
+           'sha256:d2','{}'); \
+         INSERT INTO chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
+           source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('cass:D2#0','cass:D2',0,'second moyen','ctx second moyen','sha256:c2','c1','fp');",
+        "documents",
+        EventKind::Upsert,
+        "cass:D2",
+    )?;
+    let inc_art = tempfile::Builder::new()
+        .prefix("js-p3a-inc.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    build_incremental(
+        &producer,
+        "core",
+        inc_art.path(),
+        &StubSigner,
+        &incremental_params("r1"),
+    )
+    .expect("incremental build")
+    .expect("incremental has changes");
+
+    let writer2 = backend.writer_handle()?;
+    let error = apply_incremental(&writer2, inc_art.path(), &AcceptAllVerifier).expect_err(
+        "an incremental that breaks dense coverage must be refused by the restamp gate",
+    );
+    assert!(
+        error.to_string().to_lowercase().contains("coverage"),
+        "the apply fails on the readiness coverage gate: {error}"
+    );
+
+    // The cursor is unchanged (still sequence 1) and the diff rolled back: the active topology never sees
+    // the new, un-embedded document.
+    assert_eq!(
+        corpus_status(&writer)?[0].sequence,
+        1,
+        "a coverage-breaking incremental leaves the cursor unchanged"
+    );
+    let leaked = client.execute_sql(
+        "SELECT count(*)::text FROM jurisearch_server.documents WHERE document_id='cass:D2';",
+    )?;
+    assert_eq!(
+        leaked.trim(),
+        "0",
+        "the rejected incremental's rows are rolled back (no partial apply)"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn an_idempotent_reapply_repairs_a_missing_readiness_stamp() -> Result<(), StorageError> {
+    let Ok(pg_config) = PgConfig::discover() else {
+        return Ok(());
+    };
+
+    // Producer: seed, build a baseline, then mutate + build an incremental.
+    let (_proot, producer) = start("js-p3a-repair-producer.", &pg_config)?;
+    seed_producer(&producer)?;
+    let base_art = tempfile::Builder::new()
+        .prefix("js-p3a-repair-base.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    build_baseline(
+        &producer,
+        "core",
+        base_art.path(),
+        &StubSigner,
+        &baseline_params(),
+    )
+    .expect("baseline build");
+    mutate(
+        &producer,
+        "UPDATE documents SET valid_to='2024-12-31' WHERE document_id='cass:D1';",
+        "documents",
+        EventKind::Upsert,
+        "cass:D1",
+    )?;
+    let inc_art = tempfile::Builder::new()
+        .prefix("js-p3a-repair-inc.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    build_incremental(
+        &producer,
+        "core",
+        inc_art.path(),
+        &StubSigner,
+        &incremental_params("r1"),
+    )
+    .expect("incremental build")
+    .expect("incremental has changes");
+
+    let (_croot, client) = start("js-p3a-repair-client.", &pg_config)?;
+    provision_client(&client)?;
+    let backend = ManagedPostgresBackend::new(
+        &client,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
+    let stamp_is_readable = |backend: &ManagedPostgresBackend| -> Result<bool, StorageError> {
+        let mut read = backend.read_handle()?.client()?;
+        Ok(
+            jurisearch_storage::ingest_accounting::load_query_readiness_with_client(&mut read)
+                .is_ok(),
+        )
+    };
+
+    // BASELINE idempotent-repair: apply the baseline (cursor 1, stamped), then simulate a pre-P3A /
+    // corrupted site by deleting the stamp — reads now fail closed.
+    apply_baseline(
+        &backend.writer_handle()?,
+        base_art.path(),
+        &AcceptAllVerifier,
+    )
+    .expect("baseline apply");
+    client.execute_sql("DELETE FROM public.index_manifest WHERE key='query_readiness';")?;
+    assert!(
+        !stamp_is_readable(&backend)?,
+        "with the stamp deleted, the read path fails closed"
+    );
+    // Re-applying the SAME baseline is an idempotent no-op that REPAIRS the stamp.
+    let outcome = apply_baseline(
+        &backend.writer_handle()?,
+        base_art.path(),
+        &AcceptAllVerifier,
+    )
+    .expect("idempotent baseline reapply");
+    assert!(
+        matches!(
+            outcome,
+            BaselineApplyOutcome::AlreadyApplied { sequence: 1, .. }
+        ),
+        "the reapply is a no-op: {outcome:?}"
+    );
+    assert!(
+        stamp_is_readable(&backend)?,
+        "the idempotent baseline reapply repaired the missing stamp"
+    );
+
+    // INCREMENTAL idempotent-repair: advance to sequence 2, delete the stamp, reapply the SAME
+    // incremental → idempotent no-op that repairs it.
+    apply_incremental(
+        &backend.writer_handle()?,
+        inc_art.path(),
+        &AcceptAllVerifier,
+    )
+    .expect("incremental apply");
+    assert_eq!(corpus_status(&backend.writer_handle()?)?[0].sequence, 2);
+    client.execute_sql("DELETE FROM public.index_manifest WHERE key='query_readiness';")?;
+    assert!(
+        !stamp_is_readable(&backend)?,
+        "with the stamp deleted again, the read path fails closed"
+    );
+    let outcome = apply_incremental(
+        &backend.writer_handle()?,
+        inc_art.path(),
+        &AcceptAllVerifier,
+    )
+    .expect("idempotent incremental reapply");
+    assert!(
+        matches!(
+            outcome,
+            IncrementalApplyOutcome::AlreadyApplied { sequence: 2, .. }
+        ),
+        "the reapply is a no-op: {outcome:?}"
+    );
+    assert!(
+        stamp_is_readable(&backend)?,
+        "the idempotent incremental reapply repaired the missing stamp"
     );
 
     Ok(())

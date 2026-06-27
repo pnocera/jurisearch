@@ -192,6 +192,12 @@ fn apply_media_locked(
         package_digest,
         mode.behind_is_applicable(),
     )? {
+        // An idempotent no-op still owes the site a writer-owned readiness stamp: a client already AT
+        // the target identity but MISSING the stamp (a pre-P3A database, or a deleted/corrupt stamp)
+        // would otherwise report success while every read fails closed as "never stamped". Re-affirm it
+        // under the held apply lock — an idempotent, coverage-gated upsert that repairs a missing/stale
+        // stamp and fails closed if the active generation is genuinely incomplete.
+        restamp_active_readiness(db, &corpus)?;
         return Ok(outcome);
     }
 
@@ -699,6 +705,26 @@ fn idempotency_decision(
     ))
 }
 
+/// Re-affirm the writer-owned query-readiness stamp for a corpus's currently-active generation, in its
+/// own transaction on the (apply-lock-held) writer connection. Used on the idempotent no-op apply path
+/// so a client already at the target identity but missing/stale on the stamp self-heals instead of
+/// reporting a false-green no-op. [`stamp_query_readiness`] is an idempotent, coverage-gated upsert: it
+/// rewrites the same stamp for a healthy generation, repairs a missing one, and FAILS CLOSED if the
+/// active generation is genuinely incomplete (the honest signal that the site is not query-ready).
+fn restamp_active_readiness(db: &mut postgres::Client, corpus: &str) -> Result<(), SyncError> {
+    let active_generation: String = db
+        .query_one(
+            "SELECT active_generation FROM jurisearch_control.corpus_state WHERE corpus = $1;",
+            &[&corpus],
+        )
+        .map_err(SyncError::Postgres)?
+        .get(0);
+    let mut tx = db.transaction().map_err(SyncError::Postgres)?;
+    jurisearch_storage::ingest_accounting::stamp_query_readiness(&mut tx, &active_generation)?;
+    tx.commit().map_err(SyncError::Postgres)?;
+    Ok(())
+}
+
 /// COPY each payload file into the generation, in the manifest's dependency `apply_order` (§5.2/§6.2.2).
 fn copy_payload_in(
     db: &mut postgres::Client,
@@ -917,6 +943,13 @@ pub fn apply_incremental(
     // Idempotency + ordering (D6).
     if current == result_sequence {
         if cur_id.as_deref() == Some(package_id) && cur_digest.as_deref() == Some(package_digest) {
+            // Idempotent no-op: still re-affirm the readiness stamp for the active generation in THIS
+            // transaction, so a client at the target identity but missing/stale on the stamp self-heals
+            // (or fails closed if genuinely incomplete) rather than reporting a false-green no-op.
+            jurisearch_storage::ingest_accounting::stamp_query_readiness(
+                &mut tx,
+                &active_generation,
+            )?;
             tx.commit().map_err(SyncError::Postgres)?;
             return Ok(IncrementalApplyOutcome::AlreadyApplied {
                 corpus,
@@ -1057,6 +1090,12 @@ pub fn apply_incremental(
         package_id,
         package_digest,
     )?;
+
+    // RESTAMP query readiness (work/09 P3A): an incremental advances `corpus_state.sequence`, which is
+    // part of the readiness signature, so the writer must re-stamp readiness over the mutated active
+    // generation in THIS transaction. Incomplete coverage rolls the whole apply back (cursor unchanged).
+    jurisearch_storage::ingest_accounting::stamp_query_readiness(&mut tx, &active_generation)?;
+
     tx.commit().map_err(SyncError::Postgres)?;
 
     Ok(IncrementalApplyOutcome::Applied {

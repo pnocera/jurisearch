@@ -21,9 +21,7 @@ use jurisearch_package::event::EventKind;
 use jurisearch_package_build::{
     BaselineParams, IncrementalParams, build_baseline, build_incremental, build_rebaseline,
 };
-use jurisearch_storage::generations::{
-    ActivationStamps, activate_generation, create_generation_load_tables,
-};
+use jurisearch_storage::generations::{create_generation_load_tables, rebuild_server_views};
 use jurisearch_storage::outbox::{
     DigestSource, OutboxContext, OutboxEvent, corpus_table_digests, emit_change, scope_kind,
 };
@@ -132,22 +130,26 @@ fn mutate(
     Ok(())
 }
 
-/// Install a SECOND corpus `inpi` directly on the client as an active (empty) generation, so the test
-/// can prove a `core` re-baseline leaves another installed corpus + its generation untouched.
+/// Install a SECOND corpus `inpi` DIRECTLY on the client as an active (empty) generation, so the test
+/// can prove a `core` re-baseline leaves another installed corpus and its generation untouched. `inpi`
+/// is a deliberately-empty placeholder corpus — the `documents.corpus` generated column only attributes
+/// `core` sources, so inpi can never hold documents. It is installed by hand (registry row,
+/// `corpus_state`, and a view rebuild) rather than through `activate_generation`, because work/09 P3A's
+/// apply-time readiness gate (an active generation is always query-ready) refuses an EMPTY generation.
 fn install_second_corpus(client: &ManagedPostgres) -> Result<(), StorageError> {
     let mut db = client.client()?;
     create_generation_load_tables(&mut db, "inpi", 1, Some("inpi-2026-g0001"))?;
-    let bv = serde_json::json!({ "chunker": "i1" });
-    let stamps = ActivationStamps {
-        sequence: 1,
-        baseline_id: "inpi-2026-g0001",
-        schema_version: 24,
-        embedding_fingerprint: "fpi",
-        builder_versions: &bv,
-        last_package_id: Some("inpi-1-1"),
-        last_package_digest: Some("sha256:inpi"),
-    };
-    activate_generation(client, "inpi", "inpi_g0001", &stamps, None)?;
+    db.batch_execute(
+        "UPDATE jurisearch_control.generation_registry SET state='active', activated_at=now() \
+           WHERE corpus='inpi' AND generation='inpi_g0001'; \
+         INSERT INTO jurisearch_control.corpus_state \
+           (corpus, active_generation, sequence, baseline_id, schema_version, embedding_fingerprint, \
+            builder_versions, last_package_id, last_package_digest, applied_at) \
+         VALUES ('inpi','inpi_g0001',1,'inpi-2026-g0001',24,'fpi','{\"chunker\":\"i1\"}'::jsonb, \
+            'inpi-1-1','sha256:inpi',now());",
+    )
+    .map_err(StorageError::PostgresClient)?;
+    rebuild_server_views(&mut db)?;
     Ok(())
 }
 
