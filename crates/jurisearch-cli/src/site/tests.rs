@@ -22,6 +22,7 @@ use jurisearch_storage::backend::{
 use jurisearch_storage::generations::{
     ActivationReadVisibility, ActivationStamps, CursorGuard,
     activate_generation_with_guard_and_visibility, create_generation_from_public,
+    create_generation_schema, generation_schema,
 };
 use jurisearch_storage::query::{ActiveCorpus, QueryStore, ReadSnapshot};
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig, StorageError};
@@ -572,4 +573,160 @@ fn the_thin_client_rejects_an_old_servers_unversioned_reply() {
         matches!(result, Err(jurisearch_client::ClientError::ProtocolSkew(_))),
         "a bare reply from an old server must be a loud protocol-skew error: {result:?}"
     );
+}
+
+// ---- global-review BLOCKER 1: MULTI-CORPUS site serving (aggregate readiness) -----------------------
+
+fn corpus_stamps(baseline_id: &'static str) -> ActivationStamps<'static> {
+    ActivationStamps {
+        sequence: 1,
+        baseline_id,
+        schema_version: 24,
+        embedding_fingerprint: "fp",
+        builder_versions: &serde_json::Value::Null,
+        last_package_id: None,
+        last_package_digest: None,
+    }
+}
+
+/// Stand up a TWO-corpus query-ready site: `core` via the real public→generation→activate path, and a
+/// second corpus `alt` built by hand into its own generation schema (the contract maps every known
+/// source to `core`, so a 2nd corpus must be hand-built — as in the P3C fan-out harness) then activated
+/// through the SAME visibility path. That activation grants both generations to the read role,
+/// regenerates the union views to span both, and writes the AGGREGATE readiness stamp (core + alt).
+fn ready_two_corpus_site(postgres: &ManagedPostgres) -> Result<(), StorageError> {
+    {
+        let mut superuser = postgres.client()?;
+        provision_roles(&mut superuser, &RoleSpec::default(), &postgres.database)?;
+    }
+    let visibility = ActivationReadVisibility {
+        read_role: DEFAULT_READ_ROLE,
+        view_owner_role: DEFAULT_OWNER_ROLE,
+    };
+    let embedding = (0..1024).map(|_| "0.01").collect::<Vec<_>>().join(",");
+
+    // --- core (real path) ---
+    postgres.execute_sql(
+        "INSERT INTO documents (document_id, source, kind, source_uid, citation, title, body, \
+           valid_from, source_payload_hash, canonical_json) \
+         VALUES ('cass:CORE','cass','decision','cass:CORE','Cass','Arret core','le corps core', \
+           '2024-01-01','sha256:core','{}'); \
+         INSERT INTO chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
+           source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('cass:CORE#0','cass:CORE',0,'le corps core','ctx le corps core','sha256:cc','c1','fp');",
+    )?;
+    postgres.execute_sql(&format!(
+        "INSERT INTO chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, dimension) \
+         VALUES ('cass:CORE#0','fp','[{embedding}]'::vector,'m',1024);"
+    ))?;
+    let core_gen = create_generation_from_public(postgres, "core", 1, Some("core-2c-g0001"))?;
+    activate_generation_with_guard_and_visibility(
+        postgres,
+        "core",
+        &core_gen,
+        &corpus_stamps("core-2c-g0001"),
+        CursorGuard::FirstBaseline,
+        &[],
+        &visibility,
+    )?;
+
+    // --- alt (hand-built generation, then activated through the visibility path) ---
+    let alt_gen = {
+        let mut client = postgres.client()?;
+        create_generation_schema(&mut client, "alt", 1, Some("alt-2c-g0001"))?
+    };
+    let alt_schema = generation_schema("alt", 1);
+    postgres.execute_sql(&format!(
+        "INSERT INTO {alt_schema}.documents (document_id, source, kind, source_uid, citation, title, \
+           body, valid_from, source_payload_hash, canonical_json) \
+         VALUES ('alt:ALT','cass','decision','alt:ALT','Alt','Arret alt','le corps alt', \
+           '2024-01-01','sha256:alt','{{}}'); \
+         INSERT INTO {alt_schema}.chunks (chunk_id, document_id, chunk_index, body, contextualized_body, \
+           source_payload_hash, chunk_builder_version, embedding_fingerprint) \
+         VALUES ('alt:ALT#0','alt:ALT',0,'le corps alt','ctx le corps alt','sha256:ac','c1','fp');"
+    ))?;
+    postgres.execute_sql(&format!(
+        "INSERT INTO {alt_schema}.chunk_embeddings (chunk_id, embedding_fingerprint, embedding, model, \
+           dimension) VALUES ('alt:ALT#0','fp','[{embedding}]'::vector,'m',1024);"
+    ))?;
+    activate_generation_with_guard_and_visibility(
+        postgres,
+        "alt",
+        &alt_gen,
+        &corpus_stamps("alt-2c-g0001"),
+        CursorGuard::FirstBaseline,
+        &[],
+        &visibility,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn the_site_serves_a_multi_corpus_topology_through_the_read_role() -> Result<(), StorageError> {
+    let Ok(pg_config) = PgConfig::discover() else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-mc-site.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+    ready_two_corpus_site(&postgres)?;
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
+    let embedder = StubEmbedder {
+        fingerprint: "fp".to_owned(),
+        dimension: 1024,
+    };
+
+    // health: the aggregate topology is ready (NOT "deferred"), with both corpora.
+    let health = round_trip(&backend, &embedder, &site_line("status", json!({})))?;
+    let result = health.result().expect("health");
+    assert_eq!(
+        result["multi_corpus_readiness"].as_str(),
+        Some("multi_corpus"),
+        "a 2-corpus site is served, not deferred: {result}"
+    );
+    assert_eq!(result["readiness"]["ready"].as_bool(), Some(true));
+    assert_eq!(result["active_corpora"].as_array().map(Vec::len), Some(2));
+
+    // fetch by id resolves through the UNION views across BOTH corpora (no longer gate-blocked).
+    for id in ["cass:CORE", "alt:ALT"] {
+        let fetched = round_trip(
+            &backend,
+            &embedder,
+            &site_line("fetch", json!({"ids": [id]})),
+        )?;
+        assert!(fetched.is_ok(), "multi-corpus fetch of {id}: {fetched:?}");
+        assert_eq!(
+            fetched.result().expect("result")["documents"][0]["document_id"].as_str(),
+            Some(id)
+        );
+    }
+
+    // bm25 search reaches the PHYSICAL fan-out (>1 corpus) and fuses results from both generations.
+    let search = round_trip(
+        &backend,
+        &embedder,
+        &site_line(
+            "search",
+            json!({"query": "corps", "mode": "bm25", "kind": "decision"}),
+        ),
+    )?;
+    assert!(search.is_ok(), "multi-corpus search: {search:?}");
+    let docs: Vec<&str> = search.result().expect("search")["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .filter_map(|candidate| candidate["document_id"].as_str())
+        .collect();
+    assert!(
+        docs.contains(&"cass:CORE") && docs.contains(&"alt:ALT"),
+        "search fans out over BOTH corpora: {docs:?}"
+    );
+    Ok(())
 }

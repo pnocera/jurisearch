@@ -208,13 +208,14 @@ impl OperationHandler for HealthHandler {
                 })
             })
             .collect();
-        // P3A readiness is single-corpus; P3C lifted search fan-out. Report the TRUE topology — including
-        // the distinct zero-corpus state (an unactivated site DB must NOT look ready) — never a faked
-        // aggregate.
+        // Report the TRUE topology — the distinct zero-corpus state (an unactivated site DB must NOT
+        // look ready), a single corpus, or the multi-corpus aggregate (now SERVED: the writer stamps
+        // aggregate readiness over every active corpus, so the read gate authorizes the union views +
+        // per-corpus fan-out).
         let multi_corpus_readiness = match corpora.len() {
             0 => "no_active_corpus",
             1 => "single_corpus",
-            _ => "deferred",
+            _ => "multi_corpus",
         };
         // Probe the writer-owned readiness stamp WITHOUT gating: report ready / not-ready + the reason so
         // an operator can diagnose a topology the query handlers would refuse. Never recomputes coverage.

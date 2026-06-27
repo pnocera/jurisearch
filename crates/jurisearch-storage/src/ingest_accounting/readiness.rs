@@ -326,57 +326,102 @@ fn compute_generation_coverage<C: GenericClient>(
     })
 }
 
-/// Writer-owned readiness stamp (work/09 P3A): compute projection + dense coverage over the SPECIFIC
-/// generation being activated/mutated (`generation`, e.g. `core_g0002`) and upsert the
-/// `query_readiness` stamp with the post-switch signature, **inside the caller's apply transaction**.
-/// INCOMPLETE projection or embedding coverage (or a stamp write failure) returns an error, so the
-/// caller's transaction rolls back and the cursor never advances onto a not-ready topology.
+/// Writer-owned readiness stamp (work/09 P3A; AGGREGATE since the global-review multi-corpus fix):
+/// compute projection + dense coverage over EVERY active corpus's generation and upsert an AGGREGATE
+/// `query_readiness` stamp (summed coverage) with the post-switch signature, **inside the caller's apply
+/// transaction**. INCOMPLETE coverage for ANY active corpus (or a stamp write failure) returns an error,
+/// so the caller's transaction rolls back and the cursor never advances onto a not-ready topology.
 ///
 /// MUST be called after the switch has updated `corpus_state` (so `active_read_signature` is the new
-/// topology) and before the transaction commits.
-///
-/// 3A is single-corpus. The stamp's signature is the aggregate `active_read_signature`, but the
-/// coverage measured here is that of the ONE generation passed in. With more than one active corpus
-/// the stamp therefore reflects only the just-applied corpus, not aggregate readiness — that aggregate
-/// coverage (and the multi-corpus READ that would need it) is deferred to 3C (multi-corpus fan-out).
+/// topology) and before the transaction commits. The just-applied `generation` is the trigger (and is
+/// sanity-checked to be active); the stamp covers the WHOLE active topology so the site service can
+/// serve all subscribed corpora (the architecture's multi-corpus endpoint). Each corpus's dense coverage
+/// is gated on ITS OWN active fingerprint (not mere self-consistency).
 pub fn stamp_query_readiness<C: GenericClient>(
     client: &mut C,
     generation: &str,
 ) -> Result<IngestReadinessReport, StorageError> {
     let signature = active_read_signature(client)?;
-    // The ACTIVE fingerprint this generation was activated for — dense coverage must match it, not just
-    // be internally self-consistent.
-    let active_fingerprint: String = client
+    // Sanity: the just-applied generation must be active (the switch ran) before we stamp.
+    if client
         .query_opt(
-            "SELECT embedding_fingerprint FROM jurisearch_control.corpus_state \
-             WHERE active_generation = $1;",
+            "SELECT 1 FROM jurisearch_control.corpus_state WHERE active_generation = $1;",
             &[&generation],
         )
         .map_err(StorageError::PostgresClient)?
-        .ok_or_else(|| StorageError::IngestAccounting {
+        .is_none()
+    {
+        return Err(StorageError::IngestAccounting {
             message: format!(
                 "stamp_query_readiness: no active corpus_state row for generation `{generation}`"
             ),
-        })?
-        .get(0);
-    let schema = schema_for_generation(generation);
-    let report = compute_generation_coverage(client, &schema, &active_fingerprint)?;
-    if !coverage_is_complete(&report.projection_coverage) {
-        return Err(StorageError::IngestAccounting {
-            message: format!(
-                "incomplete projection coverage for `{schema}` ({} / {}); generation not query-ready",
-                report.projection_coverage.covered, report.projection_coverage.total
-            ),
         });
     }
-    if !coverage_is_complete(&report.embedding_coverage) {
-        return Err(StorageError::IngestAccounting {
-            message: format!(
-                "incomplete dense coverage for `{schema}` ({} / {}); generation not query-ready",
-                report.embedding_coverage.covered, report.embedding_coverage.total
-            ),
-        });
+    // Aggregate coverage over the WHOLE active topology: each corpus's own generation, gated on its own
+    // fingerprint. A site that subscribes to N corpora exposes all of them, so the stamp must prove EACH
+    // is query-ready (the aggregate is only "ready" when every corpus is).
+    let corpora = client
+        .query(
+            "SELECT corpus, active_generation, embedding_fingerprint \
+             FROM jurisearch_control.corpus_state ORDER BY corpus;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    let mut projection_covered: i64 = 0;
+    let mut projection_total: i64 = 0;
+    let mut embedding_covered: i64 = 0;
+    let mut embedding_total: i64 = 0;
+    for row in &corpora {
+        let active_generation: String = row.get("active_generation");
+        let active_fingerprint: String = row.get("embedding_fingerprint");
+        let schema = schema_for_generation(&active_generation);
+        let report = compute_generation_coverage(client, &schema, &active_fingerprint)?;
+        // The JUST-APPLIED generation must be NON-EMPTY and fully covered (P3A: an empty or partial
+        // package can never activate). An already-active OTHER corpus may legitimately be an EMPTY
+        // placeholder (a corpus whose sources attribute no documents), so it is "ready" when empty
+        // (`covered == total` holds for `0 == 0`); a PARTIALLY-covered other corpus (`covered < total`)
+        // is still a fault that fails the aggregate.
+        let is_just_applied = active_generation == generation;
+        let metric_ok = |metric: &CoverageMetric| {
+            if is_just_applied {
+                coverage_is_complete(metric)
+            } else {
+                metric.covered == metric.total
+            }
+        };
+        if !metric_ok(&report.projection_coverage) {
+            return Err(StorageError::IngestAccounting {
+                message: format!(
+                    "incomplete projection coverage for `{schema}` ({} / {}); generation not query-ready",
+                    report.projection_coverage.covered, report.projection_coverage.total
+                ),
+            });
+        }
+        if !metric_ok(&report.embedding_coverage) {
+            return Err(StorageError::IngestAccounting {
+                message: format!(
+                    "incomplete dense coverage for `{schema}` ({} / {}); generation not query-ready",
+                    report.embedding_coverage.covered, report.embedding_coverage.total
+                ),
+            });
+        }
+        projection_covered += report.projection_coverage.covered;
+        projection_total += report.projection_coverage.total;
+        embedding_covered += report.embedding_coverage.covered;
+        embedding_total += report.embedding_coverage.total;
     }
+    let report = IngestReadinessReport {
+        projection_coverage: CoverageMetric {
+            covered: projection_covered,
+            total: projection_total,
+            percentage: percentage(projection_covered, projection_total),
+        },
+        embedding_coverage: CoverageMetric {
+            covered: embedding_covered,
+            total: embedding_total,
+            percentage: percentage(embedding_covered, embedding_total),
+        },
+    };
     let value = serde_json::to_string(&CachedReadiness {
         signature,
         report: report.clone(),
@@ -410,25 +455,9 @@ pub fn load_query_readiness_with_client<C: GenericClient>(
             message: "no active corpus installed; index unavailable".to_owned(),
         });
     }
-    // Fail CLOSED on multi-corpus (work/09 P3A is single-corpus): the writer-owned stamp records the
-    // aggregate topology signature but only the just-applied corpus's coverage, so it cannot prove
-    // aggregate readiness over the `jurisearch_server` union views. A multi-corpus read must error
-    // rather than authorize fetch/BM25 over a single-corpus report (multi-corpus is deferred to 3C).
-    let active_corpora: i64 = client
-        .query_one(
-            "SELECT count(*)::bigint FROM jurisearch_control.corpus_state;",
-            &[],
-        )
-        .map_err(StorageError::PostgresClient)?
-        .get(0);
-    if active_corpora > 1 {
-        return Err(StorageError::IngestAccounting {
-            message:
-                "multi-corpus query readiness is not supported until 3C (multi-corpus fan-out); \
-                      this build serves a single active corpus"
-                    .to_owned(),
-        });
-    }
+    // Multi-corpus is now SUPPORTED: the writer stamps AGGREGATE coverage over the whole active topology
+    // (every active corpus's generation), so a matching aggregate signature proves every corpus is
+    // query-ready (the union views + the per-corpus fan-out both read a ready topology).
     let Some(row) = client
         .query_opt(
             "SELECT value::text FROM public.index_manifest WHERE key = $1;",
@@ -479,9 +508,9 @@ pub fn load_query_readiness(
 /// authority) so the stamp is validated against the SAME topology the request's reads will use, with no
 /// second connection and no TOCTOU against the request snapshot.
 ///
-/// Multi-corpus is fail-closed (work/09 P3A/P3C): the writer stamp records the aggregate signature but
-/// only the just-applied corpus's coverage, so it cannot prove aggregate readiness; a >1-corpus site
-/// request errors here rather than being served on a single-corpus stamp (health reports the gap).
+/// Multi-corpus is SUPPORTED (global-review fix): the writer stamps AGGREGATE coverage over the whole
+/// active topology, so a >1-corpus snapshot validates the aggregate stamp by signature exactly as a
+/// single-corpus one does — the site service serves all subscribed corpora.
 pub fn load_query_readiness_in_snapshot(
     snapshot: &mut dyn ReadSnapshot,
 ) -> Result<IngestReadinessReport, StorageError> {
@@ -508,14 +537,8 @@ pub fn load_query_readiness_in_snapshot(
             message: "no active corpus installed; index unavailable".to_owned(),
         });
     }
-    if active_count > 1 {
-        return Err(StorageError::IngestAccounting {
-            message:
-                "multi-corpus query readiness is not supported until 3C (multi-corpus fan-out); \
-                      this build serves a single active corpus"
-                    .to_owned(),
-        });
-    }
+    // Multi-corpus is supported: the aggregate stamp is validated by SIGNATURE (which encodes every
+    // active corpus), so a >1-corpus topology passes exactly as a single-corpus one does.
     let stamp = snapshot.read_text(
         "SELECT value::text FROM public.index_manifest WHERE key = 'query_readiness';",
     )?;
