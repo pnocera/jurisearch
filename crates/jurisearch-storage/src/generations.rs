@@ -964,6 +964,65 @@ pub fn activate_generation_with_guard(
     guard: CursorGuard,
     dense_manifests: &[DenseManifestEntry],
 ) -> Result<(), StorageError> {
+    activate_generation_inner(
+        postgres,
+        corpus,
+        generation,
+        stamps,
+        guard,
+        dense_manifests,
+        None,
+    )
+}
+
+/// The roles an activation must leave able to see the new active topology (work/09 P2A, design §3.2).
+/// Generation schemas are created dynamically, so the type-level read/write split is not enough on its
+/// own — the activation path owns propagating visibility.
+#[derive(Debug, Clone, Copy)]
+pub struct ActivationReadVisibility<'a> {
+    /// The query service's read-only identity — must be able to read the new topology directly.
+    pub read_role: &'a str,
+    /// The role that OWNS the stable `jurisearch_server` views. A view executes with its owner's
+    /// privileges, so the owner must also be able to read the new generation tables or a read *through*
+    /// the views fails even when the read role has a direct grant.
+    pub view_owner_role: &'a str,
+}
+
+/// Like [`activate_generation_with_guard`], but inside the SAME switch transaction it grants the read
+/// role USAGE/SELECT on the new physical generation schema and then **probes** — *as the read role* —
+/// that the full active topology (`corpus_state`, `index_manifest`, every stable view, and every table
+/// of the new generation) is readable, all before commit. If the read role cannot see the new
+/// topology the transaction rolls back, so the apply fails with the cursor unchanged (the design §3.2
+/// read-role-visibility activation postcondition / architecture §11 acceptance invariant).
+pub fn activate_generation_with_guard_and_visibility(
+    postgres: &ManagedPostgres,
+    corpus: &str,
+    generation: &str,
+    stamps: &ActivationStamps<'_>,
+    guard: CursorGuard,
+    dense_manifests: &[DenseManifestEntry],
+    visibility: &ActivationReadVisibility<'_>,
+) -> Result<(), StorageError> {
+    activate_generation_inner(
+        postgres,
+        corpus,
+        generation,
+        stamps,
+        guard,
+        dense_manifests,
+        Some(visibility),
+    )
+}
+
+fn activate_generation_inner(
+    postgres: &ManagedPostgres,
+    corpus: &str,
+    generation: &str,
+    stamps: &ActivationStamps<'_>,
+    guard: CursorGuard,
+    dense_manifests: &[DenseManifestEntry],
+    visibility: Option<&ActivationReadVisibility<'_>>,
+) -> Result<(), StorageError> {
     let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
         .map_err(StorageError::PostgresClient)?;
     let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
@@ -1128,9 +1187,88 @@ pub fn activate_generation_with_guard(
         )?;
     }
 
+    // Grant the read role + the view-owner role visibility of the NEW physical generation schema
+    // BEFORE rebuilding the stable views, so the post-rebuild probe sees a fully-granted topology
+    // (work/09 P2A). The view-owner grant is what makes a read *through* the views resolve.
+    if let Some(visibility) = visibility {
+        grant_read_visibility(
+            &mut tx,
+            generation,
+            visibility.read_role,
+            visibility.view_owner_role,
+        )?;
+    }
+
     rebuild_server_views(&mut tx)?;
+
+    // Fail-closed read-visibility postcondition (design §3.2): probe — AS the read role — that the new
+    // active topology is actually readable. A missing grant / schema usage / view-owner privilege
+    // aborts the transaction here, so the cursor never advances onto a topology the read role cannot
+    // see.
+    if let Some(visibility) = visibility {
+        probe_read_visibility(&mut tx, corpus, generation, visibility.read_role)?;
+    }
+
     tx.commit().map_err(StorageError::PostgresClient)?;
     Ok(())
+}
+
+/// Grant the read role and the view-owner role USAGE + SELECT on a newly built physical generation
+/// schema, inside the activation transaction. The read role needs it for the direct hot-search path
+/// (physical schemas); the view-owner role needs it so a read *through* the stable `jurisearch_server`
+/// views (which execute with their owner's privileges) resolves. (The stable schemas/views +
+/// control/manifest tables are granted once at role provisioning — `crate::backend::provision_roles`.)
+fn grant_read_visibility(
+    tx: &mut postgres::Transaction<'_>,
+    generation: &str,
+    read_role: &str,
+    view_owner_role: &str,
+) -> Result<(), StorageError> {
+    let schema = sql_identifier(&schema_for_generation(generation));
+    let read = sql_identifier(read_role);
+    let owner = sql_identifier(view_owner_role);
+    tx.batch_execute(&format!(
+        "GRANT USAGE ON SCHEMA {schema} TO {read}, {owner};\n\
+         GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {read}, {owner};"
+    ))
+    .map_err(StorageError::PostgresClient)
+}
+
+/// Probe — as the read role — that the full active topology is readable, inside the activation
+/// transaction (so it can see the uncommitted switch). Every relation in [`REPLICATED_TABLES`] is
+/// checked through both the stable `jurisearch_server` view and the new physical generation schema.
+///
+/// **`LIMIT 1`, not `LIMIT 0`**: a `LIMIT 0` subplan is pruned by the planner, which *skips* the
+/// underlying relation's privilege check — so it would pass even when a read through a view is denied.
+/// `LIMIT 1` forces the executor to open the relation (and, for a view, its owner-resolved underlying
+/// tables), so an actual privilege/owner-chain gap aborts the switch. A failure poisons the
+/// transaction, rolling the whole switch back. `SET LOCAL ROLE` requires the activation connection
+/// (superuser in 2A) to be a superuser or a member of the read role.
+fn probe_read_visibility(
+    tx: &mut postgres::Transaction<'_>,
+    corpus: &str,
+    generation: &str,
+    read_role: &str,
+) -> Result<(), StorageError> {
+    let read = sql_identifier(read_role);
+    let phys = sql_identifier(&schema_for_generation(generation));
+    let mut sql = format!("SET LOCAL ROLE {read};\n");
+    sql.push_str(&format!(
+        "SELECT 1 FROM jurisearch_control.corpus_state WHERE corpus = {} LIMIT 1;\n",
+        sql_string_literal(corpus)
+    ));
+    sql.push_str("SELECT 1 FROM jurisearch_control.generation_registry LIMIT 1;\n");
+    sql.push_str("SELECT 1 FROM public.index_manifest LIMIT 1;\n");
+    for table in REPLICATED_TABLES {
+        let table = sql_identifier(table);
+        sql.push_str(&format!(
+            "SELECT 1 FROM {}.{table} LIMIT 1;\n",
+            sql_identifier(SERVER_VIEW_SCHEMA)
+        ));
+        sql.push_str(&format!("SELECT 1 FROM {phys}.{table} LIMIT 1;\n"));
+    }
+    sql.push_str("RESET ROLE;\n");
+    tx.batch_execute(&sql).map_err(StorageError::PostgresClient)
 }
 
 /// Async cleanup of a `retired` generation: drop its physical schema and the registry row. This is

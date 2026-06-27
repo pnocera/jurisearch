@@ -285,10 +285,7 @@ mod tests {
         let absent = authority_tier("cass", None).unwrap();
         assert_eq!((absent.tier, absent.marker_absent), (2, true));
         // Blank is treated as absent.
-        assert_eq!(
-            authority_tier("cass", Some("   ")).unwrap().marker_absent,
-            true
-        );
+        assert!(authority_tier("cass", Some("   ")).unwrap().marker_absent);
 
         let inca = authority_tier("inca", None).unwrap();
         assert_eq!(
@@ -315,10 +312,7 @@ mod tests {
         // Absent letter: tier 0 AND marker_absent.
         let absent = authority_tier("jade", None).unwrap();
         assert_eq!((absent.tier, absent.marker_absent), (0, true));
-        assert_eq!(
-            authority_tier("jade", Some("")).unwrap().marker_absent,
-            true
-        );
+        assert!(authority_tier("jade", Some("")).unwrap().marker_absent);
     }
 
     #[test]

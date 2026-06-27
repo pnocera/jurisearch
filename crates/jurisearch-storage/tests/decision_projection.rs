@@ -442,7 +442,7 @@ fn decision_graph_edges_and_interpreted_by() -> Result<(), StorageError> {
                  '1990-01-01', 'sha256:article');",
     )?;
 
-    insert_decision_documents(&postgres, &[judicial.clone()], None)?;
+    insert_decision_documents(&postgres, std::slice::from_ref(&judicial), None)?;
 
     // The decision projected BOTH a publisher edge (from LIENS) and an inferred edge (from the body
     // reference to article L1234-5), kept distinguishable by edge_source.
