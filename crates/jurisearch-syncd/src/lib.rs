@@ -7,6 +7,7 @@
 
 pub mod apply;
 mod error;
+pub mod planner;
 pub mod status;
 pub mod trust;
 
@@ -15,5 +16,9 @@ pub use apply::{
     apply_rebaseline,
 };
 pub use error::SyncError;
+pub use planner::{
+    CatchupPlan, CatchupReport, CatchupSource, ClientCursor, apply_media_auto, plan_catchup,
+    read_client_cursor, run_catchup,
+};
 pub use status::{CorpusStatus, corpus_status};
 pub use trust::{check_entitlement, install_verified_license_token, load_package_verifier};

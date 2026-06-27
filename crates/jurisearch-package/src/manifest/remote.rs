@@ -8,6 +8,7 @@
 use crate::compat::Version;
 use crate::corpus::Corpus;
 use crate::crypto::{KeyId, Signature};
+use crate::package_kind::PackageKind;
 use crate::sequence::PackageSequence;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -54,10 +55,21 @@ impl RemoteManifest {
 pub struct BaselineRef {
     pub baseline_id: String,
     pub generation: String,
+    /// `baseline` (first load) vs `rebaseline` (forward-supersession reissue) — so the planner can
+    /// dispatch the right applier when it routes a client to a fresh baseline (plan P7).
+    pub package_kind: PackageKind,
     pub sequence: PackageSequence,
     pub schema_version: i32,
+    /// The minimum client binary version that can apply this baseline — so the planner can `Blocked`
+    /// before downloading rather than discovering it at apply (plan P7, §10).
+    pub minimum_client_version: Version,
     pub artifact_uri: String,
     pub compressed_size_bytes: u64,
+    /// Uncompressed payload bytes — the §9.4 "cumulative uncompressed > N% of baseline" rule.
+    pub uncompressed_size_bytes: u64,
+    /// Estimated media-baseline LOAD seconds on the reference client — the §9.4 "expected apply time
+    /// exceeds media baseline load time" rule.
+    pub estimated_load_seconds: u32,
     pub sha256: String,
     pub signature: Signature,
 }
@@ -117,8 +129,13 @@ pub enum CatchupMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatchupPolicy {
     pub max_incremental_packages: u32,
-    /// The cumulative-compressed-diff-to-baseline ceiling, in per-mille (e.g. `330` = 33%).
+    /// The cumulative-COMPRESSED-diff-to-baseline ceiling, in per-mille (e.g. `330` = 33%).
     pub max_cumulative_diff_to_baseline_permille: u32,
+    /// The cumulative-UNCOMPRESSED-diff-to-baseline ceiling, in per-mille (§9.4 ~50%).
+    pub max_cumulative_uncompressed_to_baseline_permille: u32,
+    /// The estimated cumulative apply-cost budget in seconds — the §9.4 "estimated apply work under
+    /// budget" rule (≈ 30–45 min on the reference client). Tunable per corpus without a client upgrade.
+    pub max_apply_seconds_budget: u32,
 }
 
 impl CatchupPolicy {
@@ -182,10 +199,14 @@ mod tests {
             active_baseline: BaselineRef {
                 baseline_id: "core-2026-06-25-g000124".to_owned(),
                 generation: "core_g000124".to_owned(),
+                package_kind: PackageKind::Baseline,
                 sequence: PackageSequence::new(1040),
                 schema_version: 18,
+                minimum_client_version: Version::new(0, 1, 0),
                 artifact_uri: "media://core-baseline".to_owned(),
                 compressed_size_bytes: 0,
+                uncompressed_size_bytes: 0,
+                estimated_load_seconds: 0,
                 sha256: "sha256:00".to_owned(),
                 signature: sig(),
             },
@@ -223,6 +244,8 @@ mod tests {
             catchup_policy: CatchupPolicy {
                 max_incremental_packages: 120,
                 max_cumulative_diff_to_baseline_permille: 330,
+                max_cumulative_uncompressed_to_baseline_permille: 500,
+                max_apply_seconds_budget: 2700,
             },
             entitlement: EntitlementListing {
                 corpus: Corpus::new("core").unwrap(),

@@ -153,10 +153,14 @@ fn remote_example() -> RemoteManifest {
         active_baseline: BaselineRef {
             baseline_id: "core-2026-06-25-g000124".to_owned(),
             generation: "core_g000124".to_owned(),
+            package_kind: jurisearch_package::PackageKind::Baseline,
             sequence: PackageSequence::new(1040),
             schema_version: 18,
+            minimum_client_version: Version::new(0, 1, 0),
             artifact_uri: "media://core-baseline".to_owned(),
             compressed_size_bytes: 0,
+            uncompressed_size_bytes: 0,
+            estimated_load_seconds: 0,
             sha256: "sha256:00".to_owned(),
             signature: sig(),
         },
@@ -194,6 +198,8 @@ fn remote_example() -> RemoteManifest {
         catchup_policy: CatchupPolicy {
             max_incremental_packages: 120,
             max_cumulative_diff_to_baseline_permille: 330,
+            max_cumulative_uncompressed_to_baseline_permille: 500,
+            max_apply_seconds_budget: 2700,
         },
         entitlement: EntitlementListing {
             corpus: Corpus::new("core").unwrap(),
