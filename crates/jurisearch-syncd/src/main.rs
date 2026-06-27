@@ -10,6 +10,9 @@ use clap::{Parser, Subcommand};
 use jurisearch_package::crypto::{KeyEpoch, KeyId, TrustAnchor};
 use jurisearch_package::manifest::RemoteManifest;
 use jurisearch_package::signed::Signed;
+use jurisearch_storage::backend::{
+    ConnectionConfig, WriterConnection, WriterHandle, WriterVisibility,
+};
 use jurisearch_storage::runtime::{ManagedPostgres, PgConfig};
 use jurisearch_storage::trust::{LICENSE_PURPOSE, PACKAGE_PURPOSE};
 use jurisearch_syncd::{
@@ -24,11 +27,78 @@ use jurisearch_syncd::{
     about = "JuriSearch consumer client (trust + subscribe + update + status)"
 )]
 struct Cli {
-    /// The client index directory (a durable managed Postgres is started here).
+    /// SELF-MANAGED mode: the client index directory (a durable managed Postgres is started here, and
+    /// migrations are run). Required unless `--server-host` selects shared-server mode.
     #[arg(long, global = true)]
-    index_dir: PathBuf,
+    index_dir: Option<PathBuf>,
+    /// SHARED-SERVER mode (work/09 P2B): attach to an existing, already-migrated + role-provisioned
+    /// PostgreSQL as a CLIENT (no `pg_ctl`, no migrations) using the writer identity. Setting this host
+    /// selects shared-server mode.
+    #[arg(long, global = true)]
+    server_host: Option<String>,
+    #[arg(long, global = true, default_value_t = 5432)]
+    server_port: u16,
+    #[arg(long, global = true, default_value = "jurisearch")]
+    server_db: String,
+    /// The writer role to connect as (shared-server mode).
+    #[arg(long, global = true, default_value = "jurisearch_write")]
+    writer_user: String,
+    #[arg(long, global = true)]
+    writer_password: Option<String>,
+    /// The read role + view-owner role whose visibility the writer stamps at activation.
+    #[arg(long, global = true, default_value = "jurisearch_read")]
+    read_role: String,
+    #[arg(long, global = true, default_value = "jurisearch_owner")]
+    owner_role: String,
     #[command(subcommand)]
     command: Command,
+}
+
+/// The writer connection the one-shot commands run through: the self-managed (`pg_ctl`-owned)
+/// PostgreSQL, or a shared-server writer handle attached to an existing PG.
+enum WriterConn {
+    // Boxed: `ManagedPostgres` (temp dir + locks) is much larger than `WriterHandle`.
+    SelfManaged(Box<ManagedPostgres>),
+    Shared(WriterHandle),
+}
+
+impl WriterConn {
+    fn conn(&self) -> &dyn WriterConnection {
+        match self {
+            WriterConn::SelfManaged(postgres) => postgres.as_ref(),
+            WriterConn::Shared(handle) => handle,
+        }
+    }
+}
+
+/// Build the writer connection from the CLI: shared-server attach when `--server-host` is set
+/// (no migrations, no `pg_ctl`), else the self-managed durable PG (migrated at start).
+fn build_writer(cli: &Cli) -> anyhow::Result<WriterConn> {
+    if let Some(host) = &cli.server_host {
+        let config = ConnectionConfig {
+            host: host.clone(),
+            port: cli.server_port,
+            dbname: cli.server_db.clone(),
+            user: cli.writer_user.clone(),
+            password: cli.writer_password.clone(),
+            application_name: "jurisearch-syncd".to_owned(),
+        };
+        let visibility = WriterVisibility {
+            read_role: cli.read_role.clone(),
+            view_owner_role: cli.owner_role.clone(),
+        };
+        Ok(WriterConn::Shared(WriterHandle::new(config, visibility)))
+    } else {
+        let index_dir = cli.index_dir.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--index-dir is required in self-managed mode (or pass --server-host to attach to a shared server)"
+            )
+        })?;
+        let pg_config = PgConfig::discover()?;
+        let postgres = ManagedPostgres::start_durable(pg_config, index_dir)?;
+        postgres.run_migrations()?;
+        Ok(WriterConn::SelfManaged(Box::new(postgres)))
+    }
 }
 
 #[derive(Subcommand)]
@@ -87,14 +157,13 @@ enum TrustAction {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let pg_config = PgConfig::discover()?;
-    let postgres = ManagedPostgres::start_durable(pg_config, &cli.index_dir)?;
-    postgres.run_migrations()?;
+    let writer = build_writer(&cli)?;
+    let conn = writer.conn();
 
     match cli.command {
         Command::Apply { artifact } => {
-            let verifier = load_package_verifier(&postgres)?;
-            let outcome = apply_baseline(&postgres, &artifact, &verifier)?;
+            let verifier = load_package_verifier(conn)?;
+            let outcome = apply_baseline(conn, &artifact, &verifier)?;
             print_baseline_outcome(&outcome);
         }
         Command::Trust { action } => {
@@ -118,7 +187,7 @@ fn main() -> anyhow::Result<()> {
                 algorithm,
                 public_key_hex,
             };
-            install_trust_anchor(&postgres, &anchor, purpose)?;
+            install_trust_anchor(conn, &anchor, purpose)?;
             println!(
                 "installed {purpose} trust anchor key_id={} epoch={key_epoch}",
                 anchor.key_id.0
@@ -126,7 +195,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Subscribe { token_json } => {
             let bytes = std::fs::read_to_string(&token_json)?;
-            install_verified_license_token(&postgres, &bytes)?;
+            install_verified_license_token(conn, &bytes)?;
             println!("installed license token from {}", token_json.display());
         }
         Command::Update {
@@ -134,7 +203,7 @@ fn main() -> anyhow::Result<()> {
             source_root,
             uri_base,
         } => {
-            let verifier = load_package_verifier(&postgres)?;
+            let verifier = load_package_verifier(conn)?;
             let manifest_path = source_root.join(&corpus).join("manifest.json");
             let signed: Signed<RemoteManifest> =
                 serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
@@ -144,7 +213,7 @@ fn main() -> anyhow::Result<()> {
             // The signed manifest must actually be FOR the requested corpus — a stale/misplaced
             // manifest signed for another corpus must not advance the wrong corpus (P9 r1 WARN).
             check_manifest_corpus(&signed.payload, &corpus)?;
-            let cursor = read_client_cursor(&postgres, &corpus)?;
+            let cursor = read_client_cursor(conn, &corpus)?;
             let plan = plan_catchup(&signed.payload, cursor.as_ref());
             match &plan {
                 CatchupPlan::UpToDate => println!("{corpus}: up to date"),
@@ -163,7 +232,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let source = DirectoryCatchupSource::new(&source_root, uri_base);
-            let report = run_catchup(&postgres, &source, &verifier, plan)?;
+            let report = run_catchup(conn, &source, &verifier, plan)?;
             match report {
                 CatchupReport::UpToDate => {}
                 CatchupReport::BaselineApplied(outcome) => print_baseline_outcome(&outcome),
@@ -173,7 +242,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Status { json } => {
-            let statuses = corpus_status(&postgres)?;
+            let statuses = corpus_status(conn)?;
             if json {
                 // The management CLI's primary result goes to stdout as stable JSON.
                 println!("{}", serde_json::to_string_pretty(&statuses)?);

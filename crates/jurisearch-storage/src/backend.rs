@@ -15,6 +15,7 @@
 
 use std::time::Duration;
 
+use crate::generations::{ActivationReadVisibility, REPLICATED_TABLES};
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
 /// Default least-privilege role names. A deployment may override them via [`RoleSpec`].
@@ -89,15 +90,28 @@ impl ReadHandle {
     }
 }
 
-/// A writer connection provider. Disjoint from [`ReadHandle`] (ISP).
+/// The read/owner role names a writer must propagate visibility to when it activates a generation
+/// (work/09 P2B). Owned (vs the borrowed [`ActivationReadVisibility`]) so a [`WriterHandle`] can carry
+/// it across an apply. Absent for the self-managed (no-roles) path.
+#[derive(Debug, Clone)]
+pub struct WriterVisibility {
+    pub read_role: String,
+    pub view_owner_role: String,
+}
+
+/// A writer connection provider. Disjoint from [`ReadHandle`] (ISP). A `WriterHandle` is the
+/// **shared-server** writer identity, so it ALWAYS carries the [`WriterVisibility`] role names — an
+/// activation run through it stamps read-role visibility (the P2A postcondition). (The self-managed
+/// superuser path is `ManagedPostgres`'s `WriterConnection` impl, whose visibility is `None`.)
 #[derive(Debug, Clone)]
 pub struct WriterHandle {
     config: ConnectionConfig,
+    visibility: WriterVisibility,
 }
 
 impl WriterHandle {
-    pub fn new(config: ConnectionConfig) -> Self {
-        Self { config }
+    pub fn new(config: ConnectionConfig, visibility: WriterVisibility) -> Self {
+        Self { config, visibility }
     }
     pub fn config(&self) -> &ConnectionConfig {
         &self.config
@@ -105,6 +119,41 @@ impl WriterHandle {
     /// Open a fresh client with the **writer** identity.
     pub fn client(&self) -> Result<postgres::Client, StorageError> {
         self.config.connect()
+    }
+}
+
+/// One authority for "give me a WRITER connection, and (for a shared server) the read-role visibility
+/// to stamp at activation" (work/09 P2B). Implemented by both [`ManagedPostgres`] (the self-managed
+/// superuser adapter — `None` visibility) and [`WriterHandle`] (the writer role — `Some` visibility),
+/// so the syncd writer path runs unchanged against either, and the storage activation can open its
+/// switch connection through the right identity instead of a hardcoded superuser string. Object-safe.
+pub trait WriterConnection {
+    /// Open a fresh client with the writer identity.
+    fn writer_client(&self) -> Result<postgres::Client, StorageError>;
+    /// The read-role visibility to stamp at activation, or `None` for the self-managed path.
+    fn activation_read_visibility(&self) -> Option<ActivationReadVisibility<'_>>;
+}
+
+impl WriterConnection for WriterHandle {
+    fn writer_client(&self) -> Result<postgres::Client, StorageError> {
+        self.config.connect()
+    }
+    fn activation_read_visibility(&self) -> Option<ActivationReadVisibility<'_>> {
+        Some(ActivationReadVisibility {
+            read_role: &self.visibility.read_role,
+            view_owner_role: &self.visibility.view_owner_role,
+        })
+    }
+}
+
+impl WriterConnection for ManagedPostgres {
+    fn writer_client(&self) -> Result<postgres::Client, StorageError> {
+        self.client()
+    }
+    /// The self-managed path uses the superuser identity and provisions no roles, so there is no
+    /// read-role visibility to stamp.
+    fn activation_read_visibility(&self) -> Option<ActivationReadVisibility<'_>> {
+        None
     }
 }
 
@@ -117,16 +166,26 @@ pub trait StorageBackend {
 }
 
 /// Attaches to an existing PostgreSQL server as a client (the customer-site host) — no `pg_ctl`, no
-/// data dir. Holds a read-only [`ConnectionConfig`] and a writer [`ConnectionConfig`].
+/// data dir. Holds a read-only [`ConnectionConfig`], a writer [`ConnectionConfig`], and the
+/// [`WriterVisibility`] role names the writer stamps at activation.
 #[derive(Debug, Clone)]
 pub struct SharedServerBackend {
     read: ConnectionConfig,
     writer: ConnectionConfig,
+    visibility: WriterVisibility,
 }
 
 impl SharedServerBackend {
-    pub fn new(read: ConnectionConfig, writer: ConnectionConfig) -> Self {
-        Self { read, writer }
+    pub fn new(
+        read: ConnectionConfig,
+        writer: ConnectionConfig,
+        visibility: WriterVisibility,
+    ) -> Self {
+        Self {
+            read,
+            writer,
+            visibility,
+        }
     }
 }
 
@@ -135,7 +194,10 @@ impl StorageBackend for SharedServerBackend {
         Ok(ReadHandle::new(self.read.clone()))
     }
     fn writer_handle(&self) -> Result<WriterHandle, StorageError> {
-        Ok(WriterHandle::new(self.writer.clone()))
+        Ok(WriterHandle::new(
+            self.writer.clone(),
+            self.visibility.clone(),
+        ))
     }
 }
 
@@ -147,11 +209,18 @@ impl StorageBackend for SharedServerBackend {
 pub struct ManagedPostgresBackend {
     read: ConnectionConfig,
     writer: ConnectionConfig,
+    visibility: WriterVisibility,
 }
 
 impl ManagedPostgresBackend {
-    /// Build role-scoped configs against `postgres`'s loopback address for the given role names.
-    pub fn new(postgres: &ManagedPostgres, read_role: &str, writer_role: &str) -> Self {
+    /// Build role-scoped configs against `postgres`'s loopback address for the given role names. The
+    /// `owner_role` (the role that owns the stable views) is carried as the activation view-owner.
+    pub fn new(
+        postgres: &ManagedPostgres,
+        read_role: &str,
+        writer_role: &str,
+        owner_role: &str,
+    ) -> Self {
         let base = |user: &str, app: &str| ConnectionConfig {
             host: "127.0.0.1".to_owned(),
             port: postgres.port,
@@ -163,6 +232,10 @@ impl ManagedPostgresBackend {
         Self {
             read: base(read_role, "jurisearch-read"),
             writer: base(writer_role, "jurisearch-write"),
+            visibility: WriterVisibility {
+                read_role: read_role.to_owned(),
+                view_owner_role: owner_role.to_owned(),
+            },
         }
     }
 }
@@ -172,7 +245,10 @@ impl StorageBackend for ManagedPostgresBackend {
         Ok(ReadHandle::new(self.read.clone()))
     }
     fn writer_handle(&self) -> Result<WriterHandle, StorageError> {
-        Ok(WriterHandle::new(self.writer.clone()))
+        Ok(WriterHandle::new(
+            self.writer.clone(),
+            self.visibility.clone(),
+        ))
     }
 }
 
@@ -292,7 +368,17 @@ fn build_provision_sql(spec: &RoleSpec, dbname: &str) -> String {
     sql.push_str(&format!(
         "ALTER ROLE {writer} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\n"
     ));
+    // The writer is a member of the owner role (to run the app DDL) and a member of the READ role
+    // (ONLY so it can `SET LOCAL ROLE <read>` for the in-transaction activation visibility probe when
+    // activation runs as the writer rather than a superuser). Both are read/owner→writer (the writer
+    // *assumes* the narrower identity), never writer→read. CONVERGENT: each membership is granted
+    // WITHOUT admin option, and a pre-existing ADMIN OPTION is explicitly stripped, so the writer can
+    // never re-delegate these roles even on a drifted deployment. (The step-5 convergence loop strips
+    // memberships where READ is the *member*; these have read/owner as the *group*, so they survive.)
     sql.push_str(&format!("GRANT {owner} TO {writer};\n"));
+    sql.push_str(&format!("REVOKE ADMIN OPTION FOR {owner} FROM {writer};\n"));
+    sql.push_str(&format!("GRANT {read} TO {writer};\n"));
+    sql.push_str(&format!("REVOKE ADMIN OPTION FOR {read} FROM {writer};\n"));
 
     // 2. Remove the legacy `PUBLIC` CREATE on `public` so no role (incl. read) can create there via
     //    PUBLIC. (PG15+ already revokes this by default; the revoke is idempotent on newer clusters.)
@@ -387,6 +473,21 @@ fn build_provision_sql(spec: &RoleSpec, dbname: &str) -> String {
     sql.push_str(&format!(
         "GRANT USAGE ON SCHEMA public, jurisearch_control, jurisearch_server, jurisearch_app TO {writer};\n"
     ));
+    // The writer creates each generation's tables as `CREATE TABLE … (LIKE public.<table> …)`, which
+    // needs SELECT on exactly the `public` REPLICATED templates (and the named control/catalog tables,
+    // re-granted below). CONVERGE first: revoke the writer's `public` table surface, so a deployment
+    // that previously received a broad `public` grant (or drifted into one) is brought back to exactly
+    // the needed set — the writer cannot read an unrelated `public` table. (It writes its corpus data
+    // into the per-generation schemas, never into `public`.)
+    sql.push_str(&format!(
+        "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {writer};\n"
+    ));
+    let replicated = REPLICATED_TABLES
+        .iter()
+        .map(|table| format!("public.{}", sql_identifier(table)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    sql.push_str(&format!("GRANT SELECT ON {replicated} TO {writer};\n"));
     sql.push_str(&format!(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA jurisearch_control, jurisearch_app TO {writer};\n"
     ));
@@ -452,10 +553,31 @@ mod tests {
         assert!(sql.contains("\"jurisearch_read\""));
         assert!(sql.contains("\"jurisearch_write\""));
         assert!(sql.contains("GRANT \"jurisearch_owner\" TO \"jurisearch_write\";"));
+        // The writer is a (non-admin) member of the read role so it can SET ROLE read for the
+        // activation probe (work/09 P2B) — read→writer, never WITH ADMIN OPTION, and any pre-existing
+        // admin option is explicitly stripped.
+        assert!(sql.contains("GRANT \"jurisearch_read\" TO \"jurisearch_write\";"));
+        assert!(!sql.to_uppercase().contains("WITH ADMIN OPTION"));
+        assert!(
+            sql.contains("REVOKE ADMIN OPTION FOR \"jurisearch_read\" FROM \"jurisearch_write\";")
+        );
+        assert!(
+            sql.contains("REVOKE ADMIN OPTION FOR \"jurisearch_owner\" FROM \"jurisearch_write\";")
+        );
         assert!(
             sql.contains(
                 "GRANT CONNECT, CREATE ON DATABASE \"jurisearch\" TO \"jurisearch_write\";"
             )
+        );
+        // The writer's `public` read access is CONVERGED to the replicated `LIKE` templates: its
+        // public table surface is revoked first, then SELECT is re-granted on JUST those templates
+        // (never all of `public`), so a previously-broad grant is brought back to least privilege.
+        assert!(
+            sql.contains("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM \"jurisearch_write\";")
+        );
+        assert!(sql.contains("GRANT SELECT ON public.\"documents\", public.\"chunks\""));
+        assert!(
+            !sql.contains("GRANT SELECT ON ALL TABLES IN SCHEMA public TO \"jurisearch_write\"")
         );
         // No write grant to the read role, and no PASSWORD when none is configured.
         assert!(!sql.contains("INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA jurisearch_control, jurisearch_app TO \"jurisearch_read\""));

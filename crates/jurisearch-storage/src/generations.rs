@@ -19,6 +19,7 @@
 //! `jurisearch_server` views and the global `package_change_log`/`index_manifest`/`schema_migrations`/
 //! `ingest_*` are never per-generation. The PRODUCER keeps its authoritative working set in `public`.
 
+use crate::backend::WriterConnection;
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 use postgres::GenericClient;
 
@@ -930,8 +931,8 @@ pub struct ActivationStamps<'a> {
 /// # Errors
 /// [`StorageError::PostgresClient`] / [`StorageError::AdvisoryLockBusy`] on lock contention, or
 /// [`StorageError::Generations`] if the target row is not `building` or the cursor is unexpected.
-pub fn activate_generation(
-    postgres: &ManagedPostgres,
+pub fn activate_generation<C: WriterConnection + ?Sized>(
+    client: &C,
     corpus: &str,
     generation: &str,
     stamps: &ActivationStamps<'_>,
@@ -941,7 +942,7 @@ pub fn activate_generation(
         None => CursorGuard::FirstBaseline,
         Some(n) => CursorGuard::ExactPrevious(n),
     };
-    activate_generation_with_guard(postgres, corpus, generation, stamps, guard, &[])
+    activate_generation_with_guard(client, corpus, generation, stamps, guard, &[])
 }
 
 /// Activate a `building` generation and repoint that corpus's views in ONE short transaction
@@ -956,22 +957,25 @@ pub fn activate_generation(
 /// # Errors
 /// [`StorageError::PostgresClient`] / [`StorageError::AdvisoryLockBusy`] on lock contention, or
 /// [`StorageError::Generations`] if the target row is not `building` or the cursor guard fails.
-pub fn activate_generation_with_guard(
-    postgres: &ManagedPostgres,
+pub fn activate_generation_with_guard<C: WriterConnection + ?Sized>(
+    client: &C,
     corpus: &str,
     generation: &str,
     stamps: &ActivationStamps<'_>,
     guard: CursorGuard,
     dense_manifests: &[DenseManifestEntry],
 ) -> Result<(), StorageError> {
+    // The connection itself decides whether read-role visibility must be stamped: the self-managed
+    // (superuser) path returns `None`; a shared-server `WriterHandle` returns the read/owner roles.
+    let visibility = client.activation_read_visibility();
     activate_generation_inner(
-        postgres,
+        client,
         corpus,
         generation,
         stamps,
         guard,
         dense_manifests,
-        None,
+        visibility.as_ref(),
     )
 }
 
@@ -994,8 +998,8 @@ pub struct ActivationReadVisibility<'a> {
 /// of the new generation) is readable, all before commit. If the read role cannot see the new
 /// topology the transaction rolls back, so the apply fails with the cursor unchanged (the design §3.2
 /// read-role-visibility activation postcondition / architecture §11 acceptance invariant).
-pub fn activate_generation_with_guard_and_visibility(
-    postgres: &ManagedPostgres,
+pub fn activate_generation_with_guard_and_visibility<C: WriterConnection + ?Sized>(
+    client: &C,
     corpus: &str,
     generation: &str,
     stamps: &ActivationStamps<'_>,
@@ -1004,7 +1008,7 @@ pub fn activate_generation_with_guard_and_visibility(
     visibility: &ActivationReadVisibility<'_>,
 ) -> Result<(), StorageError> {
     activate_generation_inner(
-        postgres,
+        client,
         corpus,
         generation,
         stamps,
@@ -1014,8 +1018,8 @@ pub fn activate_generation_with_guard_and_visibility(
     )
 }
 
-fn activate_generation_inner(
-    postgres: &ManagedPostgres,
+fn activate_generation_inner<C: WriterConnection + ?Sized>(
+    client: &C,
     corpus: &str,
     generation: &str,
     stamps: &ActivationStamps<'_>,
@@ -1023,9 +1027,11 @@ fn activate_generation_inner(
     dense_manifests: &[DenseManifestEntry],
     visibility: Option<&ActivationReadVisibility<'_>>,
 ) -> Result<(), StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
-    let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
+    // Open the SHORT switch connection through the writer identity (the self-managed adapter yields a
+    // superuser client; a shared-server `WriterHandle` yields the writer role) — no hardcoded
+    // superuser connection string (work/09 P2B).
+    let mut conn = client.writer_client()?;
+    let mut tx = conn.transaction().map_err(StorageError::PostgresClient)?;
     tx.batch_execute("SET LOCAL lock_timeout = '5s';")
         .map_err(StorageError::PostgresClient)?;
     // Apply advisory lock for this transaction; fail clean rather than stall behind a long reader.

@@ -96,7 +96,12 @@ fn read_role_is_select_only_and_sees_the_active_topology() -> Result<(), Storage
         },
     )?;
 
-    let backend = ManagedPostgresBackend::new(&postgres, DEFAULT_READ_ROLE, DEFAULT_WRITER_ROLE);
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
     let mut read = backend.read_handle()?.client()?;
     let physical = generation_schema("core", 1);
 
@@ -275,7 +280,12 @@ fn provisioning_converges_a_preexisting_overprivileged_read_role() -> Result<(),
         "read must no longer be createrole"
     );
 
-    let backend = ManagedPostgresBackend::new(&postgres, DEFAULT_READ_ROLE, DEFAULT_WRITER_ROLE);
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
     let mut read = backend.read_handle()?.client()?;
     assert_denied(&mut read, "CREATE TABLE public.evil_after (x int)");
     assert_denied(
@@ -329,7 +339,12 @@ fn provisioning_strips_inherited_and_set_role_write_paths() -> Result<(), Storag
         "read must not retain the rogue_writer membership"
     );
 
-    let backend = ManagedPostgresBackend::new(&postgres, DEFAULT_READ_ROLE, DEFAULT_WRITER_ROLE);
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
     let mut read = backend.read_handle()?.client()?;
     // The inherited write path is gone.
     assert_denied(
@@ -382,7 +397,12 @@ fn provisioning_and_activation_handle_non_simple_role_names() -> Result<(), Stor
         },
     )?;
 
-    let backend = ManagedPostgresBackend::new(&postgres, &spec.read_role, &spec.writer_role);
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        &spec.read_role,
+        &spec.writer_role,
+        &spec.owner_role,
+    );
     let mut read = backend.read_handle()?.client()?;
     let count: i64 = read
         .query_one(
@@ -395,6 +415,125 @@ fn provisioning_and_activation_handle_non_simple_role_names() -> Result<(), Stor
         count, 1,
         "read through the view must work for a quoted role"
     );
+
+    Ok(())
+}
+
+#[test]
+fn writer_public_select_is_scoped_to_replicated_templates() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("shared-server writer public scope")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-roles-pubscope.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // A pre-existing deployment where the writer already holds the OLD broad `public` SELECT (the
+    // exposure this fix closes), including an unrelated table provisioning must converge away.
+    {
+        let mut superuser = postgres.client()?;
+        superuser
+            .batch_execute(&format!(
+                "CREATE TABLE public.unrelated_secret (x int);\n\
+                 CREATE ROLE {DEFAULT_WRITER_ROLE} LOGIN;\n\
+                 GRANT SELECT ON ALL TABLES IN SCHEMA public TO {DEFAULT_WRITER_ROLE};"
+            ))
+            .map_err(StorageError::PostgresClient)?;
+    }
+    provision_with(&postgres, &RoleSpec::default())?;
+
+    // The writer holds SELECT on the replicated `LIKE` template but NOT on the unrelated table.
+    // (A writer baseline against the templates succeeds — see `shared_writer_loopback`.)
+    let mut superuser = postgres.client()?;
+    let can_template: bool = superuser
+        .query_one(
+            "SELECT has_table_privilege($1, 'public.documents', 'SELECT')",
+            &[&DEFAULT_WRITER_ROLE],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .get(0);
+    let can_secret: bool = superuser
+        .query_one(
+            "SELECT has_table_privilege($1, 'public.unrelated_secret', 'SELECT')",
+            &[&DEFAULT_WRITER_ROLE],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .get(0);
+    assert!(
+        can_template,
+        "writer needs SELECT on the replicated template"
+    );
+    assert!(
+        !can_secret,
+        "writer must NOT read an unrelated public table"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn provisioning_strips_a_preexisting_admin_option_on_writer_memberships() -> Result<(), StorageError>
+{
+    let Some(pg_config) = discover_pg_config("shared-server admin-option strip")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-roles-admin.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // A drifted deployment: the writer is a member of owner + read WITH ADMIN OPTION (could re-delegate).
+    {
+        let mut superuser = postgres.client()?;
+        superuser
+            .batch_execute(&format!(
+                "CREATE ROLE {DEFAULT_OWNER_ROLE} NOLOGIN;\n\
+                 CREATE ROLE {DEFAULT_READ_ROLE} LOGIN;\n\
+                 CREATE ROLE {DEFAULT_WRITER_ROLE} LOGIN;\n\
+                 GRANT {DEFAULT_OWNER_ROLE} TO {DEFAULT_WRITER_ROLE} WITH ADMIN OPTION;\n\
+                 GRANT {DEFAULT_READ_ROLE} TO {DEFAULT_WRITER_ROLE} WITH ADMIN OPTION;"
+            ))
+            .map_err(StorageError::PostgresClient)?;
+    }
+
+    provision_with(&postgres, &RoleSpec::default())?;
+
+    // Each writer membership is retained but the admin option is gone.
+    let mut superuser = postgres.client()?;
+    for group in [DEFAULT_OWNER_ROLE, DEFAULT_READ_ROLE] {
+        let admin: bool = superuser
+            .query_one(
+                "SELECT coalesce(bool_or(admin_option), false) FROM pg_auth_members \
+                 WHERE roleid = to_regrole($1) AND member = to_regrole($2)",
+                &[&group, &DEFAULT_WRITER_ROLE],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get(0);
+        assert!(!admin, "admin option on {group}->writer must be stripped");
+        let member: bool = superuser
+            .query_one(
+                "SELECT pg_has_role($1, $2, 'MEMBER')",
+                &[&DEFAULT_WRITER_ROLE, &group],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get(0);
+        assert!(member, "writer must remain a member of {group}");
+    }
+
+    // The writer can still assume the read role (the activation `SET ROLE` probe path).
+    let backend = ManagedPostgresBackend::new(
+        &postgres,
+        DEFAULT_READ_ROLE,
+        DEFAULT_WRITER_ROLE,
+        DEFAULT_OWNER_ROLE,
+    );
+    let mut writer = backend.writer_handle()?.client()?;
+    writer
+        .batch_execute(&format!("SET ROLE {DEFAULT_READ_ROLE}; RESET ROLE;"))
+        .map_err(StorageError::PostgresClient)?;
 
     Ok(())
 }

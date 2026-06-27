@@ -15,6 +15,7 @@ use jurisearch_package::{PackageKind, RejectCode, Verifier};
 /// The version of THIS client binary, gated against each package's `minimum_client_version` (§10).
 pub const CLIENT_VERSION: Version = Version::new(0, 1, 0);
 
+use jurisearch_storage::backend::WriterConnection;
 use jurisearch_storage::dense::{DENSE_VECTOR_INDEX_NAME, recommended_probes};
 use jurisearch_storage::generations::{
     ActivationStamps, CursorGuard, DenseManifestEntry, GenerationIndexReport, REPLICATED_TABLES,
@@ -28,10 +29,8 @@ use jurisearch_storage::incremental::{
     replace_set_rows,
 };
 use jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION;
-use jurisearch_storage::outbox::{
-    DigestSource, TableDigest, corpus_table_digests, corpus_table_digests_with_client,
-};
-use jurisearch_storage::runtime::{ManagedPostgres, sql_identifier};
+use jurisearch_storage::outbox::{DigestSource, TableDigest, corpus_table_digests_with_client};
+use jurisearch_storage::runtime::sql_identifier;
 use jurisearch_storage::zone_units::ZONE_UNIT_VECTOR_INDEX_NAME;
 
 use jurisearch_package::event::{ReplaceSet, ReplaceSetGroup, set_digest_over_rows};
@@ -59,7 +58,7 @@ pub enum BaselineApplyOutcome {
 /// # Errors
 /// [`SyncError`] with a [`RejectCode`] on a contract refusal, or a storage/IO error.
 pub fn apply_baseline(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     artifact_dir: &Path,
     verifier: &dyn Verifier,
 ) -> Result<BaselineApplyOutcome, SyncError> {
@@ -75,7 +74,7 @@ pub fn apply_baseline(
 /// # Errors
 /// [`SyncError`] with a [`RejectCode`] on a contract refusal, or a storage/IO error.
 pub fn apply_rebaseline(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     artifact_dir: &Path,
     verifier: &dyn Verifier,
 ) -> Result<BaselineApplyOutcome, SyncError> {
@@ -111,7 +110,7 @@ impl MediaApplyMode {
 /// corpus is never query-ready until its indexes are built (INV-6); the only globally-visible mutation
 /// is the [`activate_generation_with_guard`] switch.
 fn apply_media_package(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     artifact_dir: &Path,
     verifier: &dyn Verifier,
     mode: MediaApplyMode,
@@ -158,7 +157,7 @@ fn apply_media_package(
     //    BLOCKER): no concurrent apply can build the same deterministic generation, and the retriable
     //    building-generation reset can never drop a generation another apply is actively loading. Held
     //    across idempotency → reset → create → load → build → switch; released on EVERY path.
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     acquire_corpus_apply_lock(&mut db, &corpus)?;
     let outcome = apply_media_locked(client, &mut db, artifact_dir, manifest, mode);
     let _ = release_corpus_apply_lock(&mut db, &corpus);
@@ -169,7 +168,7 @@ fn apply_media_package(
 /// idempotency (RE-CHECKED under the lock, since a concurrent apply may have advanced the cursor) →
 /// load into the manifest-named `building` generation → build + validate → atomic switch.
 fn apply_media_locked(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     db: &mut postgres::Client,
     artifact_dir: &Path,
     manifest: &EmbeddedManifest,
@@ -273,14 +272,19 @@ fn apply_media_locked(
 
 /// The client DB must already be at the package's `schema_version` (P3 ships no migration bundle).
 fn check_schema_compatibility(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     manifest: &EmbeddedManifest,
 ) -> Result<(), SyncError> {
-    let applied = client
-        .execute_sql("SELECT coalesce(max(version), 0)::text FROM schema_migrations;")?
-        .trim()
-        .parse::<i32>()
-        .unwrap_or(0);
+    // Read the applied schema version + the migration-bundle digest through the WRITER client (no
+    // superuser `psql` shell), qualifying `public.schema_migrations` rather than relying on search_path.
+    let mut db = client.writer_client()?;
+    let applied: i32 = db
+        .query_one(
+            "SELECT coalesce(max(version), 0)::int FROM public.schema_migrations;",
+            &[],
+        )
+        .map_err(SyncError::Postgres)?
+        .get(0);
     if applied > CURRENT_SCHEMA_VERSION {
         return Err(SyncError::reject(
             RejectCode::SchemaAhead,
@@ -299,8 +303,7 @@ fn check_schema_compatibility(
         ));
     }
     // Beyond the schema NUMBER, the client's migration set must match the producer's (plan P3 WARN-1):
-    // recompute the bundle digest with the SAME helper the producer used and compare.
-    let mut db = client.client()?;
+    // recompute the bundle digest with the SAME helper the producer used and compare (same writer client).
     let bundle = jurisearch_storage::migrations::schema_bundle_digest(&mut db)?;
     if bundle != manifest.compatibility.schema_migration_bundle_digest {
         return Err(SyncError::reject(
@@ -330,10 +333,10 @@ fn check_client_version(manifest: &EmbeddedManifest) -> Result<(), SyncError> {
 
 /// Every `requires_extensions` entry must be installed on the client (plan P3 WARN-1, §6.2.2).
 fn check_extensions(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     manifest: &EmbeddedManifest,
 ) -> Result<(), SyncError> {
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     for ext in &manifest.compatibility.requires_extensions {
         let present = db
             .query_one(
@@ -521,7 +524,7 @@ fn index_shape(
 /// `COPY (FORMAT binary)` is tied to the server's type layout, so a binary baseline must declare a
 /// `postgres_major` window and the consumer must fall inside it (plan P3 D2).
 fn check_copy_binary_guard(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     manifest: &EmbeddedManifest,
 ) -> Result<(), SyncError> {
     let uses_binary = manifest
@@ -541,7 +544,8 @@ fn check_copy_binary_guard(
             "binary COPY payload must declare postgres_major_min/max (loopback guard)",
         ));
     };
-    let major = client.server_version_major()?;
+    let mut db = client.writer_client()?;
+    let major = server_version_major(&mut db)?;
     if major < min || major > max {
         return Err(SyncError::reject(
             RejectCode::ExtensionMissing,
@@ -549,6 +553,24 @@ fn check_copy_binary_guard(
         ));
     }
     Ok(())
+}
+
+/// The server's major version (e.g. `18`), from `server_version_num / 10000` — read through a client
+/// rather than the `ManagedPostgres` `psql` helper, so it works under the writer identity too.
+fn server_version_major(db: &mut postgres::Client) -> Result<u32, SyncError> {
+    let raw: String = db
+        .query_one("SELECT current_setting('server_version_num');", &[])
+        .map_err(SyncError::Postgres)?
+        .get(0);
+    raw.trim()
+        .parse::<u32>()
+        .map(|num| num / 10_000)
+        .map_err(|_| {
+            SyncError::reject(
+                RejectCode::ExtensionMissing,
+                format!("could not parse server_version_num `{}`", raw.trim()),
+            )
+        })
 }
 
 /// Read every payload file and check its digest against the manifest before any load (§11.1).
@@ -619,14 +641,14 @@ fn verify_per_file_digests(
 /// A no-op requires BOTH the same `package_id` AND the same package digest at the result sequence (plan
 /// P3 r2 WARN-1) — so distinct packages with identical payload bytes are not confused.
 fn idempotency_decision(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     corpus: &str,
     result_sequence: u64,
     package_id: &str,
     package_digest: &str,
     behind_is_applicable: bool,
 ) -> Result<Option<BaselineApplyOutcome>, SyncError> {
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     let row = db
         .query_opt(
             "SELECT sequence, last_package_id, last_package_digest \
@@ -726,12 +748,14 @@ fn copy_payload_in(
 /// Recompute the generation's per-table digests with the SAME code path the producer used, and require
 /// an exact match to the manifest postconditions before the cursor advances (§11.1, D6).
 fn validate_postconditions(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     corpus: &str,
     schema: &str,
     manifest: &EmbeddedManifest,
 ) -> Result<(), SyncError> {
-    let digests = corpus_table_digests(client, corpus, DigestSource::Generation { schema })?;
+    let mut db = client.writer_client()?;
+    let digests =
+        corpus_table_digests_with_client(&mut db, corpus, DigestSource::Generation { schema })?;
     let post = &manifest.apply.postconditions;
     for TableDigest {
         table_name,
@@ -801,7 +825,7 @@ pub enum IncrementalApplyOutcome {
 /// # Errors
 /// [`SyncError`] with a [`RejectCode`] on a contract refusal (incl. `SequenceGap`), or a storage/IO error.
 pub fn apply_incremental(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     artifact_dir: &Path,
     verifier: &dyn Verifier,
 ) -> Result<IncrementalApplyOutcome, SyncError> {
@@ -835,7 +859,7 @@ pub fn apply_incremental(
     let expected_from = manifest.apply.expected_client_from_sequence.get();
 
     // Precompute the non-generated column list + PK for every replicated table (the schema is stable).
-    let mut meta = client.client()?;
+    let mut meta = client.writer_client()?;
     let mut columns_map: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     let mut pk_map: std::collections::BTreeMap<String, Vec<String>> =
@@ -849,7 +873,7 @@ pub fn apply_incremental(
     }
 
     // ONE transaction on the active generation.
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     let mut tx = db.transaction().map_err(SyncError::Postgres)?;
     tx.batch_execute("SET LOCAL lock_timeout = '5s';")
         .map_err(SyncError::Postgres)?;

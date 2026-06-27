@@ -18,8 +18,8 @@ use jurisearch_package::manifest::remote::{
 use jurisearch_package::sequence::PackageSequence;
 use jurisearch_package::signed::Signed;
 use jurisearch_package::{PackageKind, RejectCode, Verifier};
+use jurisearch_storage::backend::WriterConnection;
 use jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION;
-use jurisearch_storage::runtime::ManagedPostgres;
 
 use crate::apply::CLIENT_VERSION;
 use crate::error::SyncError;
@@ -46,10 +46,10 @@ pub struct ClientCursor {
 /// # Errors
 /// [`SyncError`] on a DB error.
 pub fn read_client_cursor(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     corpus: &str,
 ) -> Result<Option<ClientCursor>, SyncError> {
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     let row = db
         .query_opt(
             "SELECT sequence, active_generation, baseline_id, schema_version, embedding_fingerprint, \
@@ -450,7 +450,7 @@ pub enum CatchupReport {
 /// # Errors
 /// [`SyncError`] (with the §6.3 code) on a `Blocked` plan, a digest mismatch, or an apply refusal.
 pub fn run_catchup(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     source: &dyn CatchupSource,
     verifier: &dyn Verifier,
     plan: CatchupPlan,
@@ -487,7 +487,7 @@ pub fn run_catchup(
 /// # Errors
 /// [`SyncError`] on a non-media package or an apply refusal.
 pub fn apply_media_auto(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     artifact_dir: &Path,
     verifier: &dyn Verifier,
 ) -> Result<BaselineApplyOutcome, SyncError> {

@@ -7,7 +7,7 @@ use jurisearch_package::crypto::{Ed25519Verifier, TrustAnchor};
 use jurisearch_package::license::{LicenseToken, tier_is_open};
 use jurisearch_package::manifest::EmbeddedManifest;
 use jurisearch_package::signed::Signed;
-use jurisearch_storage::runtime::ManagedPostgres;
+use jurisearch_storage::backend::WriterConnection;
 use jurisearch_storage::trust::{
     LICENSE_PURPOSE, PACKAGE_PURPOSE, install_license_token, license_token_blobs,
     load_trust_anchors, token_not_after_in_future,
@@ -22,11 +22,11 @@ use crate::error::SyncError;
 /// # Errors
 /// [`SyncError`] on a DB error.
 pub fn install_trust_anchor(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     anchor: &TrustAnchor,
     purpose: &str,
 ) -> Result<(), SyncError> {
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     jurisearch_storage::trust::install_trust_anchor(&mut db, anchor, purpose)?;
     Ok(())
 }
@@ -37,12 +37,15 @@ pub fn install_trust_anchor(
 ///
 /// # Errors
 /// [`SyncError`] if the trust store is unreadable or carries malformed key material.
-pub fn load_package_verifier(client: &ManagedPostgres) -> Result<Ed25519Verifier, SyncError> {
+pub fn load_package_verifier(client: &dyn WriterConnection) -> Result<Ed25519Verifier, SyncError> {
     build_verifier(client, PACKAGE_PURPOSE)
 }
 
-fn build_verifier(client: &ManagedPostgres, purpose: &str) -> Result<Ed25519Verifier, SyncError> {
-    let mut db = client.client()?;
+fn build_verifier(
+    client: &dyn WriterConnection,
+    purpose: &str,
+) -> Result<Ed25519Verifier, SyncError> {
+    let mut db = client.writer_client()?;
     let anchors = load_trust_anchors(&mut db, purpose)?;
     Ed25519Verifier::from_anchors(&anchors).map_err(|error| {
         SyncError::reject(
@@ -61,7 +64,7 @@ fn build_verifier(client: &ManagedPostgres, purpose: &str) -> Result<Ed25519Veri
 /// [`SyncError`] with [`RejectCode::MissingEntitlement`] when no valid token covers the package, or a
 /// storage error.
 pub fn check_entitlement(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     manifest: &EmbeddedManifest,
 ) -> Result<(), SyncError> {
     let ent = &manifest.entitlement;
@@ -71,7 +74,7 @@ pub fn check_entitlement(
     }
     let corpus = ent.entitlement_corpus.as_str();
     let license_verifier = build_verifier(client, LICENSE_PURPOSE)?;
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     // EVERY trust predicate is derived from the SIGNED payload, never the denormalized columns (plan P6
     // r1 BLOCKER). The `corpus` column is only a cheap index; we then re-verify the signature, confirm
     // corpus/tier/epoch coverage on the payload, AND check the payload's own `not_after` against the DB
@@ -107,7 +110,7 @@ pub fn check_entitlement(
 /// # Errors
 /// [`SyncError`] with [`RejectCode::SignatureInvalid`] on a bad token signature, or a storage error.
 pub fn install_verified_license_token(
-    client: &ManagedPostgres,
+    client: &dyn WriterConnection,
     signed_token_json: &str,
 ) -> Result<(), SyncError> {
     let license_verifier = build_verifier(client, LICENSE_PURPOSE)?;
@@ -118,7 +121,7 @@ pub fn install_verified_license_token(
             format!("license token signature invalid: {error}"),
         )
     })?;
-    let mut db = client.client()?;
+    let mut db = client.writer_client()?;
     install_license_token(&mut db, &signed.payload, signed_token_json)?;
     Ok(())
 }

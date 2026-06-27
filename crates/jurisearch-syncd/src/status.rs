@@ -3,7 +3,8 @@
 //! — never the generations directly, so the report can never disagree with what readers see. `Serialize`
 //! so the management CLI can emit stable JSON (`status --json`); diagnostics still go to stderr.
 
-use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
+use jurisearch_storage::backend::WriterConnection;
+use jurisearch_storage::runtime::StorageError;
 use serde::Serialize;
 
 /// One installed corpus's full cursor position + compatibility stamps (P10 observability — the same
@@ -27,8 +28,8 @@ pub struct CorpusStatus {
 ///
 /// # Errors
 /// [`StorageError::PostgresClient`] on a DB error.
-pub fn corpus_status(client: &ManagedPostgres) -> Result<Vec<CorpusStatus>, StorageError> {
-    let mut db = client.client()?;
+pub fn corpus_status(client: &dyn WriterConnection) -> Result<Vec<CorpusStatus>, StorageError> {
+    let mut db = client.writer_client()?;
     let rows = db
         .query(
             "SELECT corpus, active_generation, sequence, baseline_id, schema_version, \
