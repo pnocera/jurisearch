@@ -1,0 +1,15 @@
+# Codex Review r2 — M1-B Storage Client Source
+
+No BLOCKER/WARN/NIT findings.
+
+The `search_path=public` pin is applied at every `DbClientSource` chokepoint I found. `ConnectionConfig::connect` sets `Config::options(PIN_PUBLIC_SEARCH_PATH)` before connecting, and both `ConnectionConfig` and `WriterHandle` trait impls delegate through that path (`crates/jurisearch-storage/src/backend.rs:68`, `crates/jurisearch-storage/src/backend.rs:214`, `crates/jurisearch-storage/src/backend.rs:222`). The self-managed implementation delegates to `ManagedPostgres::client`, which parses the connection string and applies the same option before connect (`crates/jurisearch-storage/src/runtime.rs:252`). The trait contract also states the fresh-client and pinned-public requirements clearly (`crates/jurisearch-storage/src/backend.rs:179`).
+
+The precedence argument is sound. PostgreSQL applies startup-packet `options=-c ...` as a client-supplied GUC source, which outranks role/database defaults such as `ALTER ROLE ... SET`; later explicit session commands can still override it. That matches the source shape here: read snapshots run `SET LOCAL search_path` for each snapshot read (`crates/jurisearch-storage/src/query.rs:149`), and generation index building uses an explicit session `SET search_path TO <generation>, public` when generation-local resolution is required (`crates/jurisearch-storage/src/generations.rs:252`). I did not find an existing syncd or serve-site path that depends on an inherited non-public session default.
+
+The seeded parity test now exercises the translated read helpers with data, not just empty shapes. It covers non-empty zone candidate output, cursor/since/recent ordering, derivable rebuild and cursor branches, coverage JSONB aggregates, JSON null rendering, archived visa pagination, pending/retry/composite cursor branches, and validates representative values after parsing where that is stronger than byte comparison (`crates/jurisearch-storage/tests/client_source_parity.rs:238`). The search-path regression also proves both the hazard and the fix: it installs a decoy schema plus role default, confirms an unpinned client reads the decoy, then verifies pinned managed/external clients read public and a translated write lands in public (`crates/jurisearch-storage/tests/client_source_parity.rs:497`).
+
+The coverage helper's producer-only contract is explicit enough for the current no-consumer state. The direct-client variant shares the same SQL as the snapshot-backed helper (`crates/jurisearch-storage/src/zone_units.rs:779`) and its documentation states that it is only equivalent in the producer/public topology and must not be used for installed active-generation coverage (`crates/jurisearch-storage/src/zone_units.rs:817`).
+
+I did not rerun the cargo tests in this review pass because the instruction constrained file writes to the review artifact, and a cargo run would update build outputs. Source review did not uncover a regression in SQL text sharing, `simple_query_text` semantics, audited helper coverage, or the thin shim shape.
+
+VERDICT: GO
