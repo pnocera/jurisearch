@@ -6,13 +6,13 @@ use crate::*;
 /// cassation decisions (verified live — inédit decisions resolve with `publication=[]` and return
 /// official zones). NOT `capp` (Cour d'appel uses RG numbers, not resolvable on Judilibre here) and
 /// NOT `jade` (administrative; Judilibre does not cover it).
-pub(crate) fn is_judilibre_cassation_source(source: Option<&str>) -> bool {
+pub fn is_judilibre_cassation_source(source: Option<&str>) -> bool {
     matches!(source, Some("cass" | "inca"))
 }
 
 /// The Judilibre `zones` key that backs a requested part, or `None` for parts not served by an
 /// official zone offset (summary stays SOMMAIRE; visa has no primary Judilibre zone).
-pub(crate) fn judilibre_zone_key(part: DecisionPart) -> Option<&'static str> {
+pub fn judilibre_zone_key(part: DecisionPart) -> Option<&'static str> {
     match part {
         DecisionPart::Motivations => Some("motivations"),
         DecisionPart::Moyens => Some("moyens"),
@@ -26,13 +26,13 @@ pub(crate) fn judilibre_zone_key(part: DecisionPart) -> Option<&'static str> {
 /// a FRESH negative row suppresses network for its TTL; a missing/expired row triggers enrichment when
 /// `--online` and the source is Cassation.
 #[derive(Debug)]
-pub(crate) enum ZoneCacheAction {
+pub enum ZoneCacheAction {
     Official(Value),
     Fallback,
     Enrich,
 }
 
-pub(crate) fn zone_cache_action(
+pub fn zone_cache_action(
     cached: &Value,
     part: DecisionPart,
     zone_key: &str,
@@ -54,7 +54,7 @@ pub(crate) fn zone_cache_action(
 
 /// Build the official-part response block from a cached zones row, or `None` if that part has no
 /// non-empty official zone.
-pub(crate) fn part_block_from_cached_zones(
+pub fn part_block_from_cached_zones(
     cached: &Value,
     part: DecisionPart,
     zone_key: &str,
@@ -88,7 +88,7 @@ pub(crate) fn part_block_from_cached_zones(
     }))
 }
 
-pub(crate) fn enrich_decision_from_judilibre(
+pub fn enrich_decision_from_judilibre(
     postgres: &ManagedPostgres,
     document_id: &str,
 ) -> Result<Option<Value>, ErrorObject> {
@@ -113,7 +113,7 @@ pub(crate) fn enrich_decision_from_judilibre(
 /// Thread-safe enrichment core: takes a caller-owned `postgres::Client` and `PisteClient` (no
 /// `&ManagedPostgres`), so eager-backfill workers can each hold their own connections. Identical
 /// behaviour to the wrapper above.
-pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericClient>(
+pub fn enrich_decision_from_judilibre_with_client<C: postgres::GenericClient>(
     db: &mut C,
     piste: &PisteClient,
     document_id: &str,
@@ -275,7 +275,7 @@ pub(crate) fn enrich_decision_from_judilibre_with_client<C: postgres::GenericCli
 
 /// Pick the Judilibre search result whose normalized `numbers` contains the local pourvoi and (when
 /// available) whose `decision_date` matches — guarding against pourvoi collisions across years.
-pub(crate) fn find_matching_judilibre_id(
+pub fn find_matching_judilibre_id(
     search: &Value,
     normalized_pourvoi: &str,
     decision_date: Option<&str>,
@@ -315,7 +315,7 @@ pub(crate) fn find_matching_judilibre_id(
 /// Normalize Judilibre `zones` (character-index offsets into `text`) into
 /// `{motivations:[{start,end,text}], moyens:[…], dispositif:[…]}`. Returns `(zones_json, any_valid)`.
 /// Offsets are CHARACTER indices (verified against the live API), so slicing is char-safe.
-pub(crate) fn normalize_judilibre_zones(decision: &Value) -> (Value, bool) {
+pub fn normalize_judilibre_zones(decision: &Value) -> (Value, bool) {
     let text_chars: Vec<char> = decision["text"]
         .as_str()
         .unwrap_or_default()
@@ -352,7 +352,7 @@ pub(crate) fn normalize_judilibre_zones(decision: &Value) -> (Value, bool) {
 /// so derivation (`zone_units`) and refresh can detect change. Stable over the Judilibre `text`, the
 /// normalized zones, the provider decision id, and the upstream `update_date` (NUL-separated so field
 /// boundaries can't collide). Same `sha256:<hex>` shape as the ingest `source_payload_hash`.
-pub(crate) fn zone_text_hash(decision: &Value, zones_json: &Value, provider_id: &str) -> String {
+pub fn zone_text_hash(decision: &Value, zones_json: &Value, provider_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(decision["text"].as_str().unwrap_or_default().as_bytes());
@@ -376,7 +376,7 @@ pub(crate) fn zone_text_hash(decision: &Value, zones_json: &Value, provider_id: 
 /// re-hit the API. Negative results get the negative TTL; upstream errors are not cached long.
 /// Client-based core so backfill workers reuse their own connection.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn cache_zone_status_with_client<C: postgres::GenericClient>(
+pub fn cache_zone_status_with_client<C: postgres::GenericClient>(
     db: &mut C,
     document_id: &str,
     source_uid: &str,
@@ -414,7 +414,7 @@ pub(crate) fn cache_zone_status_with_client<C: postgres::GenericClient>(
     upsert_decision_zones_with_client(db, &row, outbox).map_err(storage_error_object)
 }
 
-pub(crate) fn env_i64(name: &str, default: i64) -> i64 {
+pub fn env_i64(name: &str, default: i64) -> i64 {
     std::env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<i64>().ok())

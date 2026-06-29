@@ -2,8 +2,8 @@
 //! `legi_citation_routing` now lives); re-exported so the CLI's enrichment heuristics and tests keep
 //! their `crate::{find_ascii_ci, rfind_ascii_ci}` references.
 
-pub(crate) use jurisearch_query::rfind_ascii_ci;
-// `find_ascii_ci` is exercised by the CLI ascii unit tests (via `crate::*`); the routing path that used
-// it directly now lives in `jurisearch-query`, so it is test-only on the CLI side.
+// Both helpers are exercised by the CLI ascii unit tests (via `crate::*`); the enrichment heuristic
+// path that used `rfind_ascii_ci` directly now lives in `jurisearch-pipeline`, so on the CLI side these
+// are test-only re-exports.
 #[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use jurisearch_query::find_ascii_ci;
+pub(crate) use jurisearch_query::{find_ascii_ci, rfind_ascii_ci};

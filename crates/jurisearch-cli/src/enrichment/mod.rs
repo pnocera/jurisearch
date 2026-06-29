@@ -1,18 +1,10 @@
-//! Official-API enrichment orchestration (the decision-part / Judilibre-zone /
-//! legislation-citation domain shared by the read path (`fetch --part --online`) and the
-//! ingest path (`enrich-zones`, `collect/enrich-legislation-citations`)). Submodules are
-//! re-exported so callers reach the helpers as `crate::<fn>`.
-//!
-//! - `archive`: the shared `official_api_responses` archive (used by legislation + zones).
-//! - `decision_part` + `judilibre_zones`: share the `decision_zones` overlay.
-//! - `legislation`: archived-visa collection + Legifrance resolution (no `decision_zones`).
+//! Official-API enrichment orchestration. The shared archive + `decision_zones` overlay
+//! (`archive`/`decision_part`/`judilibre_zones`) moved to `jurisearch-pipeline` (work/10 M1-C) and is
+//! re-exported here so the read path (`fetch --part --online`) and tests keep their `crate::<fn>`
+//! references. The legislation-citation collection/resolution path stays in the CLI (it is
+//! index-opening and not a named producer seam); it consumes the archive helpers from the pipeline.
 
-pub(crate) mod archive;
-pub(crate) mod decision_part;
-pub(crate) mod judilibre_zones;
 pub(crate) mod legislation;
 
-pub(crate) use archive::*;
-pub(crate) use decision_part::*;
-pub(crate) use judilibre_zones::*;
+pub(crate) use jurisearch_pipeline::enrichment::*;
 pub(crate) use legislation::*;

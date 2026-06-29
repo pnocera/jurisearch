@@ -59,12 +59,3 @@ pub(crate) fn embedding_error_object(error: jurisearch_embed::EmbeddingError) ->
         _ => dependency_unavailable(message),
     }
 }
-
-pub(crate) fn embedding_error_object_with_context(
-    error: jurisearch_embed::EmbeddingError,
-    chunk_id: &str,
-) -> ErrorObject {
-    let mut object = embedding_error_object(error);
-    object.message = format!("embedding chunk `{chunk_id}` failed: {}", object.message);
-    object
-}

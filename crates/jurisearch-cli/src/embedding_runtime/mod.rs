@@ -1,21 +1,19 @@
-//! Embedding runtime hub: the query-time `PreparedQueryEmbedder` and the shared runtime-readiness
-//! gate, plus the three thematic submodules — `config` (env + TOML config loading), `pool` (the
-//! concurrent bulk embedding-endpoint scheduler), and `status` (model-cache / endpoint probes).
+//! Embedding runtime hub: the query-time `PreparedQueryEmbedder` and the env/TOML config loader
+//! (`config`). The bulk endpoint pool, model-cache/endpoint status probes, the endpoint identity, and
+//! `ensure_embedding_runtime_ready` now live in `jurisearch-pipeline` (work/10 M1-C); they are
+//! re-exported here so the CLI's status/doctor/serve surfaces keep their `crate::<fn>` references.
 
 use crate::*;
 
 mod config;
-mod pool;
-mod status;
 
 pub(crate) use config::*;
-pub(crate) use pool::*;
-pub(crate) use status::*;
+pub(crate) use jurisearch_pipeline::embedding::*;
 
 /// A query-embedding client built once and reused across many searches. Building an
 /// `OpenAiCompatibleClient` loads a tokenizer and a fresh HTTP agent, and `ensure_embedding_runtime_ready`
-/// is a network probe — paying both per query in a batch sweep (the France-LEGI runner issues up to
-/// ~192 queries) is wasteful. The index is static during a run, so one prepared embedder serves all.
+/// is a network probe — paying both per query in a batch sweep is wasteful. The index is static during a
+/// run, so one prepared embedder serves all.
 pub(crate) struct PreparedQueryEmbedder {
     pub(crate) client: OpenAiCompatibleClient,
     pub(crate) expected_fingerprint: EmbeddingFingerprint,
@@ -60,14 +58,4 @@ impl jurisearch_query::QueryEmbedder for PreparedQueryEmbedder {
             fingerprint,
         })
     }
-}
-
-pub(crate) fn ensure_embedding_runtime_ready(
-    embedding_config: &EmbeddingConfig,
-    allow_download: bool,
-) -> Result<(), ErrorObject> {
-    let model_cache = model_cache_status(embedding_config);
-    embedding_config
-        .ensure_in_process_ready(model_cache.model_present(), allow_download)
-        .map_err(embedding_error_object)
 }

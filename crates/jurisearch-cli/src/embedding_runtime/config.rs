@@ -55,14 +55,6 @@ pub(crate) struct EmbeddingPoolEndpointConfigFile {
     pub(crate) api_key_env: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EmbeddingPoolEndpoint {
-    pub(crate) base_url: String,
-    pub(crate) request_model: Option<String>,
-    pub(crate) api_key_env: Option<String>,
-    pub(crate) api_key: Option<String>,
-}
-
 pub(crate) fn embedding_config_from_env() -> EmbeddingConfig {
     loaded_embedding_config().config
 }

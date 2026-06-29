@@ -478,20 +478,8 @@ fn derive_zone_unit_rows_handles_multi_fragment_and_skips_empty() {
     );
 }
 
-#[test]
-fn worker_join_error_counts_whole_slice_as_errors() {
-    // Z2-fix: a panicked backfill worker (join -> None) must count its whole slice as errors, not
-    // silently drop those decisions from accounting.
-    let panicked = worker_outcomes_or_errors(None, 3);
-    assert_eq!(panicked.len(), 3);
-    assert!(
-        panicked
-            .iter()
-            .all(|o| matches!(o, ZoneEnrichOutcome::Error))
-    );
-    let returned = vec![ZoneEnrichOutcome::Official, ZoneEnrichOutcome::Fallback];
-    assert_eq!(worker_outcomes_or_errors(Some(returned), 2).len(), 2);
-}
+// `worker_join_error_counts_whole_slice_as_errors` moved to `jurisearch-pipeline` (work/10 M1-C)
+// alongside the extracted `worker_outcomes_or_errors` / `ZoneEnrichOutcome` it exercises.
 
 #[test]
 fn zone_text_hash_is_deterministic_and_change_sensitive() {

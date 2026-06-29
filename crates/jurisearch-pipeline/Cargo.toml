@@ -10,3 +10,19 @@ name = "jurisearch_pipeline"
 path = "src/lib.rs"
 
 [dependencies]
+jurisearch-core = { path = "../jurisearch-core" }
+jurisearch-embed = { path = "../jurisearch-embed" }
+jurisearch-ingest = { path = "../jurisearch-ingest" }
+jurisearch-official-api = { path = "../jurisearch-official-api" }
+jurisearch-storage = { path = "../jurisearch-storage" }
+postgres.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+tar.workspace = true
+tempfile.workspace = true

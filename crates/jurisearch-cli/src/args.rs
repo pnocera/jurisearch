@@ -242,15 +242,6 @@ pub(crate) enum CliEnrichZoneOrder {
     Recent,
 }
 
-impl CliEnrichZoneOrder {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Oldest => "oldest",
-            Self::Recent => "recent",
-        }
-    }
-}
-
 impl From<CliEnrichZoneOrder> for EnrichZoneOrder {
     fn from(order: CliEnrichZoneOrder) -> Self {
         match order {

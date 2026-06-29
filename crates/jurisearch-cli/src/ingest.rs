@@ -14,12 +14,29 @@ use crate::*;
 mod juri;
 mod legi;
 mod pipeline;
-mod run;
 
 pub(crate) use juri::*;
 pub(crate) use legi::*;
 pub(crate) use pipeline::*;
-pub(crate) use run::*;
+
+// The archive ingest/enrich/embed implementation moved to `jurisearch-pipeline` (work/10 M1-C). The
+// CLI keeps the thin dispatch (`emit_ingest`/`sync_payload`) + the maintenance payloads that are not
+// named producer seams (build-zone-units, legislation citations, hierarchy backfill), delegating the
+// archive runs to the library. Re-export the library's archive filter so `sync`/`emit` build it.
+pub(crate) use jurisearch_pipeline::ArchiveSyncFilter;
+
+/// Render a `jurisearch-pipeline` report `body` into the historical CLI payload by injecting the
+/// CLI-owned `index_dir` the library does not know about (serde_json sorts object keys, so insertion
+/// position does not affect the emitted JSON).
+pub(crate) fn with_index_dir(mut body: Value, index_dir: &Path) -> Value {
+    if let Value::Object(map) = &mut body {
+        map.insert(
+            "index_dir".to_owned(),
+            json!(index_dir.display().to_string()),
+        );
+    }
+    body
+}
 
 /// Incremental sync: pull a source's new delta archives into the existing index. Reuses the proven
 /// per-source ingest path (and its compatibility-based resume, which skips already-ingested members
@@ -309,47 +326,6 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
     }
 }
 
-pub(crate) fn planned_archive_manifest(archive: &PlannedArchive) -> Value {
-    json!({
-        "source": archive.source,
-        "kind": archive.kind,
-        "timestamp": archive.timestamp.to_string(),
-        "timestamp_compact": archive.timestamp.compact(),
-        "file_name": archive.file_name.as_str()
-    })
-}
-
-/// Which archives in a plan to process. The default (`incremental=false`, no `since`) processes the
-/// baseline plus every delta — the full-build behavior. `sync` uses `incremental=true` (a prior full
-/// build already ingested the baseline) plus an optional `since_compact` lower bound on delta
-/// timestamps so a sync never re-scans the entire baseline corpus.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct ArchiveSyncFilter<'a> {
-    pub(crate) incremental: bool,
-    pub(crate) since_compact: Option<&'a str>,
-}
-
-/// Ordered list of plan archives to process under `filter` (baseline first when not incremental,
-/// then deltas at/after `since_compact`). Deltas keep the planner's deterministic order.
-pub(crate) fn select_archives_to_process<'a>(
-    plan: &'a ArchivePlan,
-    filter: ArchiveSyncFilter<'_>,
-) -> Vec<&'a PlannedArchive> {
-    let mut archives = Vec::new();
-    if !filter.incremental {
-        archives.push(&plan.baseline);
-    }
-    for delta in &plan.deltas {
-        if filter
-            .since_compact
-            .is_none_or(|since| delta.timestamp.compact() >= since)
-        {
-            archives.push(delta);
-        }
-    }
-    archives
-}
-
 /// Normalize a `--since` value to the 14-digit compact archive-timestamp form for lexicographic
 /// comparison. Accepts ONLY the two documented shapes — `YYYY-MM-DD` or compact `YYYYMMDDHHMMSS` —
 /// and returns `None` for anything else (e.g. `2025/01/15`, `2025-01-15T00:00:00`, noise).
@@ -390,44 +366,14 @@ pub(crate) fn unique_run_suffix() -> String {
     format!("{nanos}-{pid}-{sequence}")
 }
 
+// Archive-run default IDs are generated inside `jurisearch-pipeline` now (the CLI passes the operator's
+// `--run-id`, or `None`). Kept here only for the run-id-uniqueness unit tests.
+#[cfg(test)]
 pub(crate) fn default_juri_run_id(source: ArchiveSource) -> String {
     format!("{}-{}", source.as_str(), unique_run_suffix())
 }
 
-pub(crate) fn maybe_quarantine_payload(
-    quarantine_dir: Option<&Path>,
-    run_id: &str,
-    archive_name: &str,
-    member_path: &str,
-    bytes: &[u8],
-) -> Result<bool, StorageError> {
-    let Some(quarantine_dir) = quarantine_dir else {
-        return Ok(false);
-    };
-    let run_dir = quarantine_dir.join(sanitize_quarantine_component(run_id));
-    fs::create_dir_all(&run_dir).map_err(StorageError::Io)?;
-    let file_name = format!(
-        "{}__{}",
-        sanitize_quarantine_component(archive_name),
-        sanitize_quarantine_component(member_path)
-    );
-    fs::write(run_dir.join(file_name), bytes).map_err(StorageError::Io)?;
-    Ok(true)
-}
-
-pub(crate) fn sanitize_quarantine_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
+#[cfg(test)]
 pub(crate) fn default_legi_run_id() -> String {
     format!("legi-{}", unique_run_suffix())
 }

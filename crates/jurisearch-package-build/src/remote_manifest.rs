@@ -21,10 +21,11 @@ use jurisearch_package::sequence::PackageSequence;
 use jurisearch_package::signed::Signed;
 use jurisearch_package::{Corpus, KeyId, PackageKind, Signer};
 
+use jurisearch_storage::backend::DbClientSource;
 use jurisearch_storage::package_catalog::{
     CatalogRow, acquire_corpus_build_lock, catalog_rows_for_corpus, release_corpus_build_lock,
 };
-use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
+use jurisearch_storage::runtime::StorageError;
 
 use crate::error::BuildError;
 use crate::publish::{artifact_dir_size_bytes, published_package_dir};
@@ -60,7 +61,7 @@ pub struct RemoteManifestParams {
 /// [`BuildError`] if no media root is published, an artifact is missing, a catalog/embedded digest
 /// disagree, the retained chain has a gap, or on a DB/IO/signing failure.
 pub fn build_remote_manifest(
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     published_root: &Path,
     signer: &dyn Signer,

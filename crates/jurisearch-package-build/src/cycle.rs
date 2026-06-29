@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use jurisearch_package::Signer;
 
-use jurisearch_storage::runtime::ManagedPostgres;
+use jurisearch_storage::backend::DbClientSource;
 
 use crate::error::BuildError;
 use crate::incremental::{IncrementalParams, build_incremental};
@@ -57,7 +57,7 @@ pub struct ProducerCycleReport {
 /// # Errors
 /// [`BuildError`] on a build/publish/manifest/DB/IO/signing failure.
 pub fn producer_cycle(
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     published_root: &Path,
     build_dir: &Path,

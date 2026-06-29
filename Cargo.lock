@@ -984,6 +984,7 @@ dependencies = [
  "jurisearch-embed",
  "jurisearch-ingest",
  "jurisearch-official-api",
+ "jurisearch-pipeline",
  "jurisearch-query",
  "jurisearch-render",
  "jurisearch-storage",
@@ -1122,6 +1123,22 @@ dependencies = [
 [[package]]
 name = "jurisearch-pipeline"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+ "jurisearch-core",
+ "jurisearch-embed",
+ "jurisearch-ingest",
+ "jurisearch-official-api",
+ "jurisearch-storage",
+ "postgres",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "url",
+]
 
 [[package]]
 name = "jurisearch-query"

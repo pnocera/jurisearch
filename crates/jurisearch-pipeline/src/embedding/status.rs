@@ -4,26 +4,26 @@
 
 use crate::*;
 
-pub(crate) const MODEL_CACHE_REQUIRED_FILES: &[&str] = &["model.onnx", "tokenizer.json"];
+pub const MODEL_CACHE_REQUIRED_FILES: &[&str] = &["model.onnx", "tokenizer.json"];
 
-pub(crate) const LOOPBACK_ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+pub const LOOPBACK_ENDPOINT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
-pub(crate) struct ModelCacheStatus {
-    pub(crate) required: bool,
-    pub(crate) model_dir: PathBuf,
-    pub(crate) model_cache_key: String,
-    pub(crate) model_path: Option<PathBuf>,
-    pub(crate) required_files: Vec<String>,
-    pub(crate) missing_files: Vec<String>,
+pub struct ModelCacheStatus {
+    pub required: bool,
+    pub model_dir: PathBuf,
+    pub model_cache_key: String,
+    pub model_path: Option<PathBuf>,
+    pub required_files: Vec<String>,
+    pub missing_files: Vec<String>,
 }
 
 impl ModelCacheStatus {
-    pub(crate) fn model_present(&self) -> bool {
+    pub fn model_present(&self) -> bool {
         self.required && self.missing_files.is_empty()
     }
 
-    pub(crate) fn state(&self) -> &'static str {
+    pub fn state(&self) -> &'static str {
         if !self.required {
             "not_required"
         } else if self.model_present() {
@@ -34,7 +34,7 @@ impl ModelCacheStatus {
     }
 }
 
-pub(crate) fn model_cache_status(config: &EmbeddingConfig) -> ModelCacheStatus {
+pub fn model_cache_status(config: &EmbeddingConfig) -> ModelCacheStatus {
     let model_dir = model_cache_dir();
     let required = matches!(config.provider, EmbeddingProvider::InProcess);
     let model_cache_key = model_cache_key(&config.model);
@@ -71,7 +71,7 @@ pub(crate) fn model_cache_status(config: &EmbeddingConfig) -> ModelCacheStatus {
     }
 }
 
-pub(crate) fn model_cache_status_json(status: &ModelCacheStatus) -> Value {
+pub fn model_cache_status_json(status: &ModelCacheStatus) -> Value {
     json!({
         "required": status.required,
         "state": status.state(),
@@ -84,9 +84,7 @@ pub(crate) fn model_cache_status_json(status: &ModelCacheStatus) -> Value {
     })
 }
 
-pub(crate) fn embedding_pool_endpoints_status_json(
-    endpoints: &[EmbeddingPoolEndpoint],
-) -> Vec<Value> {
+pub fn embedding_pool_endpoints_status_json(endpoints: &[EmbeddingPoolEndpoint]) -> Vec<Value> {
     endpoints
         .iter()
         .map(|endpoint| {
@@ -100,7 +98,7 @@ pub(crate) fn embedding_pool_endpoints_status_json(
         .collect()
 }
 
-pub(crate) fn model_cache_dir() -> PathBuf {
+pub fn model_cache_dir() -> PathBuf {
     if let Some(model_dir) = std::env::var_os("JURISEARCH_MODEL_DIR")
         && !model_dir.is_empty()
     {
@@ -124,7 +122,7 @@ pub(crate) fn model_cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".jurisearch").join("models"))
 }
 
-pub(crate) fn model_cache_key(model: &str) -> String {
+pub fn model_cache_key(model: &str) -> String {
     let mut key = String::with_capacity(model.len());
     for character in model.trim().chars() {
         if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
@@ -142,7 +140,7 @@ pub(crate) fn model_cache_key(model: &str) -> String {
     }
 }
 
-pub(crate) fn embedding_endpoint_status_json(config: &EmbeddingConfig) -> Value {
+pub fn embedding_endpoint_status_json(config: &EmbeddingConfig) -> Value {
     if !matches!(config.provider, EmbeddingProvider::OpenAiCompatible) {
         return json!({
             "checked": false,
@@ -196,7 +194,7 @@ pub(crate) fn embedding_endpoint_status_json(config: &EmbeddingConfig) -> Value 
     }
 }
 
-pub(crate) fn loopback_endpoint_reachable(base_url: &str) -> Result<bool, String> {
+pub fn loopback_endpoint_reachable(base_url: &str) -> Result<bool, String> {
     let parsed =
         Url::parse(base_url).map_err(|error| format!("invalid embedding base_url: {error}"))?;
     let Some(host) = parsed.host_str() else {

@@ -1,18 +1,11 @@
 use std::{
-    borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{self, BufRead, Write},
-    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc,
-    },
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use jurisearch_core::{
@@ -30,47 +23,23 @@ use jurisearch_embed::{
     EmbeddingConfig, EmbeddingFingerprint, EmbeddingProvider, OpenAiCompatibleClient,
     PHASE0_EMBEDDING_DIMENSION, PHASE0_EMBEDDING_MODEL,
 };
-use jurisearch_ingest::{
-    archive::{
-        ArchiveMember, ArchivePlan, ArchiveSource, ArchiveVisit, DEFAULT_MEMBER_BYTE_LIMIT,
-        PlannedArchive, for_each_xml_member_until, plan_from_dir,
-    },
-    juri::{JuriParseError, ParsedJuriXml, parse_juri_member},
-    legi::{LegiParseError, ParsedLegiXml, parse_legi_member, source_payload_hash},
-};
-use jurisearch_official_api::{
-    OfficialApiConfig, OfficialApiExchange, OfficialApiOutcome, PisteClient,
-};
-use jurisearch_storage::dense::ChunkEmbeddingInput;
+use jurisearch_ingest::archive::{ArchiveSource, DEFAULT_MEMBER_BYTE_LIMIT, plan_from_dir};
+use jurisearch_official_api::{OfficialApiConfig, OfficialApiOutcome, PisteClient};
 use jurisearch_storage::{
     authority::{
         AUTHORITY_DEFAULT_BAND, AUTHORITY_RERANK_WINDOW, AuthorityTier, authority_rerank,
         authority_tier, effective_authority_weight,
     },
     citation::{CitationLookupQuery, citation_lookup_json},
-    decision_zones::{
-        UpsertDecisionZones, decision_resolution_metadata_json,
-        decision_resolution_metadata_with_client, decision_zones_json,
-        upsert_decision_zones_with_client,
-    },
-    dense::{
-        DENSE_VECTOR_DIMENSION, DenseRebuildSpec, finalize_dense_rebuild,
-        load_chunk_embedding_inputs,
-    },
     france_juris::{
         FranceJurisGoldLimits, FranceJurisZoneGoldLimits, france_juris_gold_json,
         france_juris_index_revision, france_juris_zone_gold_json,
     },
     france_legi::{FranceLegiGoldLimits, france_legi_gold_json},
     ingest_accounting::{
-        IngestCompatibility, IngestErrorInput, IngestHealthReport, IngestMemberInput,
-        IngestMemberStatus, IngestResumeAction, IngestRunInput, IngestRunStatus,
-        ReplaySnapshotMode, ReplaySnapshotReport, finish_ingest_run_with_client,
-        ingest_resume_decision_with_client, invalidate_cached_query_readiness,
-        load_ingest_health_with_replay_snapshot_mode, record_ingest_error_with_client,
-        record_ingest_member_with_client, refresh_replay_snapshot, resolve_query_readiness,
-        start_ingest_run_with_client, update_ingest_member_status_with_client,
-        update_ingest_run_manifest_with_client,
+        IngestHealthReport, ReplaySnapshotMode, ReplaySnapshotReport,
+        invalidate_cached_query_readiness, load_ingest_health_with_replay_snapshot_mode,
+        refresh_replay_snapshot, resolve_query_readiness,
     },
     legislation_citations::{
         InsertCitationOccurrence, finalize_citation_occurrence_counts,
@@ -79,15 +48,7 @@ use jurisearch_storage::{
         update_citation_resolution_with_client, upsert_citation_resolution_pending_with_client,
     },
     migrations::CURRENT_SCHEMA_VERSION,
-    official_api_archive::{InsertOfficialApiResponse, insert_official_api_response_with_client},
-    projection::{
-        ChunkEmbeddingInsert, DocumentProjectionStatements, LegiHierarchyBackfillScope,
-        LegiMetadataRoot, LegiProjectionStatements, backfill_legi_article_hierarchy_from_metadata,
-        backfill_legi_article_hierarchy_from_metadata_scoped, insert_chunk_embeddings,
-        insert_decision_documents_with_statements, insert_legi_documents_with_statements,
-        insert_legi_metadata_roots_with_client, prepare_document_projection_statements,
-        prepare_legi_projection_statements,
-    },
+    projection::backfill_legi_article_hierarchy_from_metadata,
     retrieval::{
         DecisionFilters, GroupBy, HybridCandidateQuery, RelatedRelation, RetrievalMode,
         RetrievalOptions, corpus_source_coverage_json, corpus_stats_json, document_diff_json,
@@ -96,11 +57,8 @@ use jurisearch_storage::{
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
     zone_units::{
-        ZoneUnitEmbeddingInsert, ZoneUnitRow, enrich_zone_candidates_json,
-        finalize_zone_dense_rebuild, insert_zone_unit_embeddings,
-        load_derivable_decision_zones_json, load_zone_unit_embedding_inputs,
-        replace_zone_units_for_document, zone_resolver_reachable_json,
-        zone_retrieval_coverage_json,
+        ZoneUnitRow, load_derivable_decision_zones_json, replace_zone_units_for_document,
+        zone_resolver_reachable_json, zone_retrieval_coverage_json,
     },
 };
 use serde::{Deserialize, Deserializer};
@@ -130,6 +88,9 @@ mod site;
 mod status;
 
 use crate::args::*;
+// The ASCII case-insensitive search helpers are CLI test-only now (the enrichment heuristics that used
+// them moved to `jurisearch-pipeline`); keep the glob for the ascii unit tests.
+#[cfg_attr(not(test), allow(unused_imports))]
 use crate::ascii::*;
 use crate::citation::*;
 use crate::date::*;
@@ -147,19 +108,13 @@ use crate::request::*;
 use crate::retrieval::*;
 use crate::status::*;
 
-const LEGI_PARSER_VERSION: &str = "legi_article_metadata_parser:v4";
-const CANONICAL_SCHEMA_VERSION: &str = "canonical_record:v3";
 const CLI_CODE_VERSION: &str = concat!("jurisearch-cli:", env!("CARGO_PKG_VERSION"));
-const LEGI_INGEST_TRANSACTION_BATCH_SIZE: usize = 128;
-const LEGI_INGEST_TRANSACTION_BATCH_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 pub(crate) const EMBED_CHUNKS_DEFAULT_BATCH_SIZE: usize = 32;
 pub(crate) const EMBED_CHUNKS_DEFAULT_POOL_CONCURRENCY: usize = 4;
 /// Conservative default for concurrent Judilibre requests during zone backfill (each decision is ~2
 /// calls; stay well under the live ~20 req/s burst limit). `--concurrency 1` is the deterministic
 /// sequential fallback.
 pub(crate) const ENRICH_ZONES_DEFAULT_CONCURRENCY: usize = 6;
-/// Candidate page size for the zone backfill keyset scan.
-const ENRICH_ZONES_PAGE_SIZE: u32 = 200;
 /// Page size for scanning archived decisions during legislation-citation collection (no network).
 const COLLECT_CITATIONS_PAGE_SIZE: u32 = 500;
 /// Page size for resolving deduped legislation citations against Legifrance (sequential, network).
@@ -254,11 +209,6 @@ pub(crate) fn emit_help(help: HelpCommand) -> anyhow::Result<()> {
         }
     }
 }
-
-// ===== DILA bulk jurisprudence (decision) ingestion ==========================================
-
-/// Number of pending chunks loaded per page when streaming the full embed run, bounding peak memory.
-const EMBED_STREAM_PAGE_SIZE: u32 = 20_000;
 
 // ===== Phase 2 gate (full French juridic search) ==============================================
 

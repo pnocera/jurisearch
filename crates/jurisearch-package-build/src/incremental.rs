@@ -30,6 +30,7 @@ use jurisearch_package::sequence::PackageSequence;
 use jurisearch_package::signed::Signed;
 use jurisearch_package::{PACKAGE_FORMAT_VERSION, PackageKind, Signer};
 
+use jurisearch_storage::backend::DbClientSource;
 use jurisearch_storage::generations::{primary_key_columns, replicated_table_columns};
 use jurisearch_storage::incremental::{replace_set_rows, row_object_select};
 use jurisearch_storage::outbox::{
@@ -40,9 +41,7 @@ use jurisearch_storage::package_catalog::{
     LatestPackage, PackageCatalogRow, acquire_corpus_build_lock, insert_package_catalog_row,
     latest_package_for_corpus, release_corpus_build_lock,
 };
-use jurisearch_storage::runtime::{
-    ManagedPostgres, StorageError, sql_identifier, sql_string_literal,
-};
+use jurisearch_storage::runtime::{StorageError, sql_identifier, sql_string_literal};
 use postgres::GenericClient;
 use serde_json::Value;
 
@@ -95,7 +94,7 @@ pub struct IncrementalBuildReport {
 /// # Errors
 /// [`BuildError`] on a DB/IO/canonicalisation/signing failure, or if no baseline exists yet.
 pub fn build_incremental(
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     artifact_dir: &Path,
     signer: &dyn Signer,

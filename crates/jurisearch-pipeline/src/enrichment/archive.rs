@@ -8,7 +8,7 @@ use crate::*;
 /// `postgres::Client` per worker; without this, a mutation could commit while its later outbox insert
 /// fails, leaving a silent diff gap. `db.transaction()` is a real transaction for a `Client` and a
 /// savepoint when already inside one, so this is safe in every calling context.
-pub(crate) fn in_outbox_txn<C, T>(
+pub fn in_outbox_txn<C, T>(
     db: &mut C,
     unit: impl FnOnce(&mut postgres::Transaction<'_>) -> Result<T, ErrorObject>,
 ) -> Result<T, ErrorObject>
@@ -29,7 +29,7 @@ where
 /// wrapper that opens its own DB client + `PisteClient` and delegates to the thread-safe core, so the
 /// shipped `fetch --part --online` path is unchanged while the eager backfill can fan out workers.
 /// `sha256:<hex>` of a UTF-8 body, for the archive's `response_body_sha256` integrity column.
-pub(crate) fn sha256_hex(data: &str) -> String {
+pub fn sha256_hex(data: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
@@ -48,7 +48,7 @@ pub(crate) fn sha256_hex(data: &str) -> String {
 // citation key, explicit corpus); bundling them into a struct would only move the verbosity to the
 // call sites without improving clarity.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn archive_exchange<C: postgres::GenericClient>(
+pub fn archive_exchange<C: postgres::GenericClient>(
     db: &mut C,
     exchange: &OfficialApiExchange,
     api_environment: &str,
@@ -94,7 +94,7 @@ pub(crate) fn archive_exchange<C: postgres::GenericClient>(
 
 /// Durable accounting for a decision we touched but could NOT request (no parser-valid pourvoi): a
 /// `provider='local'`, `http_method='LOCAL'` archive row, so every touched decision is recorded.
-pub(crate) fn archive_local_unsupported<C: postgres::GenericClient>(
+pub fn archive_local_unsupported<C: postgres::GenericClient>(
     db: &mut C,
     document_id: &str,
     source_uid: &str,

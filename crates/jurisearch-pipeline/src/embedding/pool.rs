@@ -4,58 +4,60 @@
 
 use crate::*;
 
-pub(crate) const EMBEDDING_ENDPOINT_MAX_ATTEMPTS: usize = 3;
+use crate::embedding::endpoint::nonempty_string;
+
+pub const EMBEDDING_ENDPOINT_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Clone)]
-pub(crate) struct EmbeddingEndpointPoolConfig {
-    pub(crate) base_url: String,
-    pub(crate) request_model: Option<String>,
-    pub(crate) config: EmbeddingConfig,
-    pub(crate) expected_fingerprint: EmbeddingFingerprint,
+pub struct EmbeddingEndpointPoolConfig {
+    pub base_url: String,
+    pub request_model: Option<String>,
+    pub config: EmbeddingConfig,
+    pub expected_fingerprint: EmbeddingFingerprint,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EmbeddingEndpointState {
-    pub(crate) base_url: String,
-    pub(crate) request_model: Option<String>,
-    pub(crate) outstanding: usize,
-    pub(crate) requests: usize,
-    pub(crate) chunks: usize,
-    pub(crate) truncated_inputs: usize,
-    pub(crate) failures: usize,
+pub struct EmbeddingEndpointState {
+    pub base_url: String,
+    pub request_model: Option<String>,
+    pub outstanding: usize,
+    pub requests: usize,
+    pub chunks: usize,
+    pub truncated_inputs: usize,
+    pub failures: usize,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EmbeddingBatchWork {
-    pub(crate) inputs: Vec<ChunkEmbeddingInput>,
+pub struct EmbeddingBatchWork {
+    pub inputs: Vec<ChunkEmbeddingInput>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct OwnedChunkEmbedding {
-    pub(crate) chunk_id: String,
-    pub(crate) embedding_literal: String,
+pub struct OwnedChunkEmbedding {
+    pub chunk_id: String,
+    pub embedding_literal: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EmbeddingBatchSuccess {
-    pub(crate) embeddings: Vec<OwnedChunkEmbedding>,
-    pub(crate) truncated_inputs: usize,
+pub struct EmbeddingBatchSuccess {
+    pub embeddings: Vec<OwnedChunkEmbedding>,
+    pub truncated_inputs: usize,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EmbeddingBatchFailure {
-    pub(crate) error: ErrorObject,
+pub struct EmbeddingBatchFailure {
+    pub error: ErrorObject,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EmbeddingPoolRun {
-    pub(crate) chunks_considered: usize,
-    pub(crate) embeddings_inserted: usize,
-    pub(crate) embedding_inputs_truncated: usize,
-    pub(crate) endpoint_stats: Vec<Value>,
+pub struct EmbeddingPoolRun {
+    pub chunks_considered: usize,
+    pub embeddings_inserted: usize,
+    pub embedding_inputs_truncated: usize,
+    pub endpoint_stats: Vec<Value>,
 }
 
-pub(crate) fn embedding_endpoint_pool_configs(
+pub fn embedding_endpoint_pool_configs(
     config: &EmbeddingConfig,
     pool_endpoints: &[EmbeddingPoolEndpoint],
     expected_fingerprint: &EmbeddingFingerprint,
@@ -122,9 +124,7 @@ pub(crate) fn embedding_endpoint_pool_configs(
         .collect()
 }
 
-pub(crate) fn legacy_embedding_pool_endpoints(
-    config: &EmbeddingConfig,
-) -> Vec<EmbeddingPoolEndpoint> {
+pub fn legacy_embedding_pool_endpoints(config: &EmbeddingConfig) -> Vec<EmbeddingPoolEndpoint> {
     let mut endpoints = config
         .base_urls
         .iter()
@@ -152,7 +152,7 @@ pub(crate) fn legacy_embedding_pool_endpoints(
     dedupe_embedding_pool_endpoints(endpoints)
 }
 
-pub(crate) fn dedupe_embedding_pool_endpoints(
+pub fn dedupe_embedding_pool_endpoints(
     endpoints: Vec<EmbeddingPoolEndpoint>,
 ) -> Vec<EmbeddingPoolEndpoint> {
     let mut deduped = Vec::new();
@@ -169,7 +169,7 @@ pub(crate) fn dedupe_embedding_pool_endpoints(
 }
 
 /// Accumulate per-endpoint embedding stats across streamed pages, summing counters per `base_url`.
-pub(crate) fn merge_embedding_endpoint_stats(accumulator: &mut Vec<Value>, page: Vec<Value>) {
+pub fn merge_embedding_endpoint_stats(accumulator: &mut Vec<Value>, page: Vec<Value>) {
     for stat in page {
         let base_url = stat
             .get("base_url")
@@ -198,16 +198,28 @@ pub(crate) fn merge_embedding_endpoint_stats(accumulator: &mut Vec<Value>, page:
 /// Generic embedding-pool driver: embeds `inputs` across the endpoint pool and applies `insert_batch`
 /// to each completed batch's `(id, literal)` results. Identical for chunks and zone units (the workers
 /// are id/text-agnostic); only the storage insert differs, so it is injected by the caller.
-pub(crate) fn embed_and_insert_with_pool<F>(
+pub fn embed_and_insert_with_pool<F>(
     inputs: Vec<ChunkEmbeddingInput>,
     endpoint_configs: &[EmbeddingEndpointPoolConfig],
     batch_size: usize,
     pool_concurrency: usize,
-    insert_batch: F,
+    mut insert_batch: F,
 ) -> Result<EmbeddingPoolRun, ErrorObject>
 where
-    F: Fn(&[OwnedChunkEmbedding]) -> Result<usize, ErrorObject>,
+    F: FnMut(&[OwnedChunkEmbedding]) -> Result<usize, ErrorObject>,
 {
+    // Belt-and-suspenders: the library entrypoint (`embed_documents`) rejects these zero values, but
+    // guard here too — `inputs.chunks(0)` panics and `pool_concurrency == 0` spawns no workers (hang).
+    if batch_size == 0 {
+        return Err(ErrorObject::bad_input(
+            "embedding batch_size must be at least 1",
+        ));
+    }
+    if pool_concurrency == 0 {
+        return Err(ErrorObject::bad_input(
+            "embedding pool_concurrency must be at least 1",
+        ));
+    }
     let chunks_considered = inputs.len();
     let work_queue = inputs
         .chunks(batch_size)
@@ -321,8 +333,8 @@ where
 /// Embed chunk inputs across the pool and upsert into `chunk_embeddings` (thin wrapper over the generic
 /// driver; behaviour unchanged).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn embed_and_insert_chunks_with_pool(
-    postgres: &ManagedPostgres,
+pub fn embed_and_insert_chunks_with_pool(
+    client: &mut postgres::Client,
     inputs: Vec<ChunkEmbeddingInput>,
     endpoint_configs: &[EmbeddingEndpointPoolConfig],
     embedding_fingerprint: &str,
@@ -336,8 +348,8 @@ pub(crate) fn embed_and_insert_chunks_with_pool(
         endpoint_configs,
         batch_size,
         pool_concurrency,
-        // `insert_batch` is invoked on the main thread (not the embedding workers), so capturing the
-        // borrowed OutboxContext here is sound.
+        // `insert_batch` is invoked on the main thread (not the embedding workers), so reusing this
+        // single producer write client + capturing the borrowed OutboxContext here is sound.
         |embeddings| {
             let inserts = embeddings
                 .iter()
@@ -349,7 +361,8 @@ pub(crate) fn embed_and_insert_chunks_with_pool(
                     dimension: embedding_config.dimension,
                 })
                 .collect::<Vec<_>>();
-            insert_chunk_embeddings(postgres, &inserts, outbox).map_err(storage_error_object)
+            insert_chunk_embeddings_with_client(client, &inserts, outbox)
+                .map_err(storage_error_object)
         },
     )
 }
@@ -358,8 +371,8 @@ pub(crate) fn embed_and_insert_chunks_with_pool(
 /// chunk wrapper; the only difference is the storage target). `OwnedChunkEmbedding.chunk_id` carries the
 /// `zone_unit_id` here.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn embed_and_insert_zone_units_with_pool(
-    postgres: &ManagedPostgres,
+pub fn embed_and_insert_zone_units_with_pool(
+    client: &mut postgres::Client,
     inputs: Vec<ChunkEmbeddingInput>,
     endpoint_configs: &[EmbeddingEndpointPoolConfig],
     embedding_fingerprint: &str,
@@ -384,12 +397,13 @@ pub(crate) fn embed_and_insert_zone_units_with_pool(
                     dimension: embedding_config.dimension,
                 })
                 .collect::<Vec<_>>();
-            insert_zone_unit_embeddings(postgres, &inserts, outbox).map_err(storage_error_object)
+            insert_zone_unit_embeddings_with_client(client, &inserts, outbox)
+                .map_err(storage_error_object)
         },
     )
 }
 
-pub(crate) fn embedding_pool_worker(
+pub fn embedding_pool_worker(
     work_queue: Arc<Mutex<VecDeque<EmbeddingBatchWork>>>,
     endpoint_configs: Arc<Vec<EmbeddingEndpointPoolConfig>>,
     endpoint_states: Arc<Mutex<Vec<EmbeddingEndpointState>>>,
@@ -442,7 +456,7 @@ pub(crate) fn embedding_pool_worker(
     }
 }
 
-pub(crate) fn acquire_least_outstanding_endpoint(
+pub fn acquire_least_outstanding_endpoint(
     endpoint_states: &Arc<Mutex<Vec<EmbeddingEndpointState>>>,
 ) -> usize {
     let mut states = endpoint_states
@@ -459,7 +473,7 @@ pub(crate) fn acquire_least_outstanding_endpoint(
     endpoint_index
 }
 
-pub(crate) fn release_embedding_endpoint(
+pub fn release_embedding_endpoint(
     endpoint_states: &Arc<Mutex<Vec<EmbeddingEndpointState>>>,
     endpoint_index: usize,
     chunk_count: usize,
@@ -480,7 +494,7 @@ pub(crate) fn release_embedding_endpoint(
     }
 }
 
-pub(crate) fn embed_batch_on_endpoint(
+pub fn embed_batch_on_endpoint(
     client: &OpenAiCompatibleClient,
     endpoint_config: &EmbeddingEndpointPoolConfig,
     work: &EmbeddingBatchWork,
@@ -535,7 +549,7 @@ pub(crate) fn embed_batch_on_endpoint(
     })
 }
 
-pub(crate) fn embed_batch_with_retries(
+pub fn embed_batch_with_retries(
     client: &OpenAiCompatibleClient,
     input_texts: &[&str],
     expected_fingerprint: &EmbeddingFingerprint,
@@ -554,7 +568,7 @@ pub(crate) fn embed_batch_with_retries(
     }
 }
 
-pub(crate) fn retryable_embedding_error(error: &jurisearch_embed::EmbeddingError) -> bool {
+pub fn retryable_embedding_error(error: &jurisearch_embed::EmbeddingError) -> bool {
     matches!(
         error,
         jurisearch_embed::EmbeddingError::Endpoint(_)
@@ -562,7 +576,7 @@ pub(crate) fn retryable_embedding_error(error: &jurisearch_embed::EmbeddingError
     )
 }
 
-pub(crate) fn embedding_request_text<'a>(
+pub fn embedding_request_text<'a>(
     input: &'a str,
     config: &EmbeddingConfig,
 ) -> (Cow<'a, str>, bool) {
@@ -580,7 +594,7 @@ pub(crate) fn embedding_request_text<'a>(
     (Cow::Borrowed(input), false)
 }
 
-pub(crate) fn embedding_request_char_budget(config: &EmbeddingConfig) -> Option<usize> {
+pub fn embedding_request_char_budget(config: &EmbeddingConfig) -> Option<usize> {
     let token_char_budget = config
         .max_estimated_tokens
         .map(|tokens| tokens.saturating_mul(config.estimated_chars_per_token.max(1)));

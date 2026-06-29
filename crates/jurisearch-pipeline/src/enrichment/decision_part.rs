@@ -4,7 +4,7 @@ use crate::*;
 
 /// A named jurisprudence-decision part requested via `fetch --part`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DecisionPart {
+pub enum DecisionPart {
     Summary,
     Visa,
     Dispositif,
@@ -13,7 +13,7 @@ pub(crate) enum DecisionPart {
 }
 
 impl DecisionPart {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "summary" | "sommaire" => Some(Self::Summary),
             "visa" => Some(Self::Visa),
@@ -24,7 +24,7 @@ impl DecisionPart {
         }
     }
 
-    pub(crate) fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Summary => "summary",
             Self::Visa => "visa",
@@ -39,7 +39,7 @@ impl DecisionPart {
 /// `not_applicable`. DILA bulk decisions have NO official Judilibre zones, so `summary` comes from the
 /// `SOMMAIRE` chunk and every other part is best-effort `heuristic` (or `unavailable`) — never claimed
 /// as an official zone. Each part reports `zone_provenance` and `official_zones: false`.
-pub(crate) fn annotate_fetched_parts(
+pub fn annotate_fetched_parts(
     postgres: &ManagedPostgres,
     response: &mut Value,
     part: DecisionPart,
@@ -124,7 +124,7 @@ pub(crate) fn annotate_fetched_parts(
 /// or (when `online`) by resolving the decision on Judilibre and caching the result. `None` means "no
 /// official zone; use the heuristic/unavailable fallback". A transient upstream failure is cached and
 /// returns `None` (it never fails the whole `fetch`).
-pub(crate) fn official_decision_part(
+pub fn official_decision_part(
     postgres: &ManagedPostgres,
     document_id: &str,
     source: &str,
@@ -152,13 +152,13 @@ pub(crate) fn official_decision_part(
     }
 }
 
-pub(crate) struct ExtractedPart {
-    pub(crate) text: Option<String>,
-    pub(crate) provenance: &'static str,
-    pub(crate) note: &'static str,
+pub struct ExtractedPart {
+    pub text: Option<String>,
+    pub provenance: &'static str,
+    pub note: &'static str,
 }
 
-pub(crate) fn collect_decision_summary(document: &Value) -> Option<String> {
+pub fn collect_decision_summary(document: &Value) -> Option<String> {
     let chunks = document["chunks"].as_array()?;
     let summary = chunks
         .iter()
@@ -169,7 +169,7 @@ pub(crate) fn collect_decision_summary(document: &Value) -> Option<String> {
     (!summary.trim().is_empty()).then_some(summary)
 }
 
-pub(crate) fn extract_decision_part(
+pub fn extract_decision_part(
     part: DecisionPart,
     body: &str,
     summary: Option<&str>,
@@ -208,7 +208,7 @@ pub(crate) fn extract_decision_part(
 /// accented French text and mis-slice/panic); every offset is a valid UTF-8 byte index. ASCII markers
 /// match case-insensitively (`DECIDE`/`Decide`/`decide`); the accented `Décide` form is matched
 /// exactly in its common casings since `rfind_ascii_ci` only folds ASCII bytes.
-pub(crate) fn heuristic_dispositif(body: &str) -> Option<String> {
+pub fn heuristic_dispositif(body: &str) -> Option<String> {
     const ASCII_MARKERS: &[&str] = &["PAR CES MOTIFS", "D E C I D E", "DECIDE"];
     const ACCENTED_MARKERS: &[&str] = &["DÉCIDE", "Décide", "décide"];
     let start = ASCII_MARKERS
@@ -227,7 +227,7 @@ pub(crate) fn heuristic_dispositif(body: &str) -> Option<String> {
 /// Heuristic visa: the FIRST contiguous block of `Vu …` lines (the opening visa), skipping any header
 /// lines before it and stopping at the first substantive non-`Vu` line. Restricting to the leading
 /// block prevents a later reasoning/quoted line that happens to start with `Vu` from being returned.
-pub(crate) fn heuristic_visa(body: &str) -> Option<String> {
+pub fn heuristic_visa(body: &str) -> Option<String> {
     let mut visa = Vec::new();
     let mut started = false;
     for line in body.lines() {
