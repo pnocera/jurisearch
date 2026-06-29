@@ -16,12 +16,16 @@
 
 pub mod catchup;
 pub mod connection;
+pub mod demo;
 pub mod doctor;
 pub mod embed;
+pub mod fixture;
 pub mod lifecycle;
 pub mod provision;
 pub mod readiness;
+pub mod smoke;
 pub mod trust;
+pub mod watchdog;
 
 use serde::Serialize;
 

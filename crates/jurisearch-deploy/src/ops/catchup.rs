@@ -62,6 +62,30 @@ impl CatchupGreen {
     }
 }
 
+/// PURE: the `demo up` start policy. Unlike non-demo `site install` (which tolerates a single async pass),
+/// `demo up` must NOT proceed to the readiness gate / site start unless EVERY corpus caught up to the
+/// verified producer head. This maps a (bounded-wait) catch-up outcome to `None` (GREEN — proceed) or
+/// `Some(reason)` (NOT GREEN — a hard failure that refuses the start). Unit-tested without a live DB.
+#[must_use]
+pub fn demo_catchup_blocking_reason(
+    corpus: &str,
+    green: CatchupGreen,
+    timeout_secs: u64,
+) -> Option<String> {
+    match green {
+        CatchupGreen::Green => None,
+        CatchupGreen::NoActiveCorpus => Some(format!(
+            "demo up FAILED: catch-up for `{corpus}` is NOT GREEN — no active corpus after catch-up \
+             within {timeout_secs}s; refusing to start the site (verify the fixture artifact and corpus \
+             entitlement)"
+        )),
+        CatchupGreen::NotAtHead { cursor, head } => Some(format!(
+            "demo up FAILED: catch-up for `{corpus}` is NOT GREEN — cursor {cursor} is not at verified \
+             head {head} within {timeout_secs}s; refusing to start the site"
+        )),
+    }
+}
+
 /// The result of one corpus catch-up attempt.
 #[derive(Debug, Clone)]
 pub struct CorpusCatchupResult {
@@ -150,6 +174,32 @@ mod tests {
         };
         assert_eq!(classify_catchup(state), CatchupGreen::Green);
         assert!(classify_catchup(state).is_green());
+    }
+
+    #[test]
+    fn demo_up_proceeds_only_when_catch_up_is_green() {
+        // GREEN → no blocking reason → `demo up` proceeds to readiness/start.
+        assert_eq!(
+            demo_catchup_blocking_reason("core", CatchupGreen::Green, 300),
+            None
+        );
+        // NoActiveCorpus → a hard failure reason (no start).
+        let no_active = demo_catchup_blocking_reason("core", CatchupGreen::NoActiveCorpus, 300)
+            .expect("a non-green catch-up must block the demo start");
+        assert!(no_active.contains("NOT GREEN"));
+        assert!(no_active.contains("no active corpus"));
+        assert!(no_active.contains("refusing to start"));
+        // NotAtHead → a hard failure reason carrying the cursor/head positions (no start).
+        let behind = demo_catchup_blocking_reason(
+            "core",
+            CatchupGreen::NotAtHead { cursor: 3, head: 5 },
+            300,
+        )
+        .expect("a behind cursor must block the demo start");
+        assert!(behind.contains("NOT GREEN"));
+        assert!(behind.contains("cursor 3"));
+        assert!(behind.contains("verified head 5"));
+        assert!(behind.contains("refusing to start"));
     }
 
     #[test]

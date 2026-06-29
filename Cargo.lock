@@ -1030,8 +1030,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jurisearch-client",
+ "jurisearch-core",
  "jurisearch-embed",
  "jurisearch-package",
+ "jurisearch-package-build",
  "jurisearch-storage",
  "jurisearch-syncd",
  "postgres",

@@ -15,15 +15,19 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 use jurisearch_deploy::config::SITE_CONFIG_EXAMPLE;
-use jurisearch_deploy::ops::catchup::{CatchupGreen, catch_up_corpus};
+use jurisearch_deploy::ops::catchup::{
+    CatchupGreen, catch_up_corpus, demo_catchup_blocking_reason,
+};
 use jurisearch_deploy::ops::connection::{read_handle, writer_handle};
 use jurisearch_deploy::ops::lifecycle::{
     self, ALL_UNITS, PREREQUISITE_UNITS, StartGate, UNIT_SITE, may_start_site,
 };
 use jurisearch_deploy::ops::provision::provision_site_db;
 use jurisearch_deploy::ops::readiness::readiness_report;
+use jurisearch_deploy::ops::smoke::{SmokePlan, SmokeReport};
 use jurisearch_deploy::ops::trust::bootstrap_trust;
-use jurisearch_deploy::ops::{DiagnosticReport, doctor, embed};
+use jurisearch_deploy::ops::watchdog::{DEFAULT_STALL_THRESHOLD_SECS, watchdog_corpus};
+use jurisearch_deploy::ops::{DiagnosticReport, demo, doctor, embed, fixture, smoke};
 use jurisearch_deploy::scaffold::{InitOutcome, init_site_config};
 use jurisearch_deploy::{DeployError, SiteConfig};
 
@@ -46,6 +50,9 @@ enum TopCommand {
     /// Local bge-m3 query-embedder operator commands.
     #[command(subcommand)]
     Embed(EmbedCommand),
+    /// Local single-host demo using REAL binaries + the signed FIXTURE corpus (up/url/smoke/down).
+    #[command(subcommand)]
+    Demo(DemoCommand),
 }
 
 #[derive(Subcommand)]
@@ -78,6 +85,22 @@ enum SiteCommand {
     CatchUp(CatchUpArgs),
     /// Prove the site can answer: active, readiness-stamped, fingerprint-compatible corpus.
     Readiness(ConfigArgs),
+    /// Smoke an installed site: status, fetch known id, BM25, hybrid-when-configured, + negative checks.
+    Smoke(SmokeArgs),
+    /// READ-ONLY watchdog: detect a STALLED site sync cursor, distinct from "no new packages".
+    Watchdog(WatchdogArgs),
+}
+
+#[derive(Subcommand)]
+enum DemoCommand {
+    /// Stand up the local demo (provision + trust + catch-up the fixture corpus + gated start).
+    Up(InstallArgs),
+    /// Print the demo site URL (copy-pasteable into `jurisearch-client --server`).
+    Url(ConfigArgs),
+    /// Run the demo smoke legs (real status/fetch/search; hybrid skipped-with-reason if assets absent).
+    Smoke(SmokeJsonArgs),
+    /// Tear the demo down (disable/remove the generated units + env; never drops data).
+    Down(ConfigArgs),
 }
 
 #[derive(Subcommand)]
@@ -162,6 +185,45 @@ struct LogsArgs {
     lines: u32,
 }
 
+#[derive(Args)]
+struct SmokeArgs {
+    #[arg(long)]
+    config: PathBuf,
+    /// The known document id to fetch (the stable FIXTURE id for demo; a real DILA id for operated).
+    #[arg(long, default_value = fixture::FIXTURE_DOC_ID)]
+    fetch_id: String,
+    /// A query term expected to retrieve at least one candidate.
+    #[arg(long, default_value = fixture::FIXTURE_QUERY_TERM)]
+    query: String,
+    /// A guaranteed-absent id for the negative not-found leg.
+    #[arg(long, default_value = fixture::FIXTURE_MISSING_ID)]
+    missing_id: String,
+    /// Emit machine-readable JSON instead of human lines.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct SmokeJsonArgs {
+    #[arg(long)]
+    config: PathBuf,
+    /// Emit machine-readable JSON instead of human lines.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args)]
+struct WatchdogArgs {
+    #[arg(long)]
+    config: PathBuf,
+    /// A behind cursor older than this (seconds) is reported as STALLED.
+    #[arg(long, default_value_t = DEFAULT_STALL_THRESHOLD_SECS)]
+    stall_threshold_secs: u64,
+    /// Emit machine-readable JSON instead of human lines.
+    #[arg(long)]
+    json: bool,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli) {
@@ -177,6 +239,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
     match cli.command {
         TopCommand::Site(site) => run_site(site),
         TopCommand::Embed(embed) => run_embed(embed),
+        TopCommand::Demo(demo) => run_demo(demo),
     }
 }
 
@@ -192,7 +255,7 @@ fn run_site(command: SiteCommand) -> Result<ExitCode, String> {
             run_render(&args.config, args.out.as_deref()).map(|()| ExitCode::SUCCESS)
         }
         SiteCommand::Doctor(args) => run_site_doctor(&args),
-        SiteCommand::Install(args) => run_install(&args),
+        SiteCommand::Install(args) => run_install(&args, false),
         SiteCommand::Uninstall(args) => run_uninstall(&args.config),
         SiteCommand::Restart(args) => {
             run_lifecycle(&args.config, "restart").map(|()| ExitCode::SUCCESS)
@@ -207,6 +270,17 @@ fn run_site(command: SiteCommand) -> Result<ExitCode, String> {
         }
         SiteCommand::CatchUp(args) => run_catch_up(&args),
         SiteCommand::Readiness(args) => run_readiness(&args.config),
+        SiteCommand::Smoke(args) => run_site_smoke(&args),
+        SiteCommand::Watchdog(args) => run_watchdog(&args),
+    }
+}
+
+fn run_demo(command: DemoCommand) -> Result<ExitCode, String> {
+    match command {
+        DemoCommand::Up(args) => run_demo_up(&args),
+        DemoCommand::Url(args) => run_demo_url(&args.config),
+        DemoCommand::Smoke(args) => run_demo_smoke(&args),
+        DemoCommand::Down(args) => run_uninstall(&args.config),
     }
 }
 
@@ -311,8 +385,30 @@ fn run_embed_render(config: &std::path::Path, out: Option<&std::path::Path>) -> 
     }
 }
 
-fn run_install(args: &InstallArgs) -> Result<ExitCode, String> {
+/// The bounded ceiling `demo up` waits for each corpus to reach the verified producer head before the
+/// readiness gate (mirrors the `site catch-up --wait` default). A corpus still not green after this is a
+/// hard `demo up` failure (no start), honouring the command contract.
+const DEMO_CATCHUP_TIMEOUT_SECS: u64 = 300;
+
+/// `demo up`: the documented "provision + trust + catch-up the fixture corpus + gated start" sequence.
+/// It is `site install` with two demo-specific additions: a FIXTURE PREFLIGHT GUARD up front (fail fast
+/// with an actionable diagnostic when the committed fixture bytes are absent) and a SYNCHRONOUS
+/// bounded-wait fixture catch-up BEFORE the readiness gate, so the gated start sees the applied corpus
+/// rather than depending on asynchronous syncd timing. A corpus still not green after the bounded wait is
+/// a HARD failure that refuses the start (no silent proceed) — `site install` (non-demo) keeps its
+/// single-pass, async-tolerant behaviour.
+fn run_demo_up(args: &InstallArgs) -> Result<ExitCode, String> {
+    run_install(args, true)
+}
+
+fn run_install(args: &InstallArgs, demo: bool) -> Result<ExitCode, String> {
     let config = SiteConfig::load(&args.config).map_err(format_error)?;
+
+    // FIXTURE PREFLIGHT (demo only): fail fast with one clear diagnostic when the committed fixture
+    // artifact is missing, instead of letting the operator fall into a generic catch-up/readiness failure.
+    if demo {
+        fixture::ensure_published_artifacts(&config).map_err(format_error)?;
+    }
 
     if args.dry_run {
         println!("DRY RUN — no changes will be made:");
@@ -330,6 +426,12 @@ fn run_install(args: &InstallArgs) -> Result<ExitCode, String> {
             config.system.systemd_unit_dir.display()
         );
         println!("  bootstrap-trust: {} anchor(s)", config.trust.anchor.len());
+        if demo {
+            println!(
+                "  catch-up the fixture corpus ({}) to the verified producer head BEFORE the gate",
+                config.sync.corpora.join(", ")
+            );
+        }
         println!(
             "  run doctor; refuse to start jurisearch-site unless readiness + embed doctor green"
         );
@@ -388,6 +490,30 @@ fn run_install(args: &InstallArgs) -> Result<ExitCode, String> {
     // 5. Start prerequisites, then GATE the site start on readiness + embed doctor.
     lifecycle::run_systemctl(&lifecycle::systemctl_argv("start", &PREREQUISITE_UNITS))
         .map_err(format_error)?;
+
+    // 5a. DEMO: synchronously catch-up the fixture corpus to the verified producer head BEFORE the
+    //     readiness gate, so the gated start reflects the applied fixture rather than depending on async
+    //     syncd timing. (The committed-artifact preflight above already guaranteed the bytes are present.)
+    //     This is a BOUNDED wait-until-green-or-fail (like `site catch-up --wait`): a non-green corpus
+    //     after the bound is a HARD FAILURE that returns before readiness/start, honouring the command
+    //     contract that `demo up` catches up to the verified producer head before the gate. (`site install`,
+    //     non-demo, keeps its single-pass async-tolerant behaviour and never enters this block.)
+    if demo {
+        for corpus in &config.sync.corpora {
+            let result = catch_up_with_wait(&writer, &config, corpus, DEMO_CATCHUP_TIMEOUT_SECS)?;
+            // PURE policy: a corpus still not green after the bounded wait is a HARD failure that returns
+            // BEFORE readiness/start (no silent proceed).
+            if let Some(reason) =
+                demo_catchup_blocking_reason(corpus, result.green, DEMO_CATCHUP_TIMEOUT_SECS)
+            {
+                return Err(reason);
+            }
+            println!(
+                "demo catch-up: {corpus} GREEN at head {}",
+                result.state.head_sequence
+            );
+        }
+    }
 
     let read = read_handle(&config);
     let readiness = readiness_report(&writer, &read, &config)
@@ -527,6 +653,91 @@ fn run_readiness(config: &std::path::Path) -> Result<ExitCode, String> {
         .map_err(|message| format!("readiness check failed: {message}"))?;
     print!("{}", report.to_lines());
     Ok(exit(report.exit_code()))
+}
+
+fn run_site_smoke(args: &SmokeArgs) -> Result<ExitCode, String> {
+    let config = SiteConfig::load(&args.config).map_err(format_error)?;
+    let endpoint = demo::site_endpoint(&config).map_err(format_error)?;
+    // Hybrid runs WHEN configured: the loopback embedder's model + tokenizer assets must be present.
+    // When they are not, the hybrid leg is a RECORDED skip — never silently dropped.
+    let plan = if demo::model_tokenizer_assets_present(&config) {
+        SmokePlan::with_hybrid(&args.fetch_id, &args.query, &args.missing_id)
+    } else {
+        SmokePlan::without_hybrid(
+            &args.fetch_id,
+            &args.query,
+            &args.missing_id,
+            demo::HYBRID_ASSETS_ABSENT_REASON,
+        )
+    };
+    let report = smoke::run_smoke(&endpoint, &plan);
+    emit_smoke(&report, args.json)
+}
+
+fn run_demo_smoke(args: &SmokeJsonArgs) -> Result<ExitCode, String> {
+    let config = SiteConfig::load(&args.config).map_err(format_error)?;
+    // The fixture-backed demo smoke fetches the stable fixture id; fail fast with one clear diagnostic if
+    // the committed fixture artifact is absent, instead of reporting an obscure fetch/not-found failure.
+    fixture::ensure_published_artifacts(&config).map_err(format_error)?;
+    let endpoint = demo::site_endpoint(&config).map_err(format_error)?;
+    let plan = demo::demo_smoke_plan(&config);
+    let report = smoke::run_smoke(&endpoint, &plan);
+    emit_smoke(&report, args.json)
+}
+
+fn run_demo_url(config: &std::path::Path) -> Result<ExitCode, String> {
+    let parsed = SiteConfig::load(config).map_err(format_error)?;
+    println!("{}", demo::site_url(&parsed).map_err(format_error)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn emit_smoke(report: &SmokeReport, json: bool) -> Result<ExitCode, String> {
+    // The structural acceptance gate: EVERY leg carries an explicit outcome — assert before emitting so
+    // a silently-skipped leg can never escape into the operator's report.
+    if !report.invariant_no_silent_skip() {
+        return Err("internal error: a smoke leg produced no explicit outcome".to_owned());
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report.to_json()).unwrap_or_else(|_| "{}".to_owned())
+        );
+    } else {
+        print!("{}", report.to_lines());
+    }
+    Ok(exit(report.exit_code()))
+}
+
+fn run_watchdog(args: &WatchdogArgs) -> Result<ExitCode, String> {
+    let config = SiteConfig::load(&args.config).map_err(format_error)?;
+    let writer = writer_handle(&config);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let mut results = Vec::new();
+    for corpus in &config.sync.corpora {
+        let result = watchdog_corpus(&writer, &config, corpus, now, args.stall_threshold_secs)
+            .map_err(format_error)?;
+        results.push(result);
+    }
+    let alert = results.iter().any(|result| result.status.is_alert());
+    if args.json {
+        let body = serde_json::json!({
+            "alert": alert,
+            "corpora": results,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".to_owned())
+        );
+    } else {
+        for result in &results {
+            println!("{}", result.to_line());
+        }
+    }
+    // The watchdog is READ-ONLY; a non-zero exit only SIGNALS an alert (a stalled/wrong-feed cursor).
+    Ok(exit(u8::from(alert)))
 }
 
 fn emit_report(report: &DiagnosticReport, json: bool) {

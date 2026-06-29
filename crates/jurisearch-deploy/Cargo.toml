@@ -26,6 +26,13 @@ jurisearch-embed = { path = "../jurisearch-embed" }
 jurisearch-storage = { path = "../jurisearch-storage" }
 jurisearch-syncd = { path = "../jurisearch-syncd" }
 jurisearch-package = { path = "../jurisearch-package" }
+# M5-B demo/smoke/watchdog: the thin client (real status/fetch/search legs), the contract DTOs
+# (SessionRequest/SiteSearchArgs shapes), and the package builder library (the documented FIXTURE
+# generator helper). Consumed read-only as libraries — jurisearchctl is the operator tool, not the
+# thin client, so depending on these does not affect the jurisearch-CLIENT dependency cone.
+jurisearch-client = { path = "../jurisearch-client" }
+jurisearch-core = { path = "../jurisearch-core" }
+jurisearch-package-build = { path = "../jurisearch-package-build" }
 anyhow.workspace = true
 clap.workspace = true
 # Named only for the admin/bootstrap CREATE DATABASE glue in `ops::provision` (the schema/role SQL all

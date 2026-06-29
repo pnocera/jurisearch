@@ -152,6 +152,53 @@ in-process site == one-shot CLI). The shipped serve-site PROCESS run (bind + DB 
 status/fetch/search + fetch-hash) is the prerequisite-gated data-leg path of the script, captured here
 when operated on a host that has a provisioned site DB + embedder.
 
+## M5-B — jurisearchctl smoke / watchdog / demo (operator surface)
+
+M5-B adds operator commands that monitor + prove an installed site WITHOUT the thin client, plus a local
+demo. They WRAP the same legs this runbook describes; their DECISION logic (leg classification,
+no-silent-skip, the stalled-vs-no-new-packages discrimination, negative checks, hybrid-skip-with-reason)
+is unit-tested in `jurisearch-deploy` (`ops::smoke`, `ops::watchdog`, `ops::demo`, `ops::fixture`) — run
+in CI with no live infra. The CI/demo path uses the signed FIXTURE corpus
+(`crates/jurisearch-deploy/fixtures/`, stable id `cass:FIXTURE-0000000001`); operated runs use a REAL
+published/DILA id.
+
+### `site smoke` — prove an installed site (host S, or any host that can dial it)
+
+```sh
+# status + fetch known id + BM25 + hybrid-WHEN-configured + NEGATIVE checks (missing-id not-found,
+# bad-query handled). Hybrid runs only when the loopback bge-m3 model+tokenizer assets are present; when
+# absent it is recorded as an EXPLICIT skip — never silently dropped. No leg is ever silently skipped.
+jurisearchctl site smoke --config /etc/jurisearch/site.toml --fetch-id "<real-published-id>" --json
+# exit 0 iff no leg FAILED (a recorded skip does not fail the smoke).
+```
+
+### `site watchdog` — READ-ONLY stall detection (a timer on host S)
+
+```sh
+# Compares the site APPLIED cursor vs the VERIFIED producer head and the cursor's applied_at age:
+#   applied == head            → watchdog.no_new_packages  (healthy; producer has nothing new)
+#   applied <  head + stale    → watchdog.stalled_cursor   (ALERT: the site sync cursor is STUCK)
+#   applied <  head + recent   → watchdog.catching_up      (a normal in-flight catch-up)
+#   applied >  head            → watchdog.ahead_of_head    (ALERT: wrong/newer feed)
+# It NEVER applies/mutates — exit non-zero only SIGNALS an alert state.
+jurisearchctl site watchdog --config /etc/jurisearch/site.toml --json
+```
+
+Render the watchdog as a `.timer` alongside the syncd timer; a non-zero exit feeds the alert hook.
+
+### `demo up|url|smoke|down` — local single-host demo with the signed fixture
+
+```sh
+jurisearchctl demo up   --config /etc/jurisearch/demo-site.toml   # provision + trust + catch-up fixture
+jurisearchctl demo url  --config /etc/jurisearch/demo-site.toml   # → tcp://host:port (paste into client)
+jurisearchctl demo smoke --config /etc/jurisearch/demo-site.toml  # real legs; hybrid skip-with-reason
+jurisearchctl demo down --config /etc/jurisearch/demo-site.toml   # disable/remove units (keeps data)
+```
+
+The operated end-to-end script is `crates/jurisearch-deploy/scripts/single-host-demo-acceptance.sh`
+(Tier 1 = decision logic, always; Tier 2 = live legs, authorized-only & skipped-by-default with recorded
+reasons).
+
 ## Two-host OBSERVED (fill in when operated on two physical hosts)
 
 ```
