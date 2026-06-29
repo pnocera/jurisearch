@@ -14,6 +14,9 @@ index/
 *.sqlite
 *.parquet
 
+# Repo-local generated release artifacts (./dist/)
+/dist/
+
 # Rust
 /target
 **/*.rs.bk

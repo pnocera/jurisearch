@@ -622,23 +622,25 @@ storage fingerprint.
 - **Goal.** Ship the deploy experience as repeatable artifacts, not source-tree instructions.
 - **Builds on.** All prior phases.
 - **Deliverables.**
-  - A root-level release script, `./dist.sh`, that can be run from the repository root and writes all
-    local release outputs under `./dist/`. It may delegate to `cargo xtask dist --out dist`, but the
-    operator-facing contract is the root script.
-  - `dist/manifest.toml` describing version, git commit, target triples, bundle filenames, checksums,
+  - A repository-root release script, `./dist.sh`, that can be run from the repository root and writes
+    all local release outputs under the repository-local `./dist/` directory. In the current checkout,
+    that means `/home/pierre/Work/jurisearch/dist/`; it must never write to the filesystem root
+    directory `/dist`. It may delegate to `cargo xtask dist --out ./dist`, but the operator-facing
+    contract is the root script.
+  - `./dist/manifest.toml` describing version, git commit, target triples, bundle filenames, checksums,
     binary versions, and intentionally external prerequisites.
   - Distinct deployment bundles:
-    - `dist/update-server/`: producer/update-ingest assets for the package origin, including
+    - `./dist/update-server/`: producer/update-ingest assets for the package origin, including
       `jurisearch-producer`, the package/ingest binaries required by
       `02-auto-update-server-crons.md` Phase 2 / open decision #1, producer systemd service/timer
       templates, example `producer.toml`, checksums, and an archive such as
       `jurisearch-update-server-<version>-<target>.tar.zst`. Under the recommended shell-out path, this
       intentionally includes the heavy `jurisearch` binary plus `jurisearch-package`; the thin-cone
-      invariant applies to `dist/cli/`, not to the update-server role.
-    - `dist/site-server/`: customer site assets, including `jurisearch`, `jurisearch-syncd`,
+      invariant applies to `./dist/cli/`, not to the update-server role.
+    - `./dist/site-server/`: customer site assets, including `jurisearch`, `jurisearch-syncd`,
       `jurisearchctl`, site/bge-m3/syncd systemd templates, example `site.toml`, checksums, and an
       archive such as `jurisearch-site-server-<version>-<target>.tar.zst`.
-    - `dist/cli/`: thin-client assets, including `jurisearch-client`, shell completions/manpage if
+    - `./dist/cli/`: thin-client assets, including `jurisearch-client`, shell completions/manpage if
       generated, checksums, and an archive such as `jurisearch-cli-<version>-<target>.tar.zst`.
   - No release bundle contains database contents, corpus packages, vector indexes, model weights, or
     tokenizer files. If model/tokenizer fetch automation is shipped, the dist output contains only a
@@ -656,8 +658,8 @@ storage fingerprint.
   - Preserve generated config and operator TOML.
   - Record installed version, render hash, and binary checksums.
 - **Invariants under test.**
-  - Running `./dist.sh` from the repository root creates a fresh local `dist/` with update-server,
-    site-server, cli, and top-level manifest/checksum outputs.
+  - Running `./dist.sh` from the repository root creates a fresh repository-local `./dist/` with
+    update-server, site-server, cli, and top-level manifest/checksum outputs.
   - Each bundle is installable independently and contains only the assets for its deployment role.
   - The update-server bundle includes every binary needed by the selected producer orchestration
     strategy, including shell-out dependencies if `02-auto-update-server-crons.md` Phase 2 / open
@@ -669,7 +671,7 @@ storage fingerprint.
   - Rollback does not mutate corpus data.
   - Generated files can be recreated from config after upgrade.
 - **Done when.** Operators can install from a release artifact and upgrade without consulting the
-  source tree, and a reviewer can inspect `dist/manifest.toml` to see exactly which assets are bundled
+  source tree, and a reviewer can inspect `./dist/manifest.toml` to see exactly which assets are bundled
   versus provisioned externally.
 
 ---
@@ -686,7 +688,7 @@ storage fingerprint.
 | bge-m3 | endpoint dimension mismatch, tokenizer missing, non-loopback endpoint refusal |
 | Client config | resolution order, malformed file, legacy env behavior, dependency cone |
 | Smoke | real status/fetch/bm25/hybrid search, no silent skips, diagnostic substring checks for negatives |
-| Release dist | root `./dist.sh`, clean local `dist/`, distinct update-server/site-server/cli bundles, manifest/checksums, no DB/model/tokenizer/corpus payloads |
+| Release dist | repository-root `./dist.sh`, clean repository-local `./dist/`, distinct update-server/site-server/cli bundles, manifest/checksums, no DB/model/tokenizer/corpus payloads |
 
 ---
 
@@ -703,7 +705,7 @@ storage fingerprint.
   - backup/restore;
   - firewall/Tailscale notes.
 - Update `work/09-jurisearch-cli/05-two-host-acceptance.md` to call the new product commands.
-- Add `dist/README.md` generation documenting the three bundles, excluded large assets, required host
+- Add `./dist/README.md` generation documenting the three bundles, excluded large assets, required host
   prerequisites, and the install command for each role.
 
 ---
