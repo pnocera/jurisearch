@@ -20,9 +20,19 @@ path = "src/bin/jurisearchctl.rs"
 [dependencies]
 # Reuse the embedder config + loopback classifier; do NOT duplicate fingerprint/base-url logic.
 jurisearch-embed = { path = "../jurisearch-embed" }
+# M4 operator commands WRAP the already-built site/syncd/embedder + storage provisioning/readiness.
+# jurisearchctl is the operator tool, so depending on these operational crates is intended (the
+# thin-client cone constraint applies to jurisearch-CLIENT, not to jurisearchctl).
+jurisearch-storage = { path = "../jurisearch-storage" }
+jurisearch-syncd = { path = "../jurisearch-syncd" }
+jurisearch-package = { path = "../jurisearch-package" }
 anyhow.workspace = true
 clap.workspace = true
+# Named only for the admin/bootstrap CREATE DATABASE glue in `ops::provision` (the schema/role SQL all
+# lives in jurisearch-storage); `ConnectionConfig::connect` hands back a `postgres::Client`.
+postgres.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 url.workspace = true

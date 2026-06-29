@@ -5,7 +5,7 @@
 //! binary) are ABSOLUTE literals (systemd does not expand env vars there); only `ExecStart`
 //! arguments use `${VAR}` (which systemd does expand).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use jurisearch_embed::EmbeddingProvider;
 
@@ -78,24 +78,69 @@ impl RenderedSite {
     /// Write all six files under `root`: env files `0600`, units `0644`. Creates `generated/` and
     /// `systemd/` subdirectories.
     pub fn write_to(&self, root: &Path) -> Result<(), DeployError> {
-        for subdir in ["generated", "systemd"] {
-            let dir = root.join(subdir);
-            std::fs::create_dir_all(&dir).map_err(|source| DeployError::Write {
-                path: dir.clone(),
+        write_files(root, &self.files())
+    }
+
+    /// Write ONLY the generated env files (`generated/*.env`, `0600`) under `root` — used by
+    /// `site install`, which installs the units into the systemd unit dir (see [`install_units`]) while
+    /// keeping the env files under `config_dir`.
+    ///
+    /// [`install_units`]: RenderedSite::install_units
+    pub fn write_env_files(&self, root: &Path) -> Result<(), DeployError> {
+        let env: Vec<RenderedFile> = self
+            .files()
+            .into_iter()
+            .filter(|file| file.relative_path.starts_with("generated/"))
+            .collect();
+        write_files(root, &env)
+    }
+
+    /// Install the rendered `*.service` files into `unit_dir` (e.g. `/etc/systemd/system`) at `0644`,
+    /// WITHOUT the `systemd/` path prefix, so `systemctl daemon-reload`/`enable <unit>` resolve them.
+    /// Returns the absolute paths written, in unit order.
+    pub fn install_units(&self, unit_dir: &Path) -> Result<Vec<PathBuf>, DeployError> {
+        std::fs::create_dir_all(unit_dir).map_err(|source| DeployError::Write {
+            path: unit_dir.to_path_buf(),
+            source,
+        })?;
+        let mut written = Vec::new();
+        for file in self.files() {
+            let Some(name) = file.relative_path.strip_prefix("systemd/") else {
+                continue;
+            };
+            let path = unit_dir.join(name);
+            secret::write_file_with_mode(&path, file.contents.as_bytes(), 0o644).map_err(
+                |source| DeployError::Write {
+                    path: path.clone(),
+                    source,
+                },
+            )?;
+            written.push(path);
+        }
+        Ok(written)
+    }
+}
+
+/// Write an explicit set of rendered files under `root`, creating each file's parent directory and
+/// preserving its mode (secret env files `0600`, public units `0644`). Used both for the full render and
+/// for the bge-m3 subset written by `embed render-service --out`.
+pub fn write_files(root: &Path, files: &[RenderedFile]) -> Result<(), DeployError> {
+    for file in files {
+        let path = root.join(file.relative_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| DeployError::Write {
+                path: parent.to_path_buf(),
                 source,
             })?;
         }
-        for file in self.files() {
-            let path = root.join(file.relative_path);
-            let result = if file.secret {
-                secret::write_secret_file(&path, file.contents.as_bytes())
-            } else {
-                secret::write_file_with_mode(&path, file.contents.as_bytes(), 0o644)
-            };
-            result.map_err(|source| DeployError::Write { path, source })?;
-        }
-        Ok(())
+        let result = if file.secret {
+            secret::write_secret_file(&path, file.contents.as_bytes())
+        } else {
+            secret::write_file_with_mode(&path, file.contents.as_bytes(), 0o644)
+        };
+        result.map_err(|source| DeployError::Write { path, source })?;
     }
+    Ok(())
 }
 
 impl SiteConfig {

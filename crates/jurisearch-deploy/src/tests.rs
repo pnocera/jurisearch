@@ -782,6 +782,56 @@ fn rendered_site_writes_env_0600_and_units_0644() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Install layout: units land where `systemctl enable <unit>` resolves them; env stays under config
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn install_places_units_in_the_systemd_unit_dir_and_env_under_config_dir() {
+    // `site install` reports "install units <names> into <systemd_unit_dir>" and "render env into
+    // <config_dir>/generated"; this proves those reported locations match what install actually does,
+    // and that the units are written by BARE name (no `systemd/` prefix) so `systemctl enable
+    // jurisearch-*.service` resolves them.
+    let unit_root = tempfile::tempdir().unwrap();
+    let config_root = tempfile::tempdir().unwrap();
+    let rendered = example().render().unwrap();
+
+    let written = rendered.install_units(unit_root.path()).unwrap();
+    rendered.write_env_files(config_root.path()).unwrap();
+
+    // Units: exactly the three managed units, by bare name, at 0644, in the systemd unit dir.
+    let expected_units = [
+        "jurisearch-bge-m3.service",
+        "jurisearch-syncd.service",
+        "jurisearch-site.service",
+    ];
+    for unit in expected_units {
+        let path = unit_root.path().join(unit);
+        assert!(
+            path.is_file(),
+            "unit must be installed at {}",
+            path.display()
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644, "{unit}: got {mode:o}");
+    }
+    assert_eq!(written.len(), expected_units.len());
+    // No `systemd/` subdir under the unit dir — units are bare names systemctl can find.
+    assert!(!unit_root.path().join("systemd").exists());
+
+    // Env: only the generated/*.env files under config_dir (0600); no units written there.
+    for env in ["site.env", "syncd.env", "bge-m3.env"] {
+        let path = config_root.path().join("generated").join(env);
+        assert!(path.is_file(), "env must be at {}", path.display());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600, "{env}: got {mode:o}");
+    }
+    assert!(
+        !config_root.path().join("systemd").exists(),
+        "install must NOT leave units under config_dir/systemd"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Password-file permission validation
 // ---------------------------------------------------------------------------------------------
 

@@ -12,6 +12,7 @@
 pub mod bind;
 pub mod config;
 pub mod error;
+pub mod ops;
 pub mod render;
 pub mod scaffold;
 pub mod secret;

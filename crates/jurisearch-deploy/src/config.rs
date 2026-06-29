@@ -34,6 +34,15 @@ pub struct SystemConfig {
     pub config_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub state_dir: PathBuf,
+    /// The systemd unit search directory the rendered `*.service` files are INSTALLED into so
+    /// `systemctl daemon-reload`/`enable <unit>` resolve them. Generated ENV files stay under
+    /// `config_dir/generated`. Defaults to `/etc/systemd/system`.
+    #[serde(default = "default_systemd_unit_dir")]
+    pub systemd_unit_dir: PathBuf,
+}
+
+fn default_systemd_unit_dir() -> PathBuf {
+    PathBuf::from("/etc/systemd/system")
 }
 
 /// `[site]` — the query-service bind + worker policy.
@@ -200,6 +209,8 @@ install_dir = "/usr/local/bin"
 config_dir = "/etc/jurisearch"
 runtime_dir = "/run/jurisearch"
 state_dir = "/var/lib/jurisearch"
+# Where rendered systemd units are installed so `systemctl` finds them (daemon-reload/enable).
+systemd_unit_dir = "/etc/systemd/system"
 
 [site]
 # tcp://host:port (a non-loopback host needs allow_lan) or unix:///absolute/path.

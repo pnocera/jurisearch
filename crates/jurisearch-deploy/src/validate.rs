@@ -37,6 +37,7 @@ impl SiteConfig {
             ("system.config_dir", system.config_dir.as_path()),
             ("system.runtime_dir", system.runtime_dir.as_path()),
             ("system.state_dir", system.state_dir.as_path()),
+            ("system.systemd_unit_dir", system.systemd_unit_dir.as_path()),
         ] {
             require_absolute(errors, "system.path.relative", label, path);
         }
@@ -244,6 +245,44 @@ impl SiteConfig {
                 "a [license] token is configured but no [[trust.anchor]] with purpose = \"license\" exists",
                 "add the license issuer's verifying key as a license-purpose [[trust.anchor]]",
             );
+        }
+
+        // Reject DUPLICATE configured anchor identities (same key_id + epoch + purpose). Two config
+        // rows for one identity would both reach syncd's upserting `install_trust_anchor`, so the
+        // second would silently replace the first — a trust root is NEVER silently chosen between two
+        // config rows. (Defence-in-depth; `bootstrap-trust` also refuses this before any write.)
+        for i in 0..anchors.len() {
+            for j in (i + 1)..anchors.len() {
+                let (a, b) = (&anchors[i], &anchors[j]);
+                if a.key_id == b.key_id && a.key_epoch == b.key_epoch && a.purpose == b.purpose {
+                    if a.public_key_hex.eq_ignore_ascii_case(&b.public_key_hex) {
+                        errors.push(
+                            "trust.anchor.duplicate",
+                            format!(
+                                "[[trust.anchor]] #{i} and #{j} are duplicates (same key_id `{}`, \
+                                 epoch {}, purpose `{}`, and key)",
+                                a.key_id,
+                                a.key_epoch,
+                                a.purpose.as_str()
+                            ),
+                            "remove the redundant [[trust.anchor]] entry",
+                        );
+                    } else {
+                        errors.push(
+                            "trust.anchor.duplicate_conflict",
+                            format!(
+                                "[[trust.anchor]] #{i} and #{j} share key_id `{}`, epoch {}, purpose \
+                                 `{}` but carry DIFFERENT public keys; a trust root is never silently \
+                                 replaced",
+                                a.key_id,
+                                a.key_epoch,
+                                a.purpose.as_str()
+                            ),
+                            "remove one entry, or rotate using a NEW key_id/epoch instead of reusing this one",
+                        );
+                    }
+                }
+            }
         }
 
         for (index, anchor) in anchors.iter().enumerate() {
