@@ -16,6 +16,9 @@ use jurisearch_core::envelope::PROTOCOL_VERSION;
 use jurisearch_core::session::{SessionRequest, SessionResponse};
 use jurisearch_transport::{JsonlClient, TransportError};
 
+pub mod config;
+pub use config::{ClientConfig, load_config_at, resolve_config_path, save_config_at};
+
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -118,7 +121,25 @@ pub fn parse_endpoint(url: &str) -> Result<SiteEndpoint, ClientError> {
 /// `$XDG_RUNTIME_DIR`), else an explicit `--server <url>`, else the `JURISEARCH_SITE_URL` environment
 /// default. `--local` with no `$XDG_RUNTIME_DIR` is a clear error (it asks for `--server unix:///path`
 /// rather than guessing a shared `/tmp` path).
+///
+/// This is the env-only resolver (no persistent config). The binary uses
+/// [`resolve_endpoint_with_config`] to add the `configure`d `client.toml` as a fallback STRICTLY below
+/// the env var.
 pub fn resolve_endpoint(server: Option<&str>, local: bool) -> Result<SiteEndpoint, ClientError> {
+    resolve_endpoint_with_config(server, local, None)
+}
+
+/// Like [`resolve_endpoint`], but with the persistent `configure`d URL as the LOWEST-priority fallback.
+///
+/// Precedence (highest first): `--local` / `--server` (explicit flags), then `$JURISEARCH_SITE_URL`,
+/// then `configured` (the `client.toml` `server`). This preserves the existing flag/env behavior exactly
+/// and slots the persisted config strictly below the env var, so a one-time `configure` removes the need
+/// for shell-profile editing without ever overriding an explicit selection.
+pub fn resolve_endpoint_with_config(
+    server: Option<&str>,
+    local: bool,
+    configured: Option<&str>,
+) -> Result<SiteEndpoint, ClientError> {
     if local {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
             ClientError::BadEndpoint(
@@ -134,13 +155,42 @@ pub fn resolve_endpoint(server: Option<&str>, local: bool) -> Result<SiteEndpoin
     if let Some(url) = server {
         return parse_endpoint(url);
     }
-    if let Ok(url) = std::env::var("JURISEARCH_SITE_URL") {
-        return parse_endpoint(&url);
+    // Presence semantics MUST match `endpoint_selector_present` (`var_os`): a PRESENT
+    // `$JURISEARCH_SITE_URL` is a selection and is consumed HERE, so it never silently falls through to
+    // the config. A present-but-non-Unicode value (Unix) is a hard endpoint error — not "absent" — and an
+    // unparseable value is the parse error from `parse_endpoint`. Only a truly ABSENT env var falls
+    // through to the configured URL below.
+    if let Some(value) = std::env::var_os("JURISEARCH_SITE_URL") {
+        let url = value.to_str().ok_or_else(|| {
+            ClientError::BadEndpoint(
+                "$JURISEARCH_SITE_URL is set but is not valid UTF-8; set it to tcp://host:port or \
+                 unix:///absolute/path"
+                    .to_owned(),
+            )
+        })?;
+        return parse_endpoint(url);
+    }
+    if let Some(url) = configured {
+        return parse_endpoint(url);
     }
     Err(ClientError::BadEndpoint(
-        "no site service selected: pass --server <url>, --local, or set JURISEARCH_SITE_URL"
+        "no site service selected: pass --server <url>, --local, set JURISEARCH_SITE_URL, or run \
+         `jurisearch-client configure --server <url>`"
             .to_owned(),
     ))
+}
+
+/// Whether a HIGHER-priority endpoint selector outranks the persisted `client.toml`: `--local`,
+/// `--server <url>`, or a PRESENT `$JURISEARCH_SITE_URL`. When this is `true` the config is neither
+/// needed nor consulted, so an explicit selection is never hostage to a stale/malformed fallback file.
+///
+/// Note the env check is presence-only (`var_os`): a present-but-MALFORMED `$JURISEARCH_SITE_URL` still
+/// counts as a selection, so it surfaces as an endpoint error in
+/// [`resolve_endpoint_with_config`] rather than silently falling through to the config. This is the
+/// single source of truth the forward and `doctor` paths share so they cannot disagree.
+#[must_use]
+pub fn endpoint_selector_present(server: Option<&str>, local: bool) -> bool {
+    local || server.is_some() || std::env::var_os("JURISEARCH_SITE_URL").is_some()
 }
 
 /// Map a transport error into a client error, turning a version mismatch / unversioned reply into a
@@ -207,9 +257,62 @@ pub fn send_request(
     }
 }
 
+/// The `status` handshake request the `doctor` uses to probe a site service: the narrowest site
+/// operation (no args), so a green reply proves connectivity AND a matching protocol version AND a
+/// live query service — without mutating anything.
+#[must_use]
+pub fn status_probe_request() -> SessionRequest {
+    SessionRequest {
+        id: Some(serde_json::Value::String(
+            "jurisearch-client-doctor".to_owned(),
+        )),
+        command: "status".to_owned(),
+        args: serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
+/// Interpret the outcome of a [`status_probe_request`] sent via [`send_request`] into a
+/// `(healthy, diagnostic line)` pair the `doctor` prints. A transport-level failure (unreachable /
+/// protocol skew) is unhealthy with an actionable line; a SERVED error response is unhealthy too (the
+/// service answered but the status operation failed); a served OK response is healthy.
+#[must_use]
+pub fn diagnose_status_probe(
+    endpoint: &str,
+    outcome: &Result<SessionResponse, ClientError>,
+) -> (bool, String) {
+    match outcome {
+        Ok(response) if response.is_ok() => (
+            true,
+            format!(
+                "site service at {endpoint} answered `status` over site protocol v{} (OK)",
+                PROTOCOL_VERSION.0
+            ),
+        ),
+        Ok(response) => {
+            let detail = response.error().map_or_else(
+                || "an error response".to_owned(),
+                |error| error.message.clone(),
+            );
+            (
+                false,
+                format!(
+                    "site service at {endpoint} reachable but `status` returned an error: {detail}"
+                ),
+            )
+        }
+        Err(error @ ClientError::Unreachable { .. }) => (
+            false,
+            format!("{error} (is the site service running and is the URL correct?)"),
+        ),
+        Err(error @ ClientError::ProtocolSkew(_)) => (false, format!("{error}")),
+        Err(error) => (false, format!("{error}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parses_the_two_explicit_url_schemes() {
@@ -266,5 +369,69 @@ mod tests {
             resolve_endpoint(Some("tcp://10.0.0.1:9"), false).unwrap(),
             SiteEndpoint::Tcp("10.0.0.1:9".to_owned())
         );
+    }
+
+    #[test]
+    fn the_configured_url_is_used_only_below_flags_and_env() {
+        // An explicit --server beats a (different) configured URL.
+        assert_eq!(
+            resolve_endpoint_with_config(
+                Some("tcp://explicit:1"),
+                false,
+                Some("tcp://configured:2")
+            )
+            .unwrap(),
+            SiteEndpoint::Tcp("explicit:1".to_owned())
+        );
+        // With no flag and (assuming) no env, the configured URL is the fallback.
+        if std::env::var_os("JURISEARCH_SITE_URL").is_none() {
+            assert_eq!(
+                resolve_endpoint_with_config(None, false, Some("tcp://configured:2")).unwrap(),
+                SiteEndpoint::Tcp("configured:2".to_owned())
+            );
+            // No flag, no env, no config → an actionable error that names `configure`.
+            let error = resolve_endpoint_with_config(None, false, None).unwrap_err();
+            assert!(error.to_string().contains("configure"));
+        }
+    }
+
+    #[test]
+    fn diagnose_reports_a_served_ok_status_as_healthy() {
+        let outcome = Ok(SessionResponse::ok(
+            None,
+            json!({ "service": "jurisearch-site" }),
+        ));
+        let (healthy, line) = diagnose_status_probe("tcp://h:1", &outcome);
+        assert!(healthy);
+        assert!(line.contains("OK"), "line: {line}");
+    }
+
+    #[test]
+    fn diagnose_reports_a_served_error_status_as_unhealthy() {
+        let outcome = Ok(SessionResponse::err(
+            None,
+            jurisearch_core::error::ErrorObject::internal("snapshot unavailable"),
+        ));
+        let (healthy, line) = diagnose_status_probe("tcp://h:1", &outcome);
+        assert!(!healthy);
+        assert!(line.contains("snapshot unavailable"), "line: {line}");
+    }
+
+    #[test]
+    fn diagnose_reports_unreachable_and_skew_as_unhealthy_with_actionable_text() {
+        let unreachable = Err(ClientError::Unreachable {
+            endpoint: "tcp://h:1".to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+        });
+        let (healthy, line) = diagnose_status_probe("tcp://h:1", &unreachable);
+        assert!(!healthy);
+        assert!(line.contains("cannot reach"), "line: {line}");
+
+        let skew = Err(ClientError::ProtocolSkew(
+            "protocol skew: v9 vs v1".to_owned(),
+        ));
+        let (healthy, line) = diagnose_status_probe("tcp://h:1", &skew);
+        assert!(!healthy);
+        assert!(line.contains("skew"), "line: {line}");
     }
 }
