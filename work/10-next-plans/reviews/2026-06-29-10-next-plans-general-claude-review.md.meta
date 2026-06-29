@@ -1,0 +1,12 @@
+started_at=2026-06-29T11:17:14+02:00
+workdir=/home/pierre/Work/jurisearch
+workspace=jurisearch-reviews
+pane_id=5
+review_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-10-next-plans-general-claude-review.md
+tmp_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-10-next-plans-general-claude-review.md.tmp
+done_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-10-next-plans-general-claude-review.md.done
+prompt_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-10-next-plans-general-claude-prompt.md
+driver_prompt=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-10-next-plans-general-claude-review.md.driver-prompt.md
+pane_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-10-next-plans-general-claude-review.md.pane.txt
+timeout=2400
+keep_open=0

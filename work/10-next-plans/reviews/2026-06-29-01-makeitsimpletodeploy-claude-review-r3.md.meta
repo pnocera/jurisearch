@@ -1,0 +1,12 @@
+started_at=2026-06-29T09:12:32+02:00
+workdir=/home/pierre/Work/jurisearch
+workspace=jurisearch-reviews
+pane_id=3
+review_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-01-makeitsimpletodeploy-claude-review-r3.md
+tmp_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-01-makeitsimpletodeploy-claude-review-r3.md.tmp
+done_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-01-makeitsimpletodeploy-claude-review-r3.md.done
+prompt_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-01-makeitsimpletodeploy-claude-prompt-r3.md
+driver_prompt=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-01-makeitsimpletodeploy-claude-review-r3.md.driver-prompt.md
+pane_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-01-makeitsimpletodeploy-claude-review-r3.md.pane.txt
+timeout=1800
+keep_open=0
