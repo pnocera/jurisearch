@@ -96,6 +96,32 @@ pub const NON_GENERATION_TABLES: &[&str] = &[
     "ingest_error",
 ];
 
+/// The enumerated `public` tables the **SITE** writer ([`crate::backend::RoleProfile::Site`]) gets DML
+/// on — the client applier's narrow `public` write surface (ingest accounting, the package
+/// catalog/change-log, the manifest, and the version stamps), the single source of truth the SITE
+/// provisioning grants ([`crate::backend::provision_roles`]) derive from, so a schema change cannot
+/// silently outrun them. Co-located with [`NON_GENERATION_TABLES`] and the same shape, so the two are
+/// audited together.
+///
+/// This is NOT the producer's surface. The EXTERNAL PRODUCER ([`crate::backend::RoleProfile::Producer`],
+/// the box that BUILDS the corpus) is the build principal and gets DML across the FULL `public` working
+/// schema — there is no enumerated producer table list to drift.
+///
+/// Least privilege (SITE): every entry is NON-replicated — a [`REPLICATED_TABLES`] row in `public` is
+/// only a `LIKE` template the site writer *reads*; corpus data is written into the per-generation
+/// schemas, never into `public`. A test asserts this set is disjoint from [`REPLICATED_TABLES`] and a
+/// superset of [`NON_GENERATION_TABLES`] (every never-per-generation control/operational table is in the
+/// site write surface).
+pub const SITE_PUBLIC_WRITE_TABLES: &[&str] = &[
+    "index_manifest",
+    "schema_migrations",
+    "package_change_log",
+    "package_catalog",
+    "ingest_run",
+    "ingest_member",
+    "ingest_error",
+];
+
 /// Whether `table_name` is a replicated data table (emitted per-generation + fronted by a view).
 #[must_use]
 pub fn is_replicated_table(table_name: &str) -> bool {
@@ -1380,6 +1406,31 @@ mod tests {
         }
         for table in NON_GENERATION_TABLES {
             assert!(!is_replicated_table(table));
+        }
+    }
+
+    /// The SITE writer's enumerated `public` write surface must stay least-privilege AND complete: never
+    /// a replicated table (those are written per-generation, not in `public`), and it must cover every
+    /// never-per-generation control/operational table (so a new such table cannot ship without the SITE
+    /// provisioning writer grants picking it up). (The PRODUCER profile is unenumerated — full `public`.)
+    #[test]
+    fn site_public_write_tables_are_non_replicated_and_cover_non_generation() {
+        for table in SITE_PUBLIC_WRITE_TABLES {
+            assert!(
+                !is_replicated_table(table),
+                "`{table}` is replicated — the site writer must not get a `public` DML grant on it"
+            );
+        }
+        for table in NON_GENERATION_TABLES {
+            assert!(
+                SITE_PUBLIC_WRITE_TABLES.contains(table),
+                "non-generation table `{table}` is missing from the site write surface"
+            );
+        }
+        // No duplicates in the write surface (a duplicated grant would be a latent drift signal).
+        let mut seen = std::collections::HashSet::new();
+        for table in SITE_PUBLIC_WRITE_TABLES {
+            assert!(seen.insert(table), "duplicate `{table}` in write surface");
         }
     }
 

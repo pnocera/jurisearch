@@ -939,6 +939,15 @@ pub enum StorageError {
     },
     #[error("invalid migration plan: {message}")]
     MigrationPlan { message: String },
+    /// A required extension (`vector`/`pg_search`) is not installed and the connecting role lacks the
+    /// privilege to `CREATE EXTENSION` it (superuser, or a trusted-extension grant the role does not
+    /// hold). Surfaced — instead of failing silently deep inside migration 1 — with the EXACT DBA SQL a
+    /// database superuser must run ONCE before the producer can provision/migrate against this server.
+    #[error(
+        "required extension `{extension}` is not installed and the connecting role cannot create it \
+         (superuser privilege needed). Ask a database superuser to run once:\n{dba_sql}"
+    )]
+    ExtensionPrivilege { extension: String, dba_sql: String },
     #[error("canonical projection failed: {message}")]
     Projection { message: String },
     #[error("dense rebuild failed: {message}")]

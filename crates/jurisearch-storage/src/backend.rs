@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use crate::generations::{ActivationReadVisibility, REPLICATED_TABLES};
+use crate::generations::{ActivationReadVisibility, REPLICATED_TABLES, SITE_PUBLIC_WRITE_TABLES};
 use crate::runtime::{ManagedPostgres, StorageError, sql_identifier, sql_string_literal};
 
 /// Default least-privilege role names. A deployment may override them via [`RoleSpec`].
@@ -362,9 +362,30 @@ impl Default for RoleSpec {
     }
 }
 
-/// Provision the least-privilege roles + grants on a freshly-migrated database (idempotent;
-/// superuser connection). This is a **provisioning** step (role names/passwords are deployment config,
-/// not a hardcoded schema migration). It:
+/// Which writer grant profile [`build_provision_sql`] issues. The owner and read roles are IDENTICAL
+/// across profiles (read stays SELECT-only either way); only the **writer's `public` authority** differs,
+/// because the two deployments give the writer a different real job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleProfile {
+    /// SITE / client host (the syncd package applier). The writer READS the replicated `public`
+    /// templates (to clone per-generation schemas) and writes ONLY the control/app namespaces plus the
+    /// enumerated `public` accounting tables ([`SITE_PUBLIC_WRITE_TABLES`]). It NEVER writes the `public`
+    /// WORKING tables — corpus data lives in per-generation schemas — so the site's read/write
+    /// confidentiality split (serve queries split read vs write) is preserved.
+    Site,
+    /// EXTERNAL PRODUCER database (the box that BUILDS the corpus, provisioned by
+    /// [`provision_producer_roles`] / [`crate::provision::provision_external_db`]). The writer is the
+    /// BUILD PRINCIPAL: its unqualified helper SQL (`search_path=public`) writes the entire `public`
+    /// working schema (`documents`, `chunks`, `graph_edges`, `official_api_responses`, dense/zone/citation,
+    /// … plus all accounting), so it gets DML across the FULL `public` schema and `USAGE` on every public
+    /// sequence — no enumerated table list to drift, and no query-confidentiality split (the producer
+    /// authoritatively owns `public`).
+    Producer,
+}
+
+/// Provision the least-privilege roles + grants for a **SITE / client** host on a freshly-migrated
+/// database ([`RoleProfile::Site`]; idempotent; superuser connection). This is a **provisioning** step
+/// (role names/passwords are deployment config, not a hardcoded schema migration). It:
 ///
 /// 1. creates the NOLOGIN owner + LOGIN read/writer roles (idempotent), and makes the writer a member
 ///    of the owner so it can run the app's dynamic DDL without superuser;
@@ -373,7 +394,11 @@ impl Default for RoleSpec {
 ///    `CREATE OR REPLACE` the stable views and create generation schemas later (2B);
 /// 3. grants the **read** role SELECT-only on the control/manifest tables + the stable views (and a
 ///    default privilege so rebuilt views stay readable) — and **no** write anywhere;
-/// 4. grants the **writer** role the DML + CREATE-on-database it needs to apply.
+/// 4. grants the **writer** role the DML + CREATE-on-database it needs to apply (the narrow site
+///    `public` surface: SELECT on the replicated templates + DML on [`SITE_PUBLIC_WRITE_TABLES`]).
+///
+/// For the EXTERNAL PRODUCER database use [`provision_producer_roles`] instead — same owner/read model,
+/// but the writer gets the FULL `public` working schema (see [`RoleProfile`]).
 ///
 /// The per-generation grant (read role on each newly activated physical schema) is NOT here — it is an
 /// activation postcondition (`activate_generation_with_guard_and_visibility`).
@@ -382,7 +407,24 @@ pub fn provision_roles(
     spec: &RoleSpec,
     dbname: &str,
 ) -> Result<(), StorageError> {
-    let sql = build_provision_sql(spec, dbname);
+    let sql = build_provision_sql(spec, dbname, RoleProfile::Site);
+    client
+        .batch_execute(&sql)
+        .map_err(StorageError::PostgresClient)
+}
+
+/// Provision the least-privilege roles + grants for the **EXTERNAL PRODUCER** database
+/// ([`RoleProfile::Producer`]; idempotent; superuser connection). Identical to [`provision_roles`] for
+/// the owner/read roles, but the **writer** is the corpus BUILD PRINCIPAL, so it receives DML across the
+/// FULL `public` working schema + `USAGE` on every public sequence (and default privileges so
+/// later-created public objects stay covered) — not the site's narrow enumerated surface. See
+/// [`RoleProfile::Producer`].
+pub fn provision_producer_roles(
+    client: &mut postgres::Client,
+    spec: &RoleSpec,
+    dbname: &str,
+) -> Result<(), StorageError> {
+    let sql = build_provision_sql(spec, dbname, RoleProfile::Producer);
     client
         .batch_execute(&sql)
         .map_err(StorageError::PostgresClient)
@@ -393,7 +435,7 @@ pub fn provision_roles(
 /// as identifiers at runtime with `%I`). It does not merely *add* privileges — it normalizes role
 /// attributes and revokes accidental surfaces first, so an over-privileged pre-existing role (or a
 /// legacy `PUBLIC` CREATE on `public`) is brought back down to least privilege, not left in place.
-fn build_provision_sql(spec: &RoleSpec, dbname: &str) -> String {
+fn build_provision_sql(spec: &RoleSpec, dbname: &str, profile: RoleProfile) -> String {
     let owner = sql_identifier(&spec.owner_role);
     let read = sql_identifier(&spec.read_role);
     let writer = sql_identifier(&spec.writer_role);
@@ -538,33 +580,122 @@ fn build_provision_sql(spec: &RoleSpec, dbname: &str) -> String {
     ));
 
     // 6. Writer role: USAGE + DML on the app namespaces + sequence usage (no ownership of `public`).
+    //    The control/app surface is IDENTICAL across profiles; only the `public` authority differs.
     sql.push_str(&format!(
         "GRANT USAGE ON SCHEMA public, jurisearch_control, jurisearch_server, jurisearch_app TO {writer};\n"
     ));
-    // The writer creates each generation's tables as `CREATE TABLE … (LIKE public.<table> …)`, which
-    // needs SELECT on exactly the `public` REPLICATED templates (and the named control/catalog tables,
-    // re-granted below). CONVERGE first: revoke the writer's `public` table surface, so a deployment
-    // that previously received a broad `public` grant (or drifted into one) is brought back to exactly
-    // the needed set — the writer cannot read an unrelated `public` table. (It writes its corpus data
-    // into the per-generation schemas, never into `public`.)
-    sql.push_str(&format!(
-        "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {writer};\n"
-    ));
-    let replicated = REPLICATED_TABLES
-        .iter()
-        .map(|table| format!("public.{}", sql_identifier(table)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    sql.push_str(&format!("GRANT SELECT ON {replicated} TO {writer};\n"));
     sql.push_str(&format!(
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA jurisearch_control, jurisearch_app TO {writer};\n"
     ));
     sql.push_str(&format!(
-        "GRANT SELECT, INSERT, UPDATE, DELETE ON public.index_manifest, public.schema_migrations, public.package_change_log, public.package_catalog TO {writer};\n"
-    ));
-    sql.push_str(&format!(
         "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA jurisearch_control, jurisearch_app TO {writer};\n"
     ));
+    // CONVERGE the writer's WHOLE `public` table AND sequence surface FIRST (both profiles), so a
+    // deployment that previously received a broad `public` table grant OR a broad
+    // `GRANT … ON ALL SEQUENCES IN SCHEMA public` (drift) is brought back to exactly what the profile
+    // needs — additive grants alone would leave an over-privileged writer in place (codex r2 WARN).
+    sql.push_str(&format!(
+        "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {writer};\n"
+    ));
+    sql.push_str(&format!(
+        "REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {writer};\n"
+    ));
+    // CONVERGE the writer's FUTURE-object (DEFAULT) `public` privileges too (both profiles). The
+    // current-object revokes above only touch tables/sequences that exist NOW; a prior run or operator
+    // drift may have left a broad `ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA public GRANT ALL ON
+    // TABLES/SEQUENCES TO {writer}`, so every OWNER-created public object would silently inherit
+    // `TRUNCATE`/`REFERENCES`/`TRIGGER` (tables) or `UPDATE` (sequences). Revoke-first the defaults, then
+    // each profile re-grants ONLY what it intends: the producer re-grants the narrow DML/USAGE default
+    // (below); the SITE profile re-grants NOTHING, so the site writer keeps NO public default privileges.
+    // `REVOKE ALL` is idempotent — a no-op when no default privilege exists (codex r3 WARN).
+    sql.push_str(&format!(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA public REVOKE ALL ON TABLES FROM {writer};\n"
+    ));
+    sql.push_str(&format!(
+        "ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA public REVOKE ALL ON SEQUENCES FROM {writer};\n"
+    ));
+
+    match profile {
+        RoleProfile::Site => {
+            // SITE / client applier: it creates each generation's tables as
+            // `CREATE TABLE … (LIKE public.<table> …)`, so it needs SELECT on exactly the `public`
+            // REPLICATED templates — never write, and never an unrelated `public` table. Corpus data is
+            // written into the per-generation schemas, so `public` working tables stay untouched here.
+            let replicated = REPLICATED_TABLES
+                .iter()
+                .map(|table| format!("public.{}", sql_identifier(table)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!("GRANT SELECT ON {replicated} TO {writer};\n"));
+            // The site writer's narrow `public` DML surface is the SHARED CONSTANT
+            // (`SITE_PUBLIC_WRITE_TABLES`), so the grants can never drift from the schema: it records
+            // ingest accounting, the package catalog/change-log, the manifest, and the version stamps —
+            // all in `public`. Without this the postcondition could report `writer_can_write = true` (an
+            // `index_manifest` upsert) while the applier fails at its first accounting write.
+            let site_write = SITE_PUBLIC_WRITE_TABLES
+                .iter()
+                .map(|table| format!("public.{}", sql_identifier(table)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {site_write} TO {writer};\n"
+            ));
+            // Those tables include `bigserial` columns (`ingest_member.member_id`,
+            // `ingest_error.error_id`, `package_change_log.change_seq`), so the writer also needs USAGE on
+            // their backing sequences or the first `INSERT` fails with `permission denied for sequence`.
+            // Grant ONLY the sequences OWNED BY the site-write tables (via `pg_depend`, `deptype = 'a'`),
+            // so this stays least-privilege: a replicated table's `public` sequence (e.g.
+            // `official_api_responses.response_id`) is NOT granted. The `pg_depend` set is constrained to
+            // a `public` sequence OWNED BY a `public` table (both namespaces pinned), so it can never pick
+            // up a same-named table in another schema. The converge-revoke above already dropped any prior
+            // broad sequence grant.
+            let site_write_literals = SITE_PUBLIC_WRITE_TABLES
+                .iter()
+                .map(|table| sql_string_literal(table))
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(
+                "DO $do$ DECLARE seq text; writer_name text := {writer_lit}; BEGIN \
+                   FOR seq IN \
+                     SELECT quote_ident(n.nspname) || '.' || quote_ident(s.relname) \
+                     FROM pg_class s \
+                     JOIN pg_namespace n ON n.oid = s.relnamespace \
+                     JOIN pg_depend d ON d.objid = s.oid AND d.deptype = 'a' \
+                     JOIN pg_class t ON t.oid = d.refobjid \
+                     JOIN pg_namespace tn ON tn.oid = t.relnamespace \
+                     WHERE s.relkind = 'S' AND n.nspname = 'public' AND tn.nspname = 'public' \
+                       AND t.relname IN ({site_write_literals}) LOOP \
+                     EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %s TO %I', seq, writer_name); \
+                   END LOOP; \
+                 END $do$;\n",
+                writer_lit = sql_string_literal(&spec.writer_role),
+            ));
+        }
+        RoleProfile::Producer => {
+            // EXTERNAL PRODUCER: the writer is the corpus BUILD PRINCIPAL. Its helper SQL runs unqualified
+            // under `search_path=public` and mutates the entire `public` working schema (documents,
+            // chunks, graph_edges, official_api_responses, dense/zone/citation, … and all accounting), so
+            // grant DML across the FULL `public` schema and USAGE on EVERY public sequence (e.g. the
+            // `official_api_responses.response_id` bigserial). No enumerated table list — drift-proof.
+            sql.push_str(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {writer};\n"
+            ));
+            sql.push_str(&format!(
+                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {writer};\n"
+            ));
+            // Tables/sequences the OWNER creates LATER (re-baseline DDL, owner-replayed migrations) stay
+            // covered without a re-provision. (The primary drift-proofing is the idempotent re-run of this
+            // provisioner, whose `… ON ALL TABLES/SEQUENCES` re-grants after any new migration.)
+            sql.push_str(&format!(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA public \
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {writer};\n"
+            ));
+            sql.push_str(&format!(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA public \
+                 GRANT USAGE, SELECT ON SEQUENCES TO {writer};\n"
+            ));
+        }
+    }
 
     // 6. Optional passwords (a real shared server; the managed harness uses trust auth).
     if let Some(password) = &spec.read_password {
@@ -632,7 +763,7 @@ mod tests {
 
     #[test]
     fn provision_sql_quotes_identifiers_and_omits_password_when_absent() {
-        let sql = build_provision_sql(&RoleSpec::default(), "jurisearch");
+        let sql = build_provision_sql(&RoleSpec::default(), "jurisearch", RoleProfile::Site);
         assert!(sql.contains("\"jurisearch_read\""));
         assert!(sql.contains("\"jurisearch_write\""));
         assert!(sql.contains("GRANT \"jurisearch_owner\" TO \"jurisearch_write\";"));
@@ -668,8 +799,152 @@ mod tests {
     }
 
     #[test]
+    fn site_profile_grants_writer_the_enumerated_public_write_surface_and_owned_sequences() {
+        let sql = build_provision_sql(&RoleSpec::default(), "jurisearch", RoleProfile::Site);
+        // Every site-writable `public` table is in the writer's explicit DML grant — including the
+        // accounting tables a freshly provisioned applier must write at its first run.
+        for table in SITE_PUBLIC_WRITE_TABLES {
+            assert!(
+                sql.contains(&format!("public.\"{table}\"")),
+                "writer DML grant is missing `public.{table}`:\n{sql}"
+            );
+        }
+        for table in ["ingest_run", "ingest_member", "ingest_error"] {
+            assert!(sql.contains(&format!("public.\"{table}\"")), "{table}");
+        }
+        // The SITE profile must NOT grant DML on every public table (that is the producer's authority).
+        assert!(
+            !sql.contains("GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public"),
+            "site writer must not get full public DML: {sql}"
+        );
+        // USAGE on the bigserial sequences OWNED BY the site-write tables (pg_depend, deptype 'a'),
+        // scoped to those tables only — NOT `ALL SEQUENCES IN SCHEMA public` (which would leak a
+        // replicated table's sequence to the writer).
+        assert!(sql.contains("d.deptype = 'a'"), "{sql}");
+        assert!(
+            sql.contains("GRANT USAGE, SELECT ON SEQUENCE %s TO %I"),
+            "{sql}"
+        );
+        assert!(
+            !sql.contains("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public"),
+            "must not grant the site writer USAGE on every public sequence: {sql}"
+        );
+        // The pg_depend scan is pinned to a public sequence OWNED BY a public table (both namespaces).
+        assert!(sql.contains("tn.nspname = 'public'"), "{sql}");
+        assert!(sql.contains("t.relname IN ('index_manifest'"), "{sql}");
+        assert!(sql.contains("'ingest_member'"), "{sql}");
+        // The public sequence surface is CONVERGED (revoked) first, like the table surface — so a
+        // previously over-granted writer cannot keep broad public sequence access (codex r2 WARN).
+        assert!(
+            sql.contains("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM \"jurisearch_write\";"),
+            "site writer public sequence surface must be converge-revoked: {sql}"
+        );
+        // FUTURE-object (DEFAULT) public privileges are converge-revoked too, and the SITE profile
+        // re-grants NOTHING as default — so the site writer keeps NO public default privileges (codex
+        // r3 WARN).
+        assert!(
+            sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public REVOKE ALL ON TABLES FROM \"jurisearch_write\";"
+            ),
+            "site writer default table privileges must be converge-revoked: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public REVOKE ALL ON SEQUENCES FROM \"jurisearch_write\";"
+            ),
+            "site writer default sequence privileges must be converge-revoked: {sql}"
+        );
+        assert!(
+            !sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public GRANT"
+            ),
+            "site profile must leave NO public default privileges for the writer: {sql}"
+        );
+    }
+
+    #[test]
+    fn producer_profile_grants_writer_the_full_public_working_schema_and_all_sequences() {
+        let sql = build_provision_sql(&RoleSpec::default(), "jurisearch", RoleProfile::Producer);
+        // The producer writer is the BUILD PRINCIPAL: DML across the FULL public schema + USAGE on every
+        // public sequence (so unqualified writes to documents/chunks/official_api_responses/… succeed).
+        assert!(
+            sql.contains(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"jurisearch_write\";"
+            ),
+            "producer writer must get full public DML: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO \"jurisearch_write\";"
+            ),
+            "producer writer must get USAGE on all public sequences: {sql}"
+        );
+        // Converge-revoke before the additive grants (no drift), for BOTH tables and sequences.
+        assert!(
+            sql.contains("REVOKE ALL ON ALL TABLES IN SCHEMA public FROM \"jurisearch_write\";")
+        );
+        assert!(
+            sql.contains("REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM \"jurisearch_write\";")
+        );
+        // Default privileges are ALSO converge-revoked first, so a drifted broad `GRANT ALL` default
+        // cannot leave TRUNCATE/REFERENCES/TRIGGER (tables) or UPDATE (sequences) on future objects
+        // before the narrow re-grant (codex r3 WARN).
+        assert!(
+            sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public REVOKE ALL ON TABLES FROM \"jurisearch_write\";"
+            ),
+            "producer default table privileges must be converge-revoked: {sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public REVOKE ALL ON SEQUENCES FROM \"jurisearch_write\";"
+            ),
+            "producer default sequence privileges must be converge-revoked: {sql}"
+        );
+        // The revoke-first precedes the narrow default re-grant.
+        let revoke_default_tables = sql
+            .find("ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public REVOKE ALL ON TABLES")
+            .expect("default-table converge-revoke present");
+        let grant_default_tables = sql
+            .find(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public \
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES",
+            )
+            .expect("default-table re-grant present");
+        assert!(
+            revoke_default_tables < grant_default_tables,
+            "default-privilege revoke must precede the re-grant: {sql}"
+        );
+        // Default privileges so later owner-created public objects stay covered (drift-proof).
+        assert!(
+            sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public \
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"jurisearch_write\";"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE \"jurisearch_owner\" IN SCHEMA public \
+                 GRANT USAGE, SELECT ON SEQUENCES TO \"jurisearch_write\";"
+            ),
+            "{sql}"
+        );
+        // The producer profile must NOT fall back to the enumerated-table / pg_depend site model.
+        assert!(
+            !sql.contains("d.deptype = 'a'"),
+            "producer profile must not use the enumerated owned-sequence pg_depend block: {sql}"
+        );
+        // The read role stays SELECT-only even on the producer DB (no public DML for read).
+        assert!(
+            !sql.contains("ON ALL TABLES IN SCHEMA public TO \"jurisearch_read\""),
+            "read role must never get public DML: {sql}"
+        );
+    }
+
+    #[test]
     fn provision_sql_is_convergent_not_merely_additive() {
-        let sql = build_provision_sql(&RoleSpec::default(), "jurisearch");
+        let sql = build_provision_sql(&RoleSpec::default(), "jurisearch", RoleProfile::Site);
         // Attribute normalization brings a pre-existing over-privileged role back down (NOINHERIT too).
         assert!(sql.contains(
             "ALTER ROLE \"jurisearch_read\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;"
@@ -693,7 +968,7 @@ mod tests {
             owner_role: "Juris-Owner".to_owned(),
             ..RoleSpec::default()
         };
-        let sql = build_provision_sql(&spec, "jurisearch");
+        let sql = build_provision_sql(&spec, "jurisearch", RoleProfile::Site);
         assert!(
             sql.contains("OWNER TO %I"),
             "ownership loop must re-quote the owner via %I"
@@ -712,7 +987,7 @@ mod tests {
             read_password: Some("r'p".to_owned()),
             ..RoleSpec::default()
         };
-        let sql = build_provision_sql(&spec, "jurisearch");
+        let sql = build_provision_sql(&spec, "jurisearch", RoleProfile::Site);
         // Single quote in the password is doubled by the string-literal quoter.
         assert!(sql.contains("ALTER ROLE \"jurisearch_read\" PASSWORD 'r''p';"));
     }

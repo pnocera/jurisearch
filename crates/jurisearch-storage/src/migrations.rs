@@ -1127,56 +1127,191 @@ SET value = excluded.value,
     },
 ];
 
-impl ManagedPostgres {
-    pub fn run_migrations(&self) -> Result<MigrationReport, StorageError> {
-        validate_migration_list()?;
-        self.execute_sql(
+/// The PostgreSQL extensions the schema requires (migration 1 `CREATE EXTENSION`s them). Creating an
+/// extension that is not "trusted" needs superuser, which the connecting producer role on an EXTERNAL
+/// server may not hold — [`run_migrations_on`] pre-flights these and surfaces an actionable DBA error
+/// ([`StorageError::ExtensionPrivilege`]) instead of failing opaquely inside migration 1. A
+/// drift guard (`required_extensions_match_migration_one`) asserts this list matches migration 1's SQL.
+pub const REQUIRED_EXTENSIONS: &[&str] = &["vector", "pg_search"];
+
+/// The exact, copy-pasteable DDL a database superuser runs ONCE to install every required extension, so
+/// a least-privilege producer role can then provision/migrate. Embedded in
+/// [`StorageError::ExtensionPrivilege`].
+#[must_use]
+pub fn required_extension_dba_sql() -> String {
+    REQUIRED_EXTENSIONS
+        .iter()
+        .map(|extension| {
+            format!(
+                "CREATE EXTENSION IF NOT EXISTS {};",
+                sql_identifier(extension)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_insufficient_privilege(error: &postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|db| db.code() == &postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+}
+
+/// The migration whose SQL `CREATE EXTENSION`s the [`REQUIRED_EXTENSIONS`] (asserted by
+/// `required_extensions_match_migration_one`). The required-extension creation is performed INSIDE this
+/// migration's transaction (so a privilege failure rolls back atomically with no version stamp), and the
+/// already-migrated repair path keys off it.
+const REQUIRED_EXTENSION_MIGRATION: i32 = 1;
+
+/// Ensure every [`REQUIRED_EXTENSIONS`] entry is installed on the connected database, creating any that
+/// are missing (`CREATE EXTENSION IF NOT EXISTS`, idempotent). If a missing extension cannot be created
+/// because the connecting role lacks the privilege, returns [`StorageError::ExtensionPrivilege`] with
+/// the exact DBA SQL — never a silent pass. Returns the names present after the call (for the report).
+///
+/// Generic over [`GenericClient`] so it runs identically on a borrowed `postgres::Client` (the
+/// already-migrated repair path) AND inside the migration-1 `postgres::Transaction` (atomic create).
+fn ensure_required_extensions<C: GenericClient>(
+    client: &mut C,
+) -> Result<Vec<String>, StorageError> {
+    let mut present = Vec::with_capacity(REQUIRED_EXTENSIONS.len());
+    for extension in REQUIRED_EXTENSIONS {
+        let already: bool = client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = $1);",
+                &[extension],
+            )
+            .map_err(StorageError::PostgresClient)?
+            .get(0);
+        if already {
+            present.push((*extension).to_owned());
+            continue;
+        }
+        match client.batch_execute(&format!(
+            "CREATE EXTENSION IF NOT EXISTS {};",
+            sql_identifier(extension)
+        )) {
+            Ok(()) => present.push((*extension).to_owned()),
+            Err(error) if is_insufficient_privilege(&error) => {
+                return Err(StorageError::ExtensionPrivilege {
+                    extension: (*extension).to_owned(),
+                    dba_sql: required_extension_dba_sql(),
+                });
+            }
+            Err(error) => return Err(StorageError::PostgresClient(error)),
+        }
+    }
+    Ok(present)
+}
+
+/// Apply the canonical [`MIGRATIONS`] over a BORROWED `postgres::Client` (work/10 §2 seam S2) — the
+/// connection-based migration applier that lets the producer migrate an EXTERNAL operator-run PostgreSQL
+/// with no [`ManagedPostgres`]. It is the single source of truth for "apply the schema":
+/// [`ManagedPostgres::run_migrations`] is a thin wrapper that opens a client and delegates here, so the
+/// self-managed and external paths can never drift (same `MIGRATIONS`, same ordering, same per-migration
+/// transaction, same `schema_migrations` bookkeeping, same byte-identical version-stamp INSERT the psql
+/// path used).
+///
+/// Ordering (M1-B WARN fixes): the `schema_migrations` ledger is created/read and the
+/// [`StorageError::SchemaVersionAhead`] check runs FIRST, so an unsupported newer database is rejected
+/// before any extension or schema DDL touches it. Only then are the required extensions
+/// (`vector`/`pg_search`) handled — created INSIDE migration 1's own transaction when it is still pending
+/// (so `vector` succeeding then `pg_search` failing rolls back atomically, leaving no version stamp), or
+/// validated/repaired as a separate autocommit step when migration 1 is already applied. Either way a
+/// missing extension the connecting role cannot create fails with the actionable
+/// [`StorageError::ExtensionPrivilege`] (exact DBA SQL) rather than opaquely inside migration 1.
+/// Idempotent: a second call applies nothing and returns the full present version set.
+///
+/// # Errors
+/// * [`StorageError::ExtensionPrivilege`] if a required extension is missing and uncreatable by the role.
+/// * [`StorageError::SchemaVersionAhead`] if the database is newer than this binary supports.
+/// * [`StorageError::PostgresClient`] on any DB error (each migration runs in its own transaction, so a
+///   failure rolls that migration back and leaves earlier ones committed).
+pub fn run_migrations_on(client: &mut postgres::Client) -> Result<MigrationReport, StorageError> {
+    validate_migration_list()?;
+
+    // 1. The schema_migrations ledger + the applied set FIRST — before any extension or schema DDL — so
+    //    an unsupported newer database is rejected (`SchemaVersionAhead`) WITHOUT being mutated by
+    //    extension creation (M1-B WARN: version-ahead must win over an extension-privilege failure).
+    client
+        .batch_execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations (\
              version integer PRIMARY KEY, \
              name text NOT NULL, \
              applied_at timestamptz NOT NULL DEFAULT now()\
              );",
-        )?;
+        )
+        .map_err(StorageError::PostgresClient)?;
 
-        let applied_versions =
-            self.execute_sql("SELECT version::text FROM schema_migrations ORDER BY version;")?;
-        let mut applied = applied_versions
-            .lines()
-            .map(|line| {
-                line.parse::<i32>()
-                    .map_err(|error| StorageError::MigrationPlan {
-                        message: format!("invalid schema_migrations version `{line}`: {error}"),
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if let Some(database_version) = applied.iter().copied().max()
-            && database_version > CURRENT_SCHEMA_VERSION
-        {
-            return Err(StorageError::SchemaVersionAhead {
-                database_version,
-                binary_version: CURRENT_SCHEMA_VERSION,
-            });
+    let mut applied = client
+        .query(
+            "SELECT version FROM schema_migrations ORDER BY version;",
+            &[],
+        )
+        .map_err(StorageError::PostgresClient)?
+        .iter()
+        .map(|row| row.get::<_, i32>(0))
+        .collect::<Vec<_>>();
+    if let Some(database_version) = applied.iter().copied().max()
+        && database_version > CURRENT_SCHEMA_VERSION
+    {
+        return Err(StorageError::SchemaVersionAhead {
+            database_version,
+            binary_version: CURRENT_SCHEMA_VERSION,
+        });
+    }
+
+    // 2. Only now that the database is known to be SUPPORTED, handle the required extensions. If
+    //    migration 1 is already applied, the schema exists but an extension may have been dropped/needs
+    //    validation — repair it as a SEPARATE explicit step (autocommit) AFTER the version check, before
+    //    applying any pending later migration that depends on it (e.g. migration 2's `bm25` index). If
+    //    migration 1 is still PENDING, its extension creation runs INSIDE its own transaction below, so a
+    //    privilege failure rolls back atomically with no version stamp (M1-B WARN: restored migration-1
+    //    extension-DDL atomicity).
+    if applied.contains(&REQUIRED_EXTENSION_MIGRATION) {
+        ensure_required_extensions(client)?;
+    }
+
+    for migration in MIGRATIONS {
+        if applied.contains(&migration.version) {
+            continue;
         }
-
-        for migration in MIGRATIONS {
-            if applied.contains(&migration.version) {
-                continue;
-            }
-            self.execute_sql(&format!(
-                "BEGIN;\n{}\nINSERT INTO {} (version, name) VALUES ({}, {});\nCOMMIT;",
-                migration.sql,
-                sql_identifier("schema_migrations"),
-                migration.version,
-                sql_string_literal(migration.name)
-            ))?;
-            applied.push(migration.version);
+        let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
+        // Migration 1 owns the required extensions: create them INSIDE its transaction (mapping SQLSTATE
+        // 42501 → `ExtensionPrivilege`) BEFORE its schema SQL, so `vector` succeeding then `pg_search`
+        // failing rolls the whole migration back — no partially-changed DB, no version stamp. The
+        // migration's own idempotent `CREATE EXTENSION IF NOT EXISTS` then no-ops.
+        if migration.version == REQUIRED_EXTENSION_MIGRATION {
+            ensure_required_extensions(&mut tx)?;
         }
+        tx.batch_execute(migration.sql)
+            .map_err(StorageError::PostgresClient)?;
+        // Byte-identical version stamp to the historical psql path (`sql_string_literal`-quoted name),
+        // so the `schema_migrations` rows are indistinguishable between the two appliers.
+        tx.batch_execute(&format!(
+            "INSERT INTO {} (version, name) VALUES ({}, {});",
+            sql_identifier("schema_migrations"),
+            migration.version,
+            sql_string_literal(migration.name)
+        ))
+        .map_err(StorageError::PostgresClient)?;
+        tx.commit().map_err(StorageError::PostgresClient)?;
+        applied.push(migration.version);
+    }
 
-        applied.sort_unstable();
-        Ok(MigrationReport {
-            applied,
-            current_version: CURRENT_SCHEMA_VERSION,
-        })
+    applied.sort_unstable();
+    Ok(MigrationReport {
+        applied,
+        current_version: CURRENT_SCHEMA_VERSION,
+    })
+}
+
+impl ManagedPostgres {
+    /// Apply the schema to the self-managed database. Behavior-preserving thin wrapper that opens a
+    /// (search-path-pinned) client and delegates to [`run_migrations_on`] — the single source of truth —
+    /// so the self-managed and external-PG paths share one `MIGRATIONS` applier and cannot drift.
+    pub fn run_migrations(&self) -> Result<MigrationReport, StorageError> {
+        let mut client = self.client()?;
+        run_migrations_on(&mut client)
     }
 }
 
@@ -1222,6 +1357,33 @@ mod tests {
     #[test]
     fn migration_list_is_valid() {
         validate_migration_list().expect("migration list must validate");
+    }
+
+    /// Drift guard: every extension the S2 pre-flight pre-creates (and emits in the actionable DBA SQL)
+    /// must be exactly the set migration 1 `CREATE EXTENSION`s. If a future migration adds/removes an
+    /// extension without updating `REQUIRED_EXTENSIONS`, the producer would either fail opaquely (missing
+    /// from the pre-flight) or emit a misleading DBA hint (stale entry) — this catches both.
+    #[test]
+    fn required_extensions_match_migration_one() {
+        let sql = migration_sql(1);
+        for extension in REQUIRED_EXTENSIONS {
+            assert!(
+                sql.contains(&format!("CREATE EXTENSION IF NOT EXISTS {extension};")),
+                "migration 1 must create required extension `{extension}`"
+            );
+        }
+        let created = sql.matches("CREATE EXTENSION IF NOT EXISTS").count();
+        assert_eq!(
+            created,
+            REQUIRED_EXTENSIONS.len(),
+            "migration 1 creates {created} extensions but REQUIRED_EXTENSIONS has {} — they must match",
+            REQUIRED_EXTENSIONS.len()
+        );
+        // The actionable DBA SQL names every required extension (identifier-quoted).
+        let dba = required_extension_dba_sql();
+        for extension in REQUIRED_EXTENSIONS {
+            assert!(dba.contains(&sql_identifier(extension)), "{dba}");
+        }
     }
 
     /// The v18 `documents.corpus` backfill `CASE` is the SQL projection of the single source of
