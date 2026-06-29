@@ -54,6 +54,8 @@ pub struct ChunkEmbeddingInput {
     pub embedding_text: String,
 }
 
+/// Thin [`ManagedPostgres`] shim over [`load_chunk_embedding_inputs_with_client`] (work/10 M1-B S1):
+/// open a fresh client and delegate. Behavior is unchanged for existing callers.
 pub fn load_chunk_embedding_inputs(
     postgres: &ManagedPostgres,
     embedding_fingerprint: &str,
@@ -61,8 +63,25 @@ pub fn load_chunk_embedding_inputs(
     dimension: i32,
     limit: Option<u32>,
 ) -> Result<Vec<ChunkEmbeddingInput>, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    load_chunk_embedding_inputs_with_client(
+        &mut client,
+        embedding_fingerprint,
+        model,
+        dimension,
+        limit,
+    )
+}
+
+/// Client-source variant of [`load_chunk_embedding_inputs`] (work/10 M1-B S1): runs the same query over
+/// a borrowed client so the producer can read against an external PostgreSQL.
+pub fn load_chunk_embedding_inputs_with_client(
+    client: &mut postgres::Client,
+    embedding_fingerprint: &str,
+    model: &str,
+    dimension: i32,
+    limit: Option<u32>,
+) -> Result<Vec<ChunkEmbeddingInput>, StorageError> {
     let rows = if let Some(limit) = limit {
         let limit = i64::from(limit);
         client
@@ -113,14 +132,25 @@ pub fn load_chunk_embedding_inputs(
         .collect())
 }
 
+/// Thin [`ManagedPostgres`] shim over [`finalize_dense_rebuild_with_client`] (work/10 M1-B S1).
 pub fn finalize_dense_rebuild(
     postgres: &ManagedPostgres,
     spec: &DenseRebuildSpec<'_>,
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<DenseRebuildReport, StorageError> {
+    let mut client = postgres.client()?;
+    finalize_dense_rebuild_with_client(&mut client, spec, outbox)
+}
+
+/// Client-source variant of [`finalize_dense_rebuild`] (work/10 M1-B S1): runs the identical
+/// validate → coverage-check → fingerprint-stamp → ivfflat-rebuild → manifest transaction over a
+/// borrowed client, preserving the single-transaction boundary.
+pub fn finalize_dense_rebuild_with_client(
+    client: &mut postgres::Client,
+    spec: &DenseRebuildSpec<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<DenseRebuildReport, StorageError> {
     validate_dense_spec(spec)?;
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
 
     let chunks: i64 = transaction

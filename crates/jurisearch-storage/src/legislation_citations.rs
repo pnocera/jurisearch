@@ -6,6 +6,7 @@
 //! the Legifrance API exactly once each. Reads go through `execute_sql` (JSON); writes use a
 //! parameterized client (like the other ingestion writes).
 
+use crate::query::simple_query_text;
 use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
 /// Page the LATEST archived Judilibre `/decision` response per decision that carries a `visa`, for
@@ -17,12 +18,25 @@ pub fn load_archived_decisions_with_visa_json(
     after_cursor: Option<&str>,
     limit: u32,
 ) -> Result<String, StorageError> {
+    let mut client = postgres.client()?;
+    load_archived_decisions_with_visa_json_with_client(&mut client, after_cursor, limit)
+}
+
+/// Client-source variant of [`load_archived_decisions_with_visa_json`] (work/10 M1-B S1): the same SQL
+/// run over a borrowed client via [`simple_query_text`] (byte-identical `-qAt` JSON output).
+pub fn load_archived_decisions_with_visa_json_with_client(
+    client: &mut postgres::Client,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<String, StorageError> {
     let cursor_predicate = after_cursor
         .map(|cursor| format!("AND subject_document_id > {}", sql_string_literal(cursor)))
         .unwrap_or_default();
     let limit = limit.max(1);
-    postgres.execute_sql(&format!(
-        r#"
+    simple_query_text(
+        client,
+        &format!(
+            r#"
 WITH latest AS (
     SELECT DISTINCT ON (subject_document_id)
            response_id, subject_document_id, subject_source_uid, response_json
@@ -50,7 +64,8 @@ SELECT jsonb_build_object(
     'next_cursor', (SELECT max(subject_document_id) FROM (SELECT subject_document_id FROM latest ORDER BY subject_document_id LIMIT {limit}) p)
 )::text;
 "#
-    ))
+        ),
+    )
 }
 
 /// One per-decision citation occurrence to record (idempotent: ON CONFLICT DO NOTHING on the
@@ -206,8 +221,16 @@ pub fn finalize_citation_occurrence_counts(
     postgres: &ManagedPostgres,
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<(), StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    finalize_citation_occurrence_counts_with_client(&mut client, outbox)
+}
+
+/// Client-source variant of [`finalize_citation_occurrence_counts`] (work/10 M1-B S1): identical
+/// recompute-counts UPDATE + per-changed-row outbox emission in one transaction over a borrowed client.
+pub fn finalize_citation_occurrence_counts_with_client(
+    client: &mut postgres::Client,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<(), StorageError> {
     let mut tx = client.transaction().map_err(StorageError::PostgresClient)?;
     // Count occurrences per (corpus, citation_key): an occurrence's corpus is its decision's corpus.
     let changed = tx
@@ -260,6 +283,23 @@ pub fn load_pending_citation_resolutions_json(
     retry_errors: bool,
     limit: u32,
 ) -> Result<String, StorageError> {
+    let mut client = postgres.client()?;
+    load_pending_citation_resolutions_json_with_client(
+        &mut client,
+        after_cursor,
+        retry_errors,
+        limit,
+    )
+}
+
+/// Client-source variant of [`load_pending_citation_resolutions_json`] (work/10 M1-B S1): the same SQL
+/// run over a borrowed client via [`simple_query_text`] (byte-identical `-qAt` JSON output).
+pub fn load_pending_citation_resolutions_json_with_client(
+    client: &mut postgres::Client,
+    after_cursor: Option<&str>,
+    retry_errors: bool,
+    limit: u32,
+) -> Result<String, StorageError> {
     let cursor_predicate = after_cursor
         .and_then(|cursor| cursor.split_once('\u{1f}'))
         .map(|(corpus, citation_key)| {
@@ -276,8 +316,10 @@ pub fn load_pending_citation_resolutions_json(
         "legifrance_status = 'pending'"
     };
     let limit = limit.max(1);
-    postgres.execute_sql(&format!(
-        r#"
+    simple_query_text(
+        client,
+        &format!(
+            r#"
 WITH page AS (
     SELECT corpus, citation_key, article_number_norm, code_name_norm, canonical_query
     FROM legislation_citation_resolutions
@@ -301,7 +343,8 @@ SELECT jsonb_build_object(
                     FROM page ORDER BY corpus DESC, citation_key DESC LIMIT 1)
 )::text;
 "#
-    ))
+        ),
+    )
 }
 
 /// Record the result of a Legifrance call for one `(corpus, citation_key)` resolution.
@@ -355,7 +398,16 @@ pub fn update_citation_resolution_with_client<C: postgres::GenericClient>(
 pub fn legislation_citations_coverage_json(
     postgres: &ManagedPostgres,
 ) -> Result<String, StorageError> {
-    postgres.execute_sql(
+    let mut client = postgres.client()?;
+    legislation_citations_coverage_json_with_client(&mut client)
+}
+
+/// Client-source variant of [`legislation_citations_coverage_json`] (work/10 M1-B S1).
+pub fn legislation_citations_coverage_json_with_client(
+    client: &mut postgres::Client,
+) -> Result<String, StorageError> {
+    simple_query_text(
+        client,
         r#"
 SELECT jsonb_build_object(
     'occurrences', (SELECT count(*) FROM decision_legislation_citations),
@@ -370,3 +422,8 @@ SELECT jsonb_build_object(
 "#,
     )
 }
+
+// NOTE (work/10 M1-B S1): the citation WRITE helpers on the enrich/collect path are already
+// client-source-generic — `insert_citation_occurrence_with_client`,
+// `upsert_citation_resolution_pending_with_client`, and `update_citation_resolution_with_client` take
+// `&mut C: GenericClient` directly, so no additional shim is needed for them.

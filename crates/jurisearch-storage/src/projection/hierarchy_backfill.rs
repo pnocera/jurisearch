@@ -43,8 +43,19 @@ pub fn backfill_legi_article_hierarchy_from_metadata_scoped(
     scope: &LegiHierarchyBackfillScope,
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<LegiHierarchyBackfillReport, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    backfill_legi_article_hierarchy_from_metadata_scoped_with_client(&mut client, scope, outbox)
+}
+
+/// Client-source variant of [`backfill_legi_article_hierarchy_from_metadata_scoped`] (work/10 M1-B S1):
+/// runs the identical candidate-selection query and the document/chunk/embedding-invalidation
+/// transaction over a borrowed client, so the LEGI ingest hierarchy backfill works against an external
+/// producer PostgreSQL.
+pub fn backfill_legi_article_hierarchy_from_metadata_scoped_with_client(
+    client: &mut postgres::Client,
+    scope: &LegiHierarchyBackfillScope,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<LegiHierarchyBackfillReport, StorageError> {
     let full_scope = scope.is_empty();
     let rows = client
         .query(

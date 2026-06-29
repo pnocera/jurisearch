@@ -53,6 +53,18 @@ impl std::fmt::Debug for ConnectionConfig {
 impl ConnectionConfig {
     /// Open a fresh libpq client with this identity. (NoTls — the site LAN is the trust boundary, §6;
     /// TLS termination is an operator/perimeter concern, out of scope here.)
+    ///
+    /// The session `search_path` is PINNED to `public` via the libpq `options=-c search_path=public`
+    /// startup parameter (M1-B BLOCKER): the producer client-source contract ([`DbClientSource`]) runs the
+    /// migrated psql helpers as *unqualified* SQL over this client, and on a shared external server a
+    /// role-level `ALTER ROLE … SET search_path` default — or a schema named after the connecting role
+    /// (the `"$user"` element of the stock `"$user", public` default) — would silently redirect every
+    /// unqualified read/write off `public`. Pinning `public` ENFORCES the producer working schema instead
+    /// of assuming it. This is behavior-preserving for the existing syncd / serve-site callers: the read
+    /// snapshot path re-sets `SET LOCAL search_path` per read, the writer/activation path sets its own
+    /// `SET search_path TO <generation>, public` where a generation schema is needed (otherwise it uses
+    /// fully-qualified names), and no per-user schema is ever provisioned — so the stock default already
+    /// resolved to `public` in every non-pathological deployment.
     pub fn connect(&self) -> Result<postgres::Client, StorageError> {
         let mut config = postgres::Config::new();
         config
@@ -61,6 +73,7 @@ impl ConnectionConfig {
             .dbname(&self.dbname)
             .user(&self.user)
             .application_name(&self.application_name)
+            .options(PIN_PUBLIC_SEARCH_PATH)
             .connect_timeout(Duration::from_secs(5));
         if let Some(password) = &self.password {
             config.password(password);
@@ -70,6 +83,12 @@ impl ConnectionConfig {
             .map_err(StorageError::PostgresClient)
     }
 }
+
+/// libpq startup `options` that pin the session `search_path` to `public`. Applied to every client a
+/// [`DbClientSource`] hands out (the contract boundary), so the producer's unqualified helper SQL can
+/// never be redirected off `public` by a role-level default or a `"$user"`-named schema on a shared
+/// external server (M1-B BLOCKER).
+pub(crate) const PIN_PUBLIC_SEARCH_PATH: &str = "-c search_path=public";
 
 /// A read-only connection provider. Disjoint from [`WriterHandle`] (ISP): it exposes no writer access.
 #[derive(Debug, Clone)]
@@ -154,6 +173,55 @@ impl WriterConnection for ManagedPostgres {
     /// read-role visibility to stamp.
     fn activation_read_visibility(&self) -> Option<ActivationReadVisibility<'_>> {
         None
+    }
+}
+
+/// S1 seam (work/10 M1-B) — a minimal **client FACTORY**: "hand me a FRESH, independent
+/// `postgres::Client`". It is deliberately a connection *source*, not a single borrowed
+/// `&mut postgres::Client`, because the producer build path opens SEVERAL independent clients from one
+/// source (e.g. a main client AND a separate outbox-fence connection — see work/10 §2 S7). This is the
+/// one abstraction that lets the producer run ingest → enrich → embed → package against an EXTERNAL
+/// PostgreSQL ([`ConnectionConfig`]/[`WriterHandle`]) with the SAME code path that today only works
+/// against the self-managed [`ManagedPostgres`]. Object-safe.
+///
+/// Each call MUST return a brand-new, independent client (callers may hold more than one at once); an
+/// implementation must never hand back a shared/cached connection.
+///
+/// CONTRACT — the returned client's session `search_path` is PINNED to `public` (the producer working
+/// schema). The producer runs the migrated psql helpers as *unqualified* SQL through this seam, so on a
+/// shared external server it must not be redirected off `public` by a role-level `search_path` default or
+/// a `"$user"`-named schema. Every impl below upholds this (the external [`ConnectionConfig`]/
+/// [`WriterHandle`] path via [`ConnectionConfig::connect`], the self-managed path via
+/// [`ManagedPostgres::client`]).
+pub trait DbClientSource {
+    /// Open a fresh, independent libpq client against the target database, with `search_path` pinned to
+    /// `public` (see the trait contract).
+    ///
+    /// # Errors
+    /// [`StorageError::PostgresClient`] if the connection fails.
+    fn client(&self) -> Result<postgres::Client, StorageError>;
+}
+
+/// The self-managed producer/test path (`pg_ctl`-owned loopback PG) as a client source.
+impl DbClientSource for ManagedPostgres {
+    fn client(&self) -> Result<postgres::Client, StorageError> {
+        ManagedPostgres::client(self)
+    }
+}
+
+/// The external-PostgreSQL primitive as a client source: any role identity ([`ConnectionConfig`]) can
+/// produce a client, so the producer can attach to an operator-run database with no managed server.
+impl DbClientSource for ConnectionConfig {
+    fn client(&self) -> Result<postgres::Client, StorageError> {
+        self.connect()
+    }
+}
+
+/// The external-PostgreSQL **writer** identity as a client source (the producer mutates the DB, so it
+/// uses the writer role). Mirrors [`WriterHandle::client`].
+impl DbClientSource for WriterHandle {
+    fn client(&self) -> Result<postgres::Client, StorageError> {
+        self.config.connect()
     }
 }
 
@@ -518,6 +586,21 @@ fn build_provision_sql(spec: &RoleSpec, dbname: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Type-level proof (no live PG) that the S1 [`DbClientSource`] client-factory seam is implemented
+    /// for the self-managed [`ManagedPostgres`] AND the external-PG identities ([`ConnectionConfig`] /
+    /// [`WriterHandle`]), and that it is object-safe — i.e. an external PostgreSQL satisfies the same
+    /// trait the producer needs, with no `ManagedPostgres`. This is the compile-time half of the M1-B
+    /// S1 deliverable; the run-time equivalence is exercised by `tests/client_source_parity.rs` (live PG).
+    #[test]
+    fn db_client_source_is_implemented_for_managed_and_external_and_is_object_safe() {
+        fn assert_impl<T: DbClientSource>() {}
+        assert_impl::<ManagedPostgres>();
+        assert_impl::<ConnectionConfig>();
+        assert_impl::<WriterHandle>();
+        // Object safety: a `&dyn DbClientSource` must be a valid type.
+        let _: Option<&dyn DbClientSource> = None;
+    }
 
     #[test]
     fn connection_config_debug_redacts_password() {

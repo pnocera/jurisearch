@@ -194,7 +194,10 @@ impl QueryStore for crate::backend::ReadHandle {
 /// row's columns joined by `|`, rows joined by newline, `NULL` as the empty string, the whole output
 /// trimmed. Statements that return no rows (e.g. a leading `SET ivfflat.probes = …`) contribute
 /// nothing, exactly as `psql -c` would print.
-fn simple_query_text(client: &mut postgres::Client, sql: &str) -> Result<String, StorageError> {
+pub(crate) fn simple_query_text(
+    client: &mut postgres::Client,
+    sql: &str,
+) -> Result<String, StorageError> {
     let messages = client
         .simple_query(sql)
         .map_err(StorageError::PostgresClient)?;

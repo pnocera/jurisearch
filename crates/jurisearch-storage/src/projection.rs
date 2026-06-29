@@ -20,11 +20,14 @@ pub use decisions::{
     DocumentProjectionStatements, insert_decision_documents, insert_decision_documents_with_client,
     insert_decision_documents_with_statements, prepare_document_projection_statements,
 };
-pub use embeddings::{ChunkEmbeddingInsert, insert_chunk_embeddings};
+pub use embeddings::{
+    ChunkEmbeddingInsert, insert_chunk_embeddings, insert_chunk_embeddings_with_client,
+};
 pub use hierarchy_backfill::{
     LegiHierarchyBackfillReport, LegiHierarchyBackfillScope,
     backfill_legi_article_hierarchy_from_metadata,
     backfill_legi_article_hierarchy_from_metadata_scoped,
+    backfill_legi_article_hierarchy_from_metadata_scoped_with_client,
 };
 pub use legi::{
     CanonicalInsertReport, LegiProjectionStatements, insert_legi_documents,

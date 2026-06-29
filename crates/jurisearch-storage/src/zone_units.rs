@@ -10,7 +10,7 @@
 //! parameterized client (like the ingestion writes).
 
 use crate::dense::DenseRebuildSpec;
-use crate::query::{QueryStore, ReadSnapshot};
+use crate::query::{QueryStore, ReadSnapshot, simple_query_text};
 use crate::runtime::{ManagedPostgres, StorageError, sql_string_literal};
 
 /// Name of the zone-unit dense ANN index (built at finalize time, like the chunk ivfflat index).
@@ -52,6 +52,22 @@ pub fn enrich_zone_candidates_json(
     limit: u32,
     order: EnrichZoneOrder,
 ) -> Result<String, StorageError> {
+    let mut client = postgres.client()?;
+    enrich_zone_candidates_json_with_client(&mut client, source, after_cursor, since, limit, order)
+}
+
+/// Client-source variant of [`enrich_zone_candidates_json`] (work/10 M1-B S1). The original shells the
+/// SQL through `psql -qAt`; this runs the BYTE-IDENTICAL SQL over a borrowed client via
+/// [`simple_query_text`], which reproduces the same `-qAt` rendering (single text column, trimmed), so
+/// the returned JSON is identical.
+pub fn enrich_zone_candidates_json_with_client(
+    client: &mut postgres::Client,
+    source: &str,
+    after_cursor: Option<&str>,
+    since: Option<&str>,
+    limit: u32,
+    order: EnrichZoneOrder,
+) -> Result<String, StorageError> {
     // Keyset comparison / sort / boundary aggregate per walk direction.
     let (cursor_cmp, sort_dir, boundary_agg) = match order {
         EnrichZoneOrder::Oldest => (">", "ASC", "max"),
@@ -75,8 +91,10 @@ pub fn enrich_zone_candidates_json(
         })
         .unwrap_or_default();
     let limit = limit.max(1);
-    postgres.execute_sql(&format!(
-        r#"
+    simple_query_text(
+        client,
+        &format!(
+            r#"
 WITH page AS (
     SELECT d.document_id, d.source
     FROM documents d
@@ -103,7 +121,8 @@ SELECT jsonb_build_object(
     'next_cursor', (SELECT {boundary_agg}(document_id) FROM page)
 )::text;
 "#
-    ))
+        ),
+    )
 }
 
 /// One derived zone-unit row to write. `zone_unit_id` is computed as `<document_id>#<zone>#<fragment>`.
@@ -131,6 +150,18 @@ pub fn replace_zone_units_for_document(
     rows: &[ZoneUnitRow<'_>],
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<(), StorageError> {
+    let mut client = postgres.client()?;
+    replace_zone_units_for_document_with_client(&mut client, document_id, rows, outbox)
+}
+
+/// Client-source variant of [`replace_zone_units_for_document`] (work/10 M1-B S1): runs the identical
+/// delete + reinsert + outbox `replace_set` over a borrowed client, preserving the single transaction.
+pub fn replace_zone_units_for_document_with_client(
+    client: &mut postgres::Client,
+    document_id: &str,
+    rows: &[ZoneUnitRow<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<(), StorageError> {
     // Defensive: every row must belong to the document being replaced — otherwise a caller bug could
     // clear document A's units and insert document B's in one transaction (the units' own UNIQUE is on
     // (document_id, zone, fragment_index), which would not catch a foreign document_id).
@@ -142,8 +173,6 @@ pub fn replace_zone_units_for_document(
             ),
         });
     }
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
     transaction
         .execute(
@@ -232,6 +261,25 @@ pub fn load_derivable_decision_zones_json(
     after_cursor: Option<&str>,
     limit: u32,
 ) -> Result<String, StorageError> {
+    let mut client = postgres.client()?;
+    load_derivable_decision_zones_json_with_client(
+        &mut client,
+        builder_version,
+        rebuild,
+        after_cursor,
+        limit,
+    )
+}
+
+/// Client-source variant of [`load_derivable_decision_zones_json`] (work/10 M1-B S1): the same SQL run
+/// over a borrowed client via [`simple_query_text`] (byte-identical `-qAt` JSON output).
+pub fn load_derivable_decision_zones_json_with_client(
+    client: &mut postgres::Client,
+    builder_version: &str,
+    rebuild: bool,
+    after_cursor: Option<&str>,
+    limit: u32,
+) -> Result<String, StorageError> {
     let builder_literal = sql_string_literal(builder_version);
     let cursor_predicate = after_cursor
         .map(|cursor| format!("AND z.document_id > {}", sql_string_literal(cursor)))
@@ -248,8 +296,10 @@ pub fn load_derivable_decision_zones_json(
         )
     };
     let limit = limit.max(1);
-    postgres.execute_sql(&format!(
-        r#"
+    simple_query_text(
+        client,
+        &format!(
+            r#"
 WITH page AS (
     SELECT z.document_id, d.source, z.text_hash, z.zones_json
     FROM decision_zones z
@@ -278,7 +328,8 @@ SELECT jsonb_build_object(
     'next_cursor', (SELECT max(document_id) FROM page)
 )::text;
 "#
-    ))
+        ),
+    )
 }
 
 /// A zone unit to embed: its id and the text to embed (the zone fragment `body`).
@@ -308,8 +359,24 @@ pub fn load_zone_unit_embedding_inputs(
     dimension: i32,
     limit: Option<u32>,
 ) -> Result<Vec<ZoneUnitEmbeddingInput>, StorageError> {
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
+    let mut client = postgres.client()?;
+    load_zone_unit_embedding_inputs_with_client(
+        &mut client,
+        embedding_fingerprint,
+        model,
+        dimension,
+        limit,
+    )
+}
+
+/// Client-source variant of [`load_zone_unit_embedding_inputs`] (work/10 M1-B S1).
+pub fn load_zone_unit_embedding_inputs_with_client(
+    client: &mut postgres::Client,
+    embedding_fingerprint: &str,
+    model: &str,
+    dimension: i32,
+    limit: Option<u32>,
+) -> Result<Vec<ZoneUnitEmbeddingInput>, StorageError> {
     let base = "SELECT u.zone_unit_id, u.body \
                 FROM zone_units u \
                 LEFT JOIN zone_unit_embeddings e ON e.zone_unit_id = u.zone_unit_id \
@@ -351,6 +418,17 @@ pub fn insert_zone_unit_embeddings(
     embeddings: &[ZoneUnitEmbeddingInsert<'_>],
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<usize, StorageError> {
+    let mut client = postgres.client()?;
+    insert_zone_unit_embeddings_with_client(&mut client, embeddings, outbox)
+}
+
+/// Client-source variant of [`insert_zone_unit_embeddings`] (work/10 M1-B S1): identical stage → guard
+/// → upsert → outbox transaction over a borrowed client.
+pub fn insert_zone_unit_embeddings_with_client(
+    client: &mut postgres::Client,
+    embeddings: &[ZoneUnitEmbeddingInsert<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<usize, StorageError> {
     if embeddings.is_empty() {
         return Ok(0);
     }
@@ -370,8 +448,6 @@ pub fn insert_zone_unit_embeddings(
         })
         .collect::<Result<_, _>>()?;
 
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
     transaction
         .batch_execute(
@@ -503,9 +579,18 @@ pub fn finalize_zone_dense_rebuild(
     spec: &DenseRebuildSpec<'_>,
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<ZoneDenseRebuildReport, StorageError> {
+    let mut client = postgres.client()?;
+    finalize_zone_dense_rebuild_with_client(&mut client, spec, outbox)
+}
+
+/// Client-source variant of [`finalize_zone_dense_rebuild`] (work/10 M1-B S1): identical
+/// validate → coverage → stamp → zone ivfflat rebuild → manifest transaction over a borrowed client.
+pub fn finalize_zone_dense_rebuild_with_client(
+    client: &mut postgres::Client,
+    spec: &DenseRebuildSpec<'_>,
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<ZoneDenseRebuildReport, StorageError> {
     validate_zone_dense_spec(spec)?;
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
 
     let zone_units: i64 = transaction
@@ -691,16 +776,10 @@ pub fn zone_retrieval_coverage_json(postgres: &ManagedPostgres) -> Result<String
     zone_retrieval_coverage_in_snapshot(&mut *snapshot)
 }
 
-/// Zone-retrieval coverage as JSON, read THROUGH a request snapshot. Backs the `search --zone` readiness
-/// gate AND the response's `scope.indexed_decisions`, so both — and the candidate set — reflect the same
-/// served generation. The zone/overlay tables (`decision_zones`/`zone_units`/`zone_unit_embeddings`/
-/// `documents`) are replicated, so they resolve to the active generation via the snapshot search_path;
-/// the global `index_manifest` read falls through to `public`.
-pub fn zone_retrieval_coverage_in_snapshot(
-    snapshot: &mut dyn ReadSnapshot,
-) -> Result<String, StorageError> {
-    snapshot.read_text(
-        r#"
+/// The zone-retrieval coverage SQL — shared verbatim by the snapshot read path
+/// ([`zone_retrieval_coverage_in_snapshot`]) and the client-source variant
+/// ([`zone_retrieval_coverage_with_client`]) so they can never drift.
+const ZONE_RETRIEVAL_COVERAGE_SQL: &str = r#"
 SELECT jsonb_build_object(
     'scope', 'official_cour_de_cassation_zones (cass+inca)',
     'decision_zones', jsonb_build_object(
@@ -733,8 +812,39 @@ SELECT jsonb_build_object(
     ),
     'embedding_manifest', (SELECT value FROM index_manifest WHERE key = 'zone_embedding')
 )::text;
-"#,
-    )
+"#;
+
+/// Client-source variant of [`zone_retrieval_coverage_json`] (work/10 M1-B S1).
+///
+/// CONTRACT — PRODUCER / PUBLIC-TOPOLOGY ONLY. This runs the shared coverage SQL directly over a borrowed
+/// client (no snapshot, no `search_path` setup), so it observes whatever the client's `search_path` points
+/// at — for a [`DbClientSource`](crate::backend::DbClientSource) client that is the pinned `public` working
+/// set. That is correct *because the producer has no installed/active corpus generation*: it BUILDS
+/// packages over the `public` ingest working tables, exactly the topology the empty-corpus snapshot path
+/// (`[]` corpora → `search_path = public`) also resolves to. The shim ([`zone_retrieval_coverage_json`])
+/// and this variant therefore agree on the producer working set, and ONLY there.
+///
+/// This is NOT equivalent to the site/consumer path once a corpus is installed: the snapshot path routes
+/// the replicated tables (`decision_zones`/`zone_units`/`zone_unit_embeddings`/`documents`) through the
+/// ACTIVE generation's physical schema, whereas this variant has no generation resolution. Callers (e.g.
+/// the M1-C producer pipeline) MUST only use it in the producer/`public` context to report the ingest
+/// working set's coverage — never to compute coverage against an installed active corpus generation. For
+/// that, go through a snapshot/[`zone_retrieval_coverage_in_snapshot`].
+pub fn zone_retrieval_coverage_with_client(
+    client: &mut postgres::Client,
+) -> Result<String, StorageError> {
+    simple_query_text(client, ZONE_RETRIEVAL_COVERAGE_SQL)
+}
+
+/// Zone-retrieval coverage as JSON, read THROUGH a request snapshot. Backs the `search --zone` readiness
+/// gate AND the response's `scope.indexed_decisions`, so both — and the candidate set — reflect the same
+/// served generation. The zone/overlay tables (`decision_zones`/`zone_units`/`zone_unit_embeddings`/
+/// `documents`) are replicated, so they resolve to the active generation via the snapshot search_path;
+/// the global `index_manifest` read falls through to `public`.
+pub fn zone_retrieval_coverage_in_snapshot(
+    snapshot: &mut dyn ReadSnapshot,
+) -> Result<String, StorageError> {
+    snapshot.read_text(ZONE_RETRIEVAL_COVERAGE_SQL)
 }
 
 /// Comma-separated SQL string-literal IN-list of the [`ZONE_ENRICHABLE_SOURCES`] (e.g. `'cass','inca'`).

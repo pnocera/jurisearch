@@ -16,6 +16,18 @@ pub fn insert_chunk_embeddings(
     embeddings: &[ChunkEmbeddingInsert<'_>],
     outbox: Option<&crate::outbox::OutboxContext<'_>>,
 ) -> Result<usize, StorageError> {
+    let mut client = postgres.client()?;
+    insert_chunk_embeddings_with_client(&mut client, embeddings, outbox)
+}
+
+/// Client-source variant of [`insert_chunk_embeddings`] (work/10 M1-B S1): identical stage → guard →
+/// upsert → outbox transaction over a borrowed client, so the producer can write chunk embeddings
+/// against an external PostgreSQL.
+pub fn insert_chunk_embeddings_with_client(
+    client: &mut postgres::Client,
+    embeddings: &[ChunkEmbeddingInsert<'_>],
+    outbox: Option<&crate::outbox::OutboxContext<'_>>,
+) -> Result<usize, StorageError> {
     if embeddings.is_empty() {
         return Ok(0);
     }
@@ -47,8 +59,6 @@ pub fn insert_chunk_embeddings(
         })
         .collect::<Result<_, _>>()?;
 
-    let mut client = postgres::Client::connect(&postgres.connection_string(), postgres::NoTls)
-        .map_err(StorageError::PostgresClient)?;
     let mut transaction = client.transaction().map_err(StorageError::PostgresClient)?;
 
     transaction

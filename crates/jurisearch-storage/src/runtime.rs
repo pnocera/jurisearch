@@ -240,10 +240,23 @@ impl ManagedPostgres {
 
     /// Open a fresh libpq client to this database (the connection dance every module repeats).
     ///
+    /// The session `search_path` is pinned to `public` (via the libpq `options` startup parameter), so
+    /// this client honours the same [`DbClientSource`](crate::backend::DbClientSource) contract as the
+    /// external-PG path: the producer's unqualified helper SQL always resolves against the `public`
+    /// working set, never a `"$user"`-named schema or a role-level default. Behavior-preserving for the
+    /// snapshot read path (it re-sets `SET LOCAL search_path` per read) and the writer/activation path
+    /// (it sets `SET search_path TO <generation>, public` where a generation schema is needed).
+    ///
     /// # Errors
     /// [`StorageError::PostgresClient`] if the connection fails.
     pub fn client(&self) -> Result<postgres::Client, StorageError> {
-        postgres::Client::connect(&self.connection_string(), postgres::NoTls)
+        let mut config: postgres::Config = self
+            .connection_string()
+            .parse()
+            .map_err(StorageError::PostgresClient)?;
+        config.options(crate::backend::PIN_PUBLIC_SEARCH_PATH);
+        config
+            .connect(postgres::NoTls)
             .map_err(StorageError::PostgresClient)
     }
 
