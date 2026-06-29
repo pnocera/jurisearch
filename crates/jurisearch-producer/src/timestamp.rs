@@ -42,6 +42,49 @@ pub fn rfc3339_from_unix(unix_secs: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+/// The current time as whole UNIX seconds (UTC). The injectable-`now` seam for age/freshness math.
+#[must_use]
+pub fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse an RFC3339 UTC timestamp in the exact `YYYY-MM-DDTHH:MM:SSZ` shape this module emits back to
+/// whole UNIX seconds, or `None` if it is not that shape. Inverse of [`rfc3339_from_unix`] (Howard
+/// Hinnant's days-from-civil), so producer timestamps can be aged WITHOUT a date dependency.
+#[must_use]
+pub fn unix_from_rfc3339(ts: &str) -> Option<u64> {
+    let (date, rest) = ts.split_once('T')?;
+    let time = rest.strip_suffix('Z')?;
+    let mut d = date.split('-');
+    let year: i64 = d.next()?.parse().ok()?;
+    let month: i64 = d.next()?.parse().ok()?;
+    let day: i64 = d.next()?.parse().ok()?;
+    if d.next().is_some() {
+        return None;
+    }
+    let mut t = time.split(':');
+    let hour: i64 = t.next()?.parse().ok()?;
+    let minute: i64 = t.next()?.parse().ok()?;
+    let second: i64 = t.next()?.parse().ok()?;
+    if t.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // days_from_civil: (year, month, day) -> days since 1970-01-01.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(secs).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -51,5 +94,14 @@ mod tests {
         assert_eq!(rfc3339_from_unix(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339_from_unix(946_684_800), "2000-01-01T00:00:00Z");
         assert_eq!(rfc3339_from_unix(1_782_734_400), "2026-06-29T12:00:00Z");
+    }
+
+    #[test]
+    fn rfc3339_round_trips_through_unix() {
+        for secs in [0, 946_684_800, 1_782_734_400, 1_751_200_200] {
+            assert_eq!(unix_from_rfc3339(&rfc3339_from_unix(secs)), Some(secs));
+        }
+        assert_eq!(unix_from_rfc3339("not-a-timestamp"), None);
+        assert_eq!(unix_from_rfc3339("2026-13-01T00:00:00Z"), None);
     }
 }

@@ -31,6 +31,14 @@ pub struct ProducerConfig {
     pub embedding: EmbeddingSection,
     #[serde(default)]
     pub baseline_refresh: BaselineRefreshConfig,
+    /// `[install]` — systemd unit/timer rendering + install targets (M3). All-defaulted so an existing
+    /// `producer.toml` keeps parsing; every path is absolute.
+    #[serde(default)]
+    pub install: InstallConfig,
+    /// `[alert]` — the fail-closed alert-hook seam (M3). A config-pointable command run on failure
+    /// classes; no provider is hardcoded. Off by default (no hook configured).
+    #[serde(default)]
+    pub alert: AlertConfig,
 }
 
 /// `[producer]` — the served root, the DILA mirror, and local orchestration state.
@@ -108,6 +116,109 @@ pub struct FetchGroupConfig {
     pub name: String,
     pub sources: Vec<String>,
     pub cadence: String,
+    /// Optional systemd `OnCalendar=` override for this group's timer. When absent, a daily default is
+    /// derived from the group name (legislation 22:30, jurisprudence 23:30, otherwise 21:30) so LEGI's
+    /// ~20–22h drop is in before the run.
+    #[serde(default)]
+    pub on_calendar: Option<String>,
+}
+
+impl FetchGroupConfig {
+    /// The `OnCalendar=` expression for this group's timer (the override, or a daily default by name).
+    #[must_use]
+    pub fn on_calendar(&self) -> String {
+        if let Some(expr) = &self.on_calendar {
+            return expr.clone();
+        }
+        match self.name.as_str() {
+            "legislation" => "*-*-* 22:30:00".to_owned(),
+            "jurisprudence" => "*-*-* 23:30:00".to_owned(),
+            _ => "*-*-* 21:30:00".to_owned(),
+        }
+    }
+
+    /// The group's cadence as whole seconds (the freshness budget `status` ages the last successful run
+    /// against). Recognises `hourly`/`daily`/`weekly` (case-insensitive); anything else falls back to a
+    /// daily budget so an unfamiliar cadence is never silently treated as "never stale".
+    #[must_use]
+    pub fn cadence_secs(&self) -> u64 {
+        match self.cadence.trim().to_ascii_lowercase().as_str() {
+            "hourly" => 3_600,
+            "weekly" => 604_800,
+            _ => 86_400, // daily (and the conservative default).
+        }
+    }
+}
+
+/// `[install]` — where `jurisearch-producer install` renders units/timers and the binary/config they
+/// reference. Every path is ABSOLUTE (systemd does not expand `$HOME`/env in unit paths). All-defaulted.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallConfig {
+    /// Where rendered `.service`/`.timer` units are written (e.g. `/etc/systemd/system`).
+    #[serde(default = "default_unit_dir")]
+    pub unit_dir: PathBuf,
+    /// Absolute path to the installed `jurisearch-producer` binary the service runs.
+    #[serde(default = "default_binary_path")]
+    pub binary_path: PathBuf,
+    /// Absolute path to the `producer.toml` the service passes as `--config`.
+    #[serde(default = "default_config_path")]
+    pub config_path: PathBuf,
+    /// The dedicated, least-privilege service user/group.
+    #[serde(default = "default_service_user")]
+    pub service_user: String,
+    /// `EnvironmentFile=` for PISTE/OpenRouter creds (mode 0600), absolute.
+    #[serde(default = "default_environment_file")]
+    pub environment_file: PathBuf,
+    /// `RandomizedDelaySec=` on the timers, so the daily runs do not all fire on the hour.
+    #[serde(default = "default_randomized_delay_secs")]
+    pub randomized_delay_secs: u64,
+}
+
+impl Default for InstallConfig {
+    fn default() -> Self {
+        Self {
+            unit_dir: default_unit_dir(),
+            binary_path: default_binary_path(),
+            config_path: default_config_path(),
+            service_user: default_service_user(),
+            environment_file: default_environment_file(),
+            randomized_delay_secs: default_randomized_delay_secs(),
+        }
+    }
+}
+
+fn default_unit_dir() -> PathBuf {
+    PathBuf::from("/etc/systemd/system")
+}
+fn default_binary_path() -> PathBuf {
+    PathBuf::from("/usr/local/bin/jurisearch-producer")
+}
+fn default_config_path() -> PathBuf {
+    PathBuf::from("/etc/jurisearch/producer.toml")
+}
+fn default_service_user() -> String {
+    "jurisearch".to_owned()
+}
+fn default_environment_file() -> PathBuf {
+    PathBuf::from("/etc/jurisearch/producer.env")
+}
+fn default_randomized_delay_secs() -> u64 {
+    1800
+}
+
+/// `[alert]` — the fail-closed alert-hook seam. `hook_command` is run (argv-split, no shell) on a run
+/// whose exit class is in `on_classes`, with the class/group/message passed as environment variables.
+/// No provider is hardcoded; an empty `hook_command` disables alerting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertConfig {
+    /// Argv of the hook command (first element is the program). Empty ⇒ no alerting.
+    #[serde(default)]
+    pub hook_command: Vec<String>,
+    /// Exit classes that trigger the hook. Empty ⇒ the default failure set.
+    #[serde(default)]
+    pub on_classes: Vec<String>,
 }
 
 /// `[package]` — single-corpus packaging + signing identity.
@@ -260,6 +371,36 @@ impl ProducerConfig {
             return Err(ProducerError::ConfigInvalid(
                 "[embedding].dimension must be > 0".to_owned(),
             ));
+        }
+        // Every path RENDERED INTO a systemd unit (and the producer data/state paths referenced by
+        // `ExecStart`/`ReadWritePaths`) MUST be ABSOLUTE: systemd does not expand `$HOME`/env in unit
+        // file paths, so a relative value would render a unit that silently writes to the wrong place.
+        // Reject relative values up front, BEFORE any unit is rendered.
+        for (label, path) in [
+            ("[install].unit_dir", self.install.unit_dir.as_path()),
+            ("[install].binary_path", self.install.binary_path.as_path()),
+            ("[install].config_path", self.install.config_path.as_path()),
+            (
+                "[install].environment_file",
+                self.install.environment_file.as_path(),
+            ),
+            (
+                "[producer].corpora_dir",
+                self.producer.corpora_dir.as_path(),
+            ),
+            (
+                "[producer].archives_dir",
+                self.producer.archives_dir.as_path(),
+            ),
+            ("[producer].state_dir", self.producer.state_dir.as_path()),
+        ] {
+            if !path.is_absolute() {
+                return Err(ProducerError::ConfigInvalid(format!(
+                    "{label} = `{}` must be an ABSOLUTE path (it is rendered into a systemd unit; \
+                     systemd does not expand env in unit file paths)",
+                    path.display()
+                )));
+            }
         }
         // Reject world/group-readable secret files up front (defense in depth before they are trusted).
         for path in [
@@ -512,4 +653,21 @@ api_key_env = "OPENROUTER_API_KEY"
 [baseline_refresh]
 # v1 default: adopt a newer DILA global baseline automatically via a recorded rebaseline run (M3).
 mode = "auto-on-new-baseline"
+
+[install]
+# Where `jurisearch-producer install` renders the .service/.timer units (absolute paths only — systemd
+# does not expand env in unit file paths). All fields are optional and default to these values.
+unit_dir = "/etc/systemd/system"
+binary_path = "/usr/local/bin/jurisearch-producer"
+config_path = "/etc/jurisearch/producer.toml"
+service_user = "jurisearch"
+environment_file = "/etc/jurisearch/producer.env"   # 0600; PISTE + OPENROUTER_API_KEY creds
+randomized_delay_secs = 1800                          # spread the daily runs off the hour
+
+[alert]
+# Fail-closed alert hook: an argv (no shell) run when a run's exit class is in `on_classes`. The class,
+# group, message, and run id are passed as JURISEARCH_ALERT_* environment variables. No provider is
+# hardcoded; leave `hook_command` empty to disable alerting.
+hook_command = []                                     # e.g. ["/usr/local/bin/notify", "--producer"]
+on_classes = []                                       # empty = the default failure set
 "#;

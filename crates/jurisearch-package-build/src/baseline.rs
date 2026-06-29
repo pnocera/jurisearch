@@ -21,6 +21,7 @@ use jurisearch_package::sequence::PackageSequence;
 use jurisearch_package::signed::Signed;
 use jurisearch_package::{PACKAGE_FORMAT_VERSION, PackageKind, Signer};
 
+use jurisearch_storage::backend::DbClientSource;
 use jurisearch_storage::dense::{
     DENSE_VECTOR_INDEX_NAME, recommended_ivfflat_lists, recommended_probes,
 };
@@ -32,10 +33,10 @@ use jurisearch_storage::outbox::{
     DigestSource, corpus_table_digests_with_client, current_change_seq_with_client,
 };
 use jurisearch_storage::package_catalog::{
-    LatestPackage, PackageCatalogRow, acquire_corpus_build_lock, latest_package_for_corpus,
-    release_corpus_build_lock, write_package_catalog_row,
+    LatestPackage, PackageCatalogRow, acquire_corpus_build_lock, insert_package_catalog_row,
+    latest_package_for_corpus, release_corpus_build_lock,
 };
-use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
+use jurisearch_storage::runtime::StorageError;
 use jurisearch_storage::zone_units::ZONE_UNIT_VECTOR_INDEX_NAME;
 use postgres::GenericClient;
 
@@ -141,7 +142,7 @@ struct MediaBuildReport {
 /// # Errors
 /// [`BuildError`] on a DB, IO, canonicalisation, or signing failure.
 pub fn build_baseline(
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     artifact_dir: &Path,
     signer: &dyn Signer,
@@ -185,7 +186,7 @@ pub fn build_baseline(
 /// [`BuildError`] if no baseline is cataloged for `corpus`, or on a DB/IO/canonicalisation/signing
 /// failure.
 pub fn build_rebaseline(
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     artifact_dir: &Path,
     signer: &dyn Signer,
@@ -213,7 +214,7 @@ pub fn build_rebaseline(
 /// derive the superseding sequence/generation/chain-link `MediaSpec`, and build the media package.
 fn build_rebaseline_locked(
     db: &mut postgres::Client,
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     artifact_dir: &Path,
     signer: &dyn Signer,
@@ -261,7 +262,7 @@ fn build_rebaseline_locked(
 /// backs the digests, per-table COPY reads, the `change_seq` high-water mark, the BM25 inventory, and
 /// the schema bundle — then seed the catalog. `spec` carries the only kind-specific identity.
 fn build_media_package(
-    producer: &ManagedPostgres,
+    producer: &impl DbClientSource,
     corpus: &str,
     artifact_dir: &Path,
     signer: &dyn Signer,
@@ -357,8 +358,10 @@ fn build_media_package(
         jurisearch_storage::migrations::schema_bundle_digest(&mut tx)?;
     tx.commit()?;
 
-    // The server major is a static property of the instance (not snapshot-sensitive).
-    let server_major = producer.server_version_major()?;
+    // The server major is a static property of the instance (not snapshot-sensitive). Query it through
+    // the generic `DbClientSource` seam (a fresh client) so a media build works against either the
+    // self-managed `ManagedPostgres` OR an external producer PostgreSQL (`WriterHandle`).
+    let server_major = server_version_major(&mut producer.client()?)?;
 
     // The index contract (observability + the §9.3 directive). The client recomputes `lists` from the
     // loaded rowcount, but the producer declares the same corpus-sized values it would itself use.
@@ -469,8 +472,8 @@ fn build_media_package(
 
     // Seed the producer catalog (the change_seq high-water mark for the next incremental's `lo`).
     let builder_versions_json = serde_json::to_value(&params.builder_versions)?;
-    write_package_catalog_row(
-        producer,
+    insert_package_catalog_row(
+        &mut producer.client()?,
         &PackageCatalogRow {
             corpus,
             package_sequence: i64::try_from(spec.to_sequence.get()).unwrap_or(i64::MAX),
@@ -501,6 +504,23 @@ fn build_media_package(
         total_rows,
         included_change_seq_high: change_seq_high,
     })
+}
+
+/// The server's major version (e.g. `18`), from `server_version_num / 10000`, read through a generic
+/// client so a media build can pin the `COPY (FORMAT binary)` PG-major guard against EITHER the
+/// self-managed `ManagedPostgres` or the external producer PostgreSQL. (Mirrors
+/// `ManagedPostgres::server_version_major`, but works over the `DbClientSource` seam.)
+fn server_version_major<C: GenericClient>(db: &mut C) -> Result<u32, BuildError> {
+    let row = db
+        .query_one("SELECT current_setting('server_version_num');", &[])
+        .map_err(StorageError::PostgresClient)?;
+    let raw: String = row.get(0);
+    let num: u32 = raw.trim().parse().map_err(|_| {
+        BuildError::Storage(StorageError::Generations {
+            message: format!("could not parse server_version_num `{}`", raw.trim()),
+        })
+    })?;
+    Ok(num / 10_000)
 }
 
 /// An IVFFlat finalize directive at the corpus-sized `lists` derived from the embedding row count

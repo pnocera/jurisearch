@@ -49,6 +49,16 @@ pub enum ProducerError {
         "the `{lock}` update lock is held by another run (skipped after waiting {waited_secs}s)"
     )]
     LockHeld { lock: String, waited_secs: u64 },
+    #[error(
+        "source `{source_token}` has a newer DILA baseline `{baseline}` pending adoption; a recorded \
+         rebaseline is required (an ordinary incremental must not cross a baseline boundary)"
+    )]
+    NeedsRebaseline {
+        source_token: String,
+        baseline: String,
+    },
+    #[error("alert hook `{command}` failed: {message}")]
+    AlertHook { command: String, message: String },
     #[error("io error at `{path}`: {source}")]
     Io {
         path: PathBuf,
@@ -78,6 +88,8 @@ impl ProducerError {
             ProducerError::Provision(_) => "provision-failed",
             ProducerError::Storage(_) => "storage-failed",
             ProducerError::LockHeld { .. } => "skipped-lock-held",
+            ProducerError::NeedsRebaseline { .. } => "needs-rebaseline",
+            ProducerError::AlertHook { .. } => "alert-hook-failed",
             ProducerError::Io { .. } => "io-failed",
         }
     }

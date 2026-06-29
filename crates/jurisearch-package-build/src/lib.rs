@@ -17,8 +17,9 @@ pub use baseline::{
     BaselineBuildReport, BaselineParams, RebaselineBuildReport, build_baseline, build_rebaseline,
 };
 pub use cycle::{
-    EnrichmentMode, ProducerCycleConfig, ProducerCycleReport, PublishFault, producer_cycle,
-    producer_cycle_faulted,
+    EnrichmentMode, ProducerCycleConfig, ProducerCycleReport, PublishFault, RebaselineCycleConfig,
+    RebaselineCycleReport, producer_cycle, producer_cycle_faulted, rebaseline_cycle,
+    rebaseline_cycle_faulted,
 };
 pub use error::BuildError;
 pub use incremental::{IncrementalBuildReport, IncrementalParams, build_incremental};

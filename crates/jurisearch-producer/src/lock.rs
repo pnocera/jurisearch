@@ -30,6 +30,25 @@ impl UpdateLock {
     }
 }
 
+/// Non-blocking probe: is the `update-core` lock currently held by some run? Used by `status --json` to
+/// report contention WITHOUT taking the lock. Opening + `try_lock` + drop releases immediately if free,
+/// so this never blocks a real run; a held lock surfaces as `true`. A missing lock file (never run) is
+/// `false`.
+#[must_use]
+pub fn is_update_lock_held(state_dir: &Path) -> bool {
+    let path = state_dir.join("update-core.lock");
+    let Ok(file) = OpenOptions::new().write(true).read(true).open(&path) else {
+        return false; // no lock file yet ⇒ never contended
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            false
+        }
+        Err(_) => true,
+    }
+}
+
 /// Acquire the `update-core` lock under `state_dir`, waiting up to `max_wait` for a concurrent holder.
 /// Returns [`ProducerError::LockHeld`] (class `skipped-lock-held`) if the wait times out.
 pub fn acquire_update_lock(

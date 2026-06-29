@@ -11,13 +11,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use jurisearch_core::error::ErrorCode;
-use jurisearch_fetch::ArchiveSource;
+use jurisearch_fetch::{ArchiveSource, ParsedArchive};
 use jurisearch_official_api::PisteClient;
 use jurisearch_package::compat::Version;
 use jurisearch_package::manifest::remote::{CatchupPolicy, EntitlementTier};
 use jurisearch_package_build::{
-    EnrichmentMode, IncrementalParams, ProducerCycleConfig, ProducerCycleReport,
-    RemoteManifestParams, producer_cycle,
+    BaselineParams, EnrichmentMode, IncrementalParams, ProducerCycleConfig, ProducerCycleReport,
+    RebaselineCycleConfig, RebaselineCycleReport, RemoteManifestParams, producer_cycle,
+    rebaseline_cycle,
 };
 use jurisearch_pipeline::embedding::EmbeddingPoolEndpoint;
 use jurisearch_pipeline::{
@@ -27,6 +28,7 @@ use jurisearch_pipeline::{
 use jurisearch_storage::backend::{DbClientSource, WriterHandle};
 use jurisearch_storage::zone_units::EnrichZoneOrder;
 
+use crate::baseline::{AdoptedBaseline, RunKind, ensure_incremental_may_proceed, group_run_kind};
 use crate::config::{EnrichmentModeConfig, ProducerConfig};
 use crate::cursors::{
     FetchCursorCoordinate, IngestJournalCoordinate, PackageHighWaterMark, RunCheckpoint, RunPhase,
@@ -34,7 +36,11 @@ use crate::cursors::{
 use crate::error::ProducerError;
 use crate::fetch::{fetch_source, read_fetch_cursor};
 use crate::lock::acquire_update_lock;
+use crate::runrecord::{RunKindTag, RunRecord};
 use crate::timestamp::now_rfc3339;
+
+/// The config value selecting automatic vs manual baseline adoption.
+const AUTO_REBASELINE_MODE: &str = "auto-on-new-baseline";
 
 /// Upper bound on a single archive member's uncompressed bytes streamed into storage.
 const MAX_MEMBER_BYTES: u64 = 256 * 1024 * 1024;
@@ -80,6 +86,11 @@ pub struct UpdateReport {
     /// The package id built this cycle, or `None` if the outbox window was empty (a no-op publish).
     pub built_incremental: Option<String>,
     pub package_high_water_mark: Option<PackageHighWaterMark>,
+    /// True when this run drove the REBASELINE path (adopted a newer DILA baseline) rather than an
+    /// ordinary incremental.
+    pub rebaselined: bool,
+    /// The DILA baseline file name(s) adopted this run (rebaseline path only).
+    pub adopted_baselines: Vec<String>,
     pub exit_class: &'static str,
 }
 
@@ -94,28 +105,88 @@ pub fn classify_cycle(report: &ProducerCycleReport) -> &'static str {
     }
 }
 
-/// Run the full `update` orchestration for a fetch group. See the module docs for the lock/ordering
-/// contract.
+/// Classify a completed `rebaseline_cycle` outcome. A rebaseline ALWAYS publishes a package (it is a
+/// full re-anchor), so it is `rebaselined`, degraded to `published-enrich-degraded` only if enrichment
+/// was skipped for lack of credentials.
+#[must_use]
+fn classify_rebaseline(report: &RebaselineCycleReport) -> &'static str {
+    match &report.enrichment {
+        EnrichmentMode::SkippedNoCredentials => "published-enrich-degraded",
+        _ => "rebaselined",
+    }
+}
+
+/// Run the full `update` orchestration for a fetch group, writing a durable [`RunRecord`] at the start
+/// AND end (success OR failure) so the outcome is always observable without logs. See the module docs
+/// for the lock/ordering contract; see [`crate::baseline`] for the automatic-rebaseline routing.
 pub fn run_update(
     config: &ProducerConfig,
     options: &UpdateOptions,
 ) -> Result<UpdateReport, ProducerError> {
     let sources = config.resolve_group(&options.group)?;
-    let run_id = format!(
-        "{}-{}",
-        options.group,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-    );
+    let source_tokens: Vec<String> = sources.iter().map(|s| s.as_str().to_owned()).collect();
+    let run_id = make_run_id(&options.group);
     let state_dir = &config.producer.state_dir;
-    let mut checkpoint = RunCheckpoint::started(&options.group, &run_id);
+
+    let initial_kind = if options.dry_run {
+        RunKindTag::DryRun
+    } else {
+        RunKindTag::Incremental
+    };
+    let mut record = RunRecord::started(&options.group, &run_id, &source_tokens, initial_kind);
+    record.save(state_dir)?;
+
+    match run_update_inner(config, options, &sources, &run_id, &mut record) {
+        Ok(report) => {
+            record.fetch_cursors = report.fetch_cursors.clone();
+            record.ingest_journals = report.ingest_journals.clone();
+            record.package_high_water_mark = report.package_high_water_mark.clone();
+            record.published_package = report.built_incremental.clone();
+            record.adopted_baselines = report.adopted_baselines.clone();
+            record.finish(report.exit_class, None);
+            record.save(state_dir)?;
+            Ok(report)
+        }
+        Err(err) => {
+            // Durable failure record (best-effort save; the original error is what we return).
+            record.finish(err.class(), Some(err.to_string()));
+            let _ = record.save(state_dir);
+            Err(err)
+        }
+    }
+}
+
+/// A unique run id, `<group>-<unix_secs>-<nanos>-<pid>`. The nanosecond fraction AND the pid keep a
+/// manual run and a timer run for the SAME group started in the SAME second from colliding on the run
+/// record path + `last.json` (which would overwrite one run's observability). The leading
+/// `<group>-<unix_secs>` keeps ids human-sortable by start time.
+fn make_run_id(group: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!(
+        "{group}-{}-{:09}-{}",
+        now.as_secs(),
+        now.subsec_nanos(),
+        std::process::id(),
+    )
+}
+
+/// The inner orchestration (its `Result` is wrapped by [`run_update`] to write the terminal record).
+fn run_update_inner(
+    config: &ProducerConfig,
+    options: &UpdateOptions,
+    sources: &[ArchiveSource],
+    run_id: &str,
+    record: &mut RunRecord,
+) -> Result<UpdateReport, ProducerError> {
+    let state_dir = &config.producer.state_dir;
+    let mut checkpoint = RunCheckpoint::started(&options.group, run_id);
     checkpoint.save(state_dir)?;
 
     // --- Phase 1: fetch (network only, NO DB writes → runs OUTSIDE the update lock). ---
     let mut fetch_cursors = Vec::new();
-    for &source in &sources {
+    for &source in sources {
         let report = if options.skip_fetch {
             read_fetch_cursor(config, source)?
         } else {
@@ -131,7 +202,7 @@ pub fn run_update(
     if options.dry_run {
         return Ok(UpdateReport {
             group: options.group.clone(),
-            run_id,
+            run_id: run_id.to_owned(),
             sources: sources.iter().map(|s| s.as_str().to_owned()).collect(),
             dry_run: true,
             fetch_cursors,
@@ -139,6 +210,8 @@ pub fn run_update(
             enrichment: EnrichmentMode::Disabled,
             built_incremental: None,
             package_high_water_mark: None,
+            rebaselined: false,
+            adopted_baselines: Vec::new(),
             exit_class: "dry-run",
         });
     }
@@ -148,9 +221,35 @@ pub fn run_update(
     let db = config.writer_handle()?;
     ensure_provisioned(&db)?;
 
-    // --- Phase 2/3: ingest each source's newly-mirrored archives. ---
+    // --- Routing, RECOMPUTED UNDER THE LOCK (Phase 5, automatic rebaseline): did the fetch reveal a
+    //     NEWER DILA baseline still PENDING adoption? Two group timers can both observe a pending
+    //     baseline BEFORE either holds the lock, so deciding pre-lock would let both run a rebaseline for
+    //     the same upstream baseline. Deciding HERE, from the adoption markers as they stand UNDER the
+    //     lock, means a baseline already adopted by the other run (its marker is written post-publish,
+    //     under this same lock) is now seen as adopted: this run becomes an ordinary incremental and
+    //     never builds a duplicate rebaseline. ---
+    let auto = config.baseline_refresh.mode == AUTO_REBASELINE_MODE;
+    let new_baselines = match group_run_kind(state_dir, sources)? {
+        RunKind::Rebaseline {
+            sources_with_new_baseline,
+        } => sources_with_new_baseline,
+        RunKind::Incremental => Vec::new(),
+    };
+    if !new_baselines.is_empty() && !auto {
+        // `manual` mode: REFUSE rather than cross the baseline boundary as a delta (an operator runs the
+        // manual rebaseline repair command — M7). This is the hard backstop.
+        ensure_incremental_may_proceed(state_dir, sources)?;
+    }
+    let do_rebaseline = !new_baselines.is_empty() && auto;
+    if do_rebaseline {
+        record.kind = RunKindTag::Rebaseline;
+        record.save(state_dir)?;
+    }
+
+    // --- Phase 2/3: ingest each source's newly-mirrored archives (baseline precedence is in the
+    //     planner; a rebaseline run re-ingests the new global baseline). ---
     let mut ingest_journals = Vec::new();
-    for &source in &sources {
+    for &source in sources {
         let journal = ingest_one(config, &db, source)?;
         ingest_journals.push(journal);
     }
@@ -163,7 +262,7 @@ pub fn run_update(
         if options.skip_enrich || config.enrichment.mode == EnrichmentModeConfig::Disabled {
             EnrichmentMode::Disabled
         } else {
-            enrich_group(config, &db, &sources)?
+            enrich_group(config, &db, sources)?
         };
     checkpoint.phase = RunPhase::Enriched;
     checkpoint.save(state_dir)?;
@@ -174,11 +273,47 @@ pub fn run_update(
     checkpoint.phase = RunPhase::Embedded;
     checkpoint.save(state_dir)?;
 
-    // --- Phase 6: producer_cycle("core") — build (if any) + publish + refresh signed manifest. ---
-    let cycle = run_cycle(config, &db, &run_id, enrichment.clone())?;
-    // Record the REAL package coordinates the cycle published (WARN fix): the published head sequence and
-    // its frozen `change_seq` window-high — not the previous all-`None` placeholder. For an empty outbox
-    // these reflect the current published head (the included window-high is unchanged).
+    // --- Phase 6: publish. Either the ordinary incremental cycle OR the rebaseline cycle. ---
+    if do_rebaseline {
+        let report = run_rebaseline_cycle(config, &db, run_id, enrichment, &new_baselines)?;
+        let hwm = PackageHighWaterMark {
+            corpus: config.package.corpus.clone(),
+            head_sequence: report.head_sequence,
+            included_change_seq_high: report.included_change_seq_high,
+        };
+        checkpoint.phase = RunPhase::Published;
+        checkpoint.package_high_water_mark = Some(hwm.clone());
+        checkpoint.save(state_dir)?;
+
+        // Record adoption ONLY now — after the signed rebaseline package is published (never before) —
+        // PER SOURCE, for EVERY source in this run's `new_baselines`. Under the M3 r3 design the rebaseline
+        // is DISCARD-AND-REBUILT from the current locked DB state, so the published artifact's baseline set
+        // ALWAYS equals the current run's pending per-source baselines: there is no stale-resume identity
+        // to reconcile, and adoption is exact per-source (no max-timestamp-equality heuristic that could
+        // adopt a source whose later baseline the published snapshot predated, Codex r3 BLOCKER 1).
+        let adopted = adopt_new_baselines(state_dir, &new_baselines)?;
+        let exit_class = classify_rebaseline(&report);
+        return Ok(UpdateReport {
+            group: options.group.clone(),
+            run_id: run_id.to_owned(),
+            sources: sources.iter().map(|s| s.as_str().to_owned()).collect(),
+            dry_run: false,
+            fetch_cursors,
+            ingest_journals,
+            enrichment: report.enrichment,
+            built_incremental: Some(report.package_id),
+            package_high_water_mark: Some(hwm),
+            rebaselined: true,
+            adopted_baselines: adopted,
+            exit_class,
+        });
+    }
+
+    // Backstop: an ordinary incremental must never cross a pending baseline boundary.
+    ensure_incremental_may_proceed(state_dir, sources)?;
+    let cycle = run_cycle(config, &db, run_id, enrichment.clone())?;
+    // Record the REAL package coordinates the cycle published: the published head sequence and its frozen
+    // `change_seq` window-high. For an empty outbox these reflect the current published head.
     let hwm = PackageHighWaterMark {
         corpus: config.package.corpus.clone(),
         head_sequence: cycle.head_sequence,
@@ -191,7 +326,7 @@ pub fn run_update(
     let exit_class = classify_cycle(&cycle);
     Ok(UpdateReport {
         group: options.group.clone(),
-        run_id,
+        run_id: run_id.to_owned(),
         sources: sources.iter().map(|s| s.as_str().to_owned()).collect(),
         dry_run: false,
         fetch_cursors,
@@ -199,6 +334,8 @@ pub fn run_update(
         enrichment: cycle.enrichment,
         built_incremental: cycle.built_incremental,
         package_high_water_mark: Some(hwm),
+        rebaselined: false,
+        adopted_baselines: Vec::new(),
         exit_class,
     })
 }
@@ -377,6 +514,100 @@ fn run_cycle(
     Ok(report)
 }
 
+/// Run one REBASELINE cycle: build the full-snapshot `Rebaseline` from the producer's current tables
+/// (the new DILA baseline has just been ingested), publish it, and refresh the signed manifest. The
+/// `baseline_id` is derived from the newest adopted DILA baseline file name so the manifest's
+/// `active_baseline` reflects the upstream re-issue.
+fn run_rebaseline_cycle(
+    config: &ProducerConfig,
+    db: &impl DbClientSource,
+    run_id: &str,
+    enrichment: EnrichmentMode,
+    new_baselines: &[(String, String)],
+) -> Result<RebaselineCycleReport, ProducerError> {
+    let signer = config.signer()?;
+    let baseline_id = rebaseline_baseline_id(config, new_baselines);
+    let cycle_config = RebaselineCycleConfig {
+        baseline_params: rebaseline_params(config, run_id, baseline_id),
+        remote_manifest_params: remote_manifest_params(config, &signer),
+        enrichment,
+    };
+    let report = rebaseline_cycle(
+        db,
+        &config.package.corpus,
+        &config.producer.corpora_dir,
+        &signer,
+        &cycle_config,
+    )?;
+    Ok(report)
+}
+
+/// A deterministic `baseline_id` for a rebaseline, derived from the newest new DILA baseline file name's
+/// archive timestamp (e.g. `core-20250713-140000`). Falls back to `<corpus>-rebaseline` if no name parses.
+fn rebaseline_baseline_id(config: &ProducerConfig, new_baselines: &[(String, String)]) -> String {
+    rebaseline_baseline_id_for(&config.package.corpus, new_baselines)
+}
+
+/// The pure `corpus`-keyed core of [`rebaseline_baseline_id`] (extracted so it is unit-testable without a
+/// full [`ProducerConfig`]). This LABELS the freshly built rebaseline's embedded `baseline_id` (the
+/// manifest's `active_baseline.baseline_id`) from the newest pending baseline's archive timestamp; the
+/// label is presentational — adoption is per-source over `new_baselines`, not gated on this id.
+fn rebaseline_baseline_id_for(corpus: &str, new_baselines: &[(String, String)]) -> String {
+    new_baselines
+        .iter()
+        .filter_map(|(token, file_name)| {
+            let source = ArchiveSource::from_token(token)?;
+            ParsedArchive::parse_file_name(source, file_name).ok()
+        })
+        .map(|parsed| parsed.timestamp.compact().to_owned())
+        .max()
+        .map(|compact| format!("{corpus}-{compact}"))
+        .unwrap_or_else(|| format!("{corpus}-rebaseline"))
+}
+
+/// Mark EVERY source in this run's `new_baselines` ADOPTED, PER SOURCE, returning the adopted baseline
+/// file names. Called ONLY after the rebaseline package is published. Under the M3 r3 discard-and-rebuild
+/// design the published artifact is a full snapshot of the current locked DB state, so it ALWAYS
+/// incorporates exactly the current pending per-source baselines — every one is adopted, and none falsely
+/// (there is no stale-resume window in which a source's later baseline could be adopted off an older
+/// snapshot, Codex r3 BLOCKER 1). Per-source markers mean no source is ever collapsed into another.
+fn adopt_new_baselines(
+    state_dir: &Path,
+    new_baselines: &[(String, String)],
+) -> Result<Vec<String>, ProducerError> {
+    let mut adopted = Vec::new();
+    for (token, baseline) in new_baselines {
+        if let Some(source) = ArchiveSource::from_token(token) {
+            AdoptedBaseline::adopt(state_dir, source, baseline)?;
+            adopted.push(baseline.clone());
+        }
+    }
+    Ok(adopted)
+}
+
+/// The rebaseline (full-snapshot) build params: the same storage fingerprint + builder versions as an
+/// incremental, plus the upstream-derived `baseline_id`. (A rebaseline intentionally MAY supersede a
+/// changed fingerprint/builder set, unlike an incremental.)
+fn rebaseline_params(config: &ProducerConfig, run_id: &str, baseline_id: String) -> BaselineParams {
+    let embedding = config.embedding_config();
+    let mut builder_versions = BTreeMap::new();
+    builder_versions.insert(
+        "jurisearch-producer".to_owned(),
+        env!("CARGO_PKG_VERSION").to_owned(),
+    );
+    BaselineParams {
+        baseline_id,
+        builder_run_id: run_id.to_owned(),
+        created_at: now_rfc3339(),
+        embedding_fingerprint: embedding.storage_embedding_fingerprint(),
+        embedding_model: embedding.model.clone(),
+        embedding_dimension: embedding.dimension as u32,
+        embedding_normalize: embedding.normalize,
+        builder_versions,
+        minimum_client_version: Version::new(0, 1, 0),
+    }
+}
+
 /// The incremental build params, derived from the producer config. `embedding_fingerprint` is the
 /// STORAGE fingerprint (request_model excluded), matching the cataloged baseline.
 fn incremental_params(config: &ProducerConfig, run_id: &str) -> IncrementalParams {
@@ -428,4 +659,74 @@ fn remote_manifest_params(
 #[must_use]
 pub fn is_under(root: &Path, candidate: &Path) -> bool {
     candidate.starts_with(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use jurisearch_fetch::ArchiveSource;
+
+    use super::{adopt_new_baselines, make_run_id, rebaseline_baseline_id_for};
+    use crate::baseline::AdoptedBaseline;
+
+    fn baseline_name(src: &str, compact: &str) -> (String, String) {
+        (
+            src.to_owned(),
+            format!("Freemium_{src}_global_{compact}.tar.gz"),
+        )
+    }
+
+    #[test]
+    fn the_rebaseline_baseline_id_labels_from_the_newest_pending_baseline() {
+        // The presentational label is the corpus + the MAX archive timestamp across the pending baselines.
+        let new_baselines = vec![
+            baseline_name("cass", "20250713-140000"),
+            baseline_name("inca", "20250712-140000"),
+        ];
+        assert_eq!(
+            rebaseline_baseline_id_for("core", &new_baselines),
+            "core-20250713140000",
+            "label tracks the newest pending baseline timestamp"
+        );
+    }
+
+    #[test]
+    fn rebaseline_adopts_every_source_per_source_with_no_collapse() {
+        // M3 r3 multi-source acceptance: a `jurisprudence`-shaped run with TWO sources pending at
+        // DIFFERENT baselines (cass newer, inca older) must adopt BOTH, per source — neither dropped nor
+        // collapsed into the other. (The discard-and-rebuild rebaseline always snapshots both, so both
+        // are safe to adopt after publish.)
+        let state_dir = tempfile::tempdir().expect("tempdir");
+        let new_baselines = vec![
+            baseline_name("cass", "20250713-140000"),
+            baseline_name("inca", "20250712-140000"),
+        ];
+        let adopted = adopt_new_baselines(state_dir.path(), &new_baselines).expect("adopt");
+        assert_eq!(adopted.len(), 2, "both sources adopted");
+
+        let cass =
+            AdoptedBaseline::load(state_dir.path(), ArchiveSource::Cass).expect("cass marker");
+        let inca =
+            AdoptedBaseline::load(state_dir.path(), ArchiveSource::Inca).expect("inca marker");
+        assert_eq!(
+            cass.baseline_file_name.as_deref(),
+            Some("Freemium_cass_global_20250713-140000.tar.gz"),
+            "cass adopted its own baseline"
+        );
+        assert_eq!(
+            inca.baseline_file_name.as_deref(),
+            Some("Freemium_inca_global_20250712-140000.tar.gz"),
+            "inca adopted its own (distinct) baseline — not collapsed to cass's"
+        );
+    }
+
+    #[test]
+    fn run_ids_for_the_same_group_in_the_same_second_are_unique() {
+        // A manual + timer run for one group can start in the same second; their run ids (and thus the
+        // run-record path + `last.json`) must still differ so neither overwrites the other's record.
+        let a = make_run_id("jurisprudence");
+        let b = make_run_id("jurisprudence");
+        assert_ne!(a, b, "two immediate run ids for the same group must differ");
+        assert!(a.starts_with("jurisprudence-"));
+        assert!(b.starts_with("jurisprudence-"));
+    }
 }

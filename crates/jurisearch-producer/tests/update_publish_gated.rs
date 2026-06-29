@@ -409,3 +409,98 @@ fn a_pre_publish_failure_is_resumed_to_the_same_package_exactly_once() -> Result
     );
     Ok(())
 }
+
+/// BLOCKER gate (Codex r3 BLOCKER 2 — uncataloged-staging discard): a staged manifest with NO matching
+/// `package_catalog` row (a crash AFTER the staged manifest was written but BEFORE the catalog insert) must
+/// be DISCARDED, never published + adopted as a phantom. `resume_pending` verifies the catalog row exists
+/// before publishing; an uncataloged slot is cleared and the cycle builds fresh. (If the discard did NOT
+/// happen, the resume would publish the phantom and then `mark_package_published` would update 0 rows and
+/// ERROR — so a SUCCESSFUL cycle that advances to a freshly built package proves the discard.)
+#[test]
+fn an_uncataloged_staged_artifact_is_discarded_not_published_as_a_phantom()
+-> Result<(), StorageError> {
+    let Ok(pg_config) = PgConfig::discover() else {
+        eprintln!("SKIP: no pgvector/pg_search assets via JURISEARCH_PG_CONFIG");
+        return Ok(());
+    };
+    let proot = tempfile::tempdir().map_err(StorageError::Io)?;
+    let pg = ManagedPostgres::start_durable(pg_config, proot.path())?;
+    pg.run_migrations()?;
+    seed_baseline_rows(&pg)?;
+
+    let work = tempfile::tempdir().map_err(StorageError::Io)?;
+    let config = producer_config(pg.port, work.path());
+    let db = config.writer_handle().expect("writer handle");
+    let signer = config.signer().expect("signer");
+    let served_root = config.producer.corpora_dir.clone();
+    std::fs::create_dir_all(&served_root).unwrap();
+
+    // Baseline (head 1).
+    let base_art = tempfile::tempdir().map_err(StorageError::Io)?;
+    let base = build_baseline(&pg, "core", base_art.path(), &signer, &baseline_params())
+        .expect("baseline builds");
+    publish_package(&served_root, "core", &base.package_id, base_art.path()).expect("publish base");
+    producer_cycle(
+        &db,
+        "core",
+        &served_root,
+        &signer,
+        &cycle_config(&config, "run-init", EnrichmentMode::Disabled, &signer),
+    )
+    .expect("init cycle");
+    assert_eq!(manifest_head(&served_root), 1);
+
+    // One delta, then a cycle that crashes AFTER the catalog row + staged artifact — leaving `core-1-2`
+    // staged AND cataloged `'built'`.
+    mutate(
+        &pg,
+        "UPDATE documents SET title='rev1' WHERE document_id='cass:P1';",
+        "cass:P1",
+    )?;
+    let faulted = producer_cycle_faulted(
+        &db,
+        "core",
+        &served_root,
+        &signer,
+        &cycle_config(&config, "run-fault", EnrichmentMode::Disabled, &signer),
+        PublishFault::AfterStageBeforePublish,
+    );
+    assert!(
+        faulted.is_err(),
+        "the injected pre-publish fault propagates"
+    );
+    assert!(
+        staged_pending_dir(&served_root, "core")
+            .join("manifest.json")
+            .exists(),
+        "the built artifact is staged"
+    );
+
+    // Simulate the UNCATALOGED window: drop the catalog row, leaving the staged artifact with NO row.
+    pg.execute_sql("DELETE FROM package_catalog WHERE package_id='core-1-2';")?;
+
+    // Re-run: the staged artifact is uncataloged, so it is DISCARDED (not published as a phantom). The
+    // cycle then builds the delta fresh, publishes it, and advances the manifest exactly once.
+    let cycle = producer_cycle(
+        &db,
+        "core",
+        &served_root,
+        &signer,
+        &cycle_config(&config, "run-discard", EnrichmentMode::Disabled, &signer),
+    )
+    .expect("uncataloged staging is discarded, not published as a phantom");
+    assert_eq!(
+        cycle.built_incremental.as_deref(),
+        Some("core-1-2"),
+        "the delta is rebuilt fresh after discarding the uncataloged staged artifact"
+    );
+    assert_eq!(manifest_head(&served_root), 2, "manifest advanced once");
+    let count =
+        pg.execute_sql("SELECT count(*) FROM package_catalog WHERE package_kind='incremental';")?;
+    assert_eq!(
+        count.trim(),
+        "1",
+        "exactly one incremental cataloged (the phantom was never published)"
+    );
+    Ok(())
+}

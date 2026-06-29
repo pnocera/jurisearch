@@ -21,17 +21,28 @@
 //! zero). A failure before the publish phase leaves a resumable [`cursors::RunCheckpoint`] and no
 //! manifest pointing at missing payloads.
 
+pub mod alert;
+pub mod baseline;
 pub mod config;
 pub mod cursors;
 pub mod error;
+pub mod exit;
 pub mod fetch;
 pub mod lock;
+pub mod render;
+pub mod runrecord;
+pub mod status;
 pub mod timestamp;
 pub mod update;
 
+pub use baseline::{BaselineDecision, RunKind, baseline_decision, group_run_kind};
 pub use config::{PRODUCER_CONFIG_EXAMPLE, ProducerConfig};
 pub use error::ProducerError;
+pub use exit::{exit_code_for, is_success};
 pub use fetch::{FetchStepReport, fetch_source, read_fetch_cursor};
+pub use render::{InstallReport, cron_equivalent, install, render_all};
+pub use runrecord::{RunOutcome, RunRecord};
+pub use status::{ProducerStatus, build_status};
 pub use update::{UpdateOptions, UpdateReport, classify_cycle, run_update};
 
 use jurisearch_storage::provision::{ProvisionReport, provision_external_db};

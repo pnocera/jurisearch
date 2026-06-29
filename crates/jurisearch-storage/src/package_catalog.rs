@@ -178,6 +178,48 @@ pub fn latest_package_for_corpus<C: GenericClient>(
     }))
 }
 
+/// The status of the catalog row for `(corpus, package_id)`, or `None` if no such row exists. Used by
+/// the resume path to VERIFY a staged artifact is cataloged BEFORE publishing it (M3 r3 / Codex BLOCKER
+/// 2): an UNCATALOGED staged manifest is an incomplete build (the crash hit before the catalog insert) to
+/// DISCARD, never a phantom package to publish + adopt.
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn package_catalog_status<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+    package_id: &str,
+) -> Result<Option<String>, StorageError> {
+    let row = client
+        .query_opt(
+            "SELECT status FROM package_catalog WHERE corpus = $1 AND package_id = $2;",
+            &[&corpus, &package_id],
+        )
+        .map_err(StorageError::PostgresClient)?;
+    Ok(row.map(|row| row.get("status")))
+}
+
+/// Delete an UNPUBLISHED (`'built'`) catalog row for `(corpus, package_id)` — the rebaseline
+/// discard-and-rebuild step (M3 r3). A crashed rebaseline attempt's orphaned `'built'` row must never be
+/// selectable as a chain head, conflict a fresh re-insert of the same id, or surface in the served
+/// manifest. The `status = 'built'` guard means a `'published'` row is NEVER deleted, so a served package
+/// can never be removed. Returns the number of rows deleted (0 when the staged artifact was uncataloged).
+///
+/// # Errors
+/// [`StorageError::PostgresClient`] on a DB error.
+pub fn delete_unpublished_package_row<C: GenericClient>(
+    client: &mut C,
+    corpus: &str,
+    package_id: &str,
+) -> Result<u64, StorageError> {
+    client
+        .execute(
+            "DELETE FROM package_catalog WHERE corpus = $1 AND package_id = $2 AND status = 'built';",
+            &[&corpus, &package_id],
+        )
+        .map_err(StorageError::PostgresClient)
+}
+
 /// A catalog row read back for the producer remote-manifest builder / `package list` (plan P9).
 #[derive(Debug, Clone)]
 pub struct CatalogRow {

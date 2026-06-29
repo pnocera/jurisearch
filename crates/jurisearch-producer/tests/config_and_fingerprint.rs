@@ -107,6 +107,39 @@ fn non_core_corpus_is_rejected_v1_single_corpus_invariant() {
 }
 
 #[test]
+fn a_relative_path_rendered_into_a_unit_is_rejected() {
+    // Every path rendered into a systemd unit (and the producer data/state paths in `ExecStart`/
+    // `ReadWritePaths`) MUST be absolute — systemd does not expand env in unit file paths. A relative
+    // value must be rejected by `validate()` BEFORE any unit is rendered.
+    for (needle, relative) in [
+        (
+            "unit_dir = \"/etc/systemd/system\"",
+            "unit_dir = \"systemd\"",
+        ),
+        (
+            "binary_path = \"/usr/local/bin/jurisearch-producer\"",
+            "binary_path = \"bin/jurisearch-producer\"",
+        ),
+        (
+            "corpora_dir = \"/srv/jurisearch/storebox/packages\"",
+            "corpora_dir = \"packages\"",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_example(dir.path());
+        let original = std::fs::read_to_string(&path).unwrap();
+        let toml = original.replacen(needle, relative, 1);
+        assert!(toml.contains(relative), "fixture replaced `{needle}`");
+        std::fs::write(&path, &toml).unwrap();
+        let err = ProducerConfig::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("ABSOLUTE"),
+            "a relative path must be rejected with an absolute-path diagnostic: {err}"
+        );
+    }
+}
+
+#[test]
 fn world_readable_secret_file_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_example(dir.path());
