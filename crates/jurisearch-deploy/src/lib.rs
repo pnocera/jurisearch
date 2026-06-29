@@ -1,6 +1,29 @@
-//! `jurisearch-deploy` — deployment configuration and operator tooling.
+//! `jurisearch-deploy` — the operator deployment layer (plan `01-makeitsimpletodeploy`, Phase 1).
 //!
-//! Intended role: hosts the `SiteConfig` parser/renderer, the `jurisearchctl`
-//! binary, and shared config/redaction/file-permission primitives.
+//! This crate owns:
+//! - the strict [`SiteConfig`] parser (`deny_unknown_fields`, required fields enforced);
+//! - deterministic [`RenderedSite`] env-file + systemd-unit rendering;
+//! - the LOOPBACK-ONLY site query-embedder guard (site-config-scoped; NOT in `jurisearch-embed`);
+//! - shared config primitives ([`secret`]) — secret redaction + secret-file permission helpers —
+//!   designed for reuse by the later producer config parser (M2-B).
 //!
-//! Skeleton — M1-A fills this in.
+//! The `jurisearchctl` binary (`src/bin/jurisearchctl.rs`) is the operator surface over these APIs.
+
+pub mod bind;
+pub mod config;
+pub mod error;
+pub mod render;
+pub mod scaffold;
+pub mod secret;
+pub mod validate;
+
+pub use config::{
+    DatabaseConfig, EmbedderConfig, LicenseConfig, SITE_CONFIG_EXAMPLE, SiteConfig, SiteSection,
+    SyncConfig, SystemConfig, TrustAnchorConfig, TrustConfig, TrustPurpose,
+};
+pub use error::{DeployError, Diagnostic, ValidationErrors};
+pub use render::{RenderedFile, RenderedSite};
+pub use secret::{SecretString, redact};
+
+#[cfg(test)]
+mod tests;

@@ -1023,6 +1023,16 @@ dependencies = [
 [[package]]
 name = "jurisearch-deploy"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "jurisearch-embed",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "url",
+]
 
 [[package]]
 name = "jurisearch-embed"

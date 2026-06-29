@@ -5,8 +5,27 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+# Operator deployment layer (plan 01-makeitsimpletodeploy, Phase 1): the strict `SiteConfig` parser,
+# deterministic env/unit rendering, the shared config primitives (secret redaction + secret-file
+# permission helpers reused later by the producer config), and the `jurisearchctl` admin binary.
+
 [lib]
 name = "jurisearch_deploy"
 path = "src/lib.rs"
 
+[[bin]]
+name = "jurisearchctl"
+path = "src/bin/jurisearchctl.rs"
+
 [dependencies]
+# Reuse the embedder config + loopback classifier; do NOT duplicate fingerprint/base-url logic.
+jurisearch-embed = { path = "../jurisearch-embed" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
