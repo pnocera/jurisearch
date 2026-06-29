@@ -1,0 +1,13 @@
+No BLOCKER/WARN/NIT findings.
+
+The r2 issues are resolved in the current source. `resolve_endpoint_with_config` now keys `$JURISEARCH_SITE_URL` presence off `std::env::var_os` and consumes any present value before considering configured fallback, with a non-Unicode value returning a `BadEndpoint` UTF-8 diagnostic instead of falling through to config (`crates/jurisearch-client/src/lib.rs:138`, `crates/jurisearch-client/src/lib.rs:163`, `crates/jurisearch-client/src/lib.rs:173`). The selector helper uses the same `var_os` presence semantics (`crates/jurisearch-client/src/lib.rs:192`), and the forward path uses that helper to avoid loading low-priority config whenever a flag/env selector is present (`crates/jurisearch-client/src/main.rs:205`).
+
+`doctor` now handles both absent config files and an unresolvable config directory through the same selector-gated advisory decision: `Ok(None)` reports with `selector_present` (`crates/jurisearch-client/src/main.rs:133`), and the no-config-directory arm does the same (`crates/jurisearch-client/src/main.rs:148`). Endpoint resolution still runs afterward through `resolve_endpoint_with_config`, so malformed selected endpoints fail as endpoint errors while missing config alone does not make an env/flag-resolved doctor unhealthy (`crates/jurisearch-client/src/main.rs:163`).
+
+The new regression tests are not false-green for the r2 cases. `doctor_with_no_config_directory_and_env_endpoint_is_advisory_and_exits_zero` removes both `HOME` and `XDG_CONFIG_HOME`, sets an env endpoint, requires exit 0, and asserts no `[FAIL]` line (`crates/jurisearch-client/tests/configure_doctor.rs:231`). The non-Unicode forward test persists a valid config, sets a non-UTF-8 env var, and requires the UTF-8 diagnostic rather than a config/unreachable outcome (`crates/jurisearch-client/tests/configure_doctor.rs:259`). The doctor equivalent additionally asserts there is no resolved configured endpoint line (`crates/jurisearch-client/tests/configure_doctor.rs:291`). These would fail under the previous `std::env::var` fall-through behavior.
+
+The thin dependency cone remains clean of the forbidden heavy stack. The existing cone guard still checks transitive normal dependencies via `cargo tree` (`crates/jurisearch-client/tests/dependency_cone.rs:24`), and `cargo tree -p jurisearch-client --edges normal` shows the added config surface only brings `serde`/`toml` and their parsing support, not storage/embed/ingest/CLI/postgres/tokenizer/ureq dependencies.
+
+Verification run: `cargo test -p jurisearch-client` passed, including `configure_doctor` and `dependency_cone`.
+
+VERDICT: GO
