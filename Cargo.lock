@@ -1040,6 +1040,19 @@ dependencies = [
 [[package]]
 name = "jurisearch-fetch"
 version = "0.1.0"
+dependencies = [
+ "flate2",
+ "jurisearch-ingest",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "ureq",
+ "url",
+]
 
 [[package]]
 name = "jurisearch-ingest"
