@@ -1021,6 +1021,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-deploy"
+version = "0.1.0"
+
+[[package]]
 name = "jurisearch-embed"
 version = "0.1.0"
 dependencies = [
@@ -1032,6 +1036,10 @@ dependencies = [
  "ureq",
  "url",
 ]
+
+[[package]]
+name = "jurisearch-fetch"
+version = "0.1.0"
 
 [[package]]
 name = "jurisearch-ingest"
@@ -1087,6 +1095,10 @@ dependencies = [
  "tempfile",
  "thiserror",
 ]
+
+[[package]]
+name = "jurisearch-pipeline"
+version = "0.1.0"
 
 [[package]]
 name = "jurisearch-query"
