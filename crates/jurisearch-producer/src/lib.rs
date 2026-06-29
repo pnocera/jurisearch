@@ -28,8 +28,10 @@ pub mod cursors;
 pub mod error;
 pub mod exit;
 pub mod fetch;
+pub mod freshness;
 pub mod lock;
 pub mod render;
+pub mod retention;
 pub mod runrecord;
 pub mod status;
 pub mod timestamp;
@@ -40,10 +42,17 @@ pub use config::{PRODUCER_CONFIG_EXAMPLE, ProducerConfig};
 pub use error::ProducerError;
 pub use exit::{exit_code_for, is_success};
 pub use fetch::{FetchStepReport, fetch_source, read_fetch_cursor};
+pub use freshness::JudilibreAccelerator;
 pub use render::{InstallReport, cron_equivalent, install, render_all};
+pub use retention::{
+    ReclaimCategory, ReclaimItem, RetentionReport, run_retention, scan_reclaimable,
+};
 pub use runrecord::{RunOutcome, RunRecord};
 pub use status::{ProducerStatus, build_status};
-pub use update::{UpdateOptions, UpdateReport, classify_cycle, run_update};
+pub use update::{
+    ForcedRebaselinePlan, UpdateOptions, UpdateReport, classify_cycle, plan_forced_rebaseline,
+    run_update,
+};
 
 use jurisearch_storage::provision::{ProvisionReport, provision_external_db};
 

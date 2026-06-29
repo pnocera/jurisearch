@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use jurisearch_core::error::ErrorCode;
-use jurisearch_fetch::{ArchiveSource, ParsedArchive};
+use jurisearch_fetch::{ArchiveSource, FetchCursor, ParsedArchive};
 use jurisearch_official_api::PisteClient;
 use jurisearch_package::compat::Version;
 use jurisearch_package::manifest::remote::{CatchupPolicy, EntitlementTier};
@@ -58,6 +58,13 @@ pub struct UpdateOptions {
     pub skip_fetch: bool,
     pub skip_enrich: bool,
     pub lock_wait: Duration,
+    /// FORCE the rebaseline (discard-and-rebuild) path for this run regardless of `[baseline_refresh].mode`
+    /// or whether a NEWER DILA baseline is pending — the operator `rebaseline` repair command sets this.
+    /// It re-anchors `core` to each source's CURRENTLY-fetched baseline and re-records per-source adoption.
+    /// It does NOT invent a second rebaseline mechanism: it drives the SAME [`run_rebaseline_cycle`] /
+    /// `rebaseline_cycle` discard-and-rebuild path, under the SAME `update-core` lock, with the SAME
+    /// integrity/order/convergence checks and the SAME structured run record as the automatic path.
+    pub force_rebaseline: bool,
 }
 
 impl UpdateOptions {
@@ -69,7 +76,17 @@ impl UpdateOptions {
             skip_fetch: false,
             skip_enrich: false,
             lock_wait: DEFAULT_LOCK_WAIT,
+            force_rebaseline: false,
         }
+    }
+
+    /// A FORCED-rebaseline repair run for `group` (the operator `rebaseline` command). Equivalent to
+    /// [`UpdateOptions::new`] with [`UpdateOptions::force_rebaseline`] set.
+    #[must_use]
+    pub fn rebaseline(group: impl Into<String>) -> Self {
+        let mut options = Self::new(group);
+        options.force_rebaseline = true;
+        options
     }
 }
 
@@ -198,8 +215,15 @@ fn run_update_inner(
     checkpoint.fetch_cursors = fetch_cursors.clone();
     checkpoint.save(state_dir)?;
 
-    // A dry run stops here: it never opens the DB, takes no lock, and publishes nothing.
+    // A dry run stops here: it never opens the DB, takes no lock, and publishes nothing. A FORCED
+    // rebaseline dry run additionally REPORTS the per-source baselines it WOULD re-anchor + re-adopt
+    // (read-only, from the fetch cursors) so the operator can preview the repair without mutating.
     if options.dry_run {
+        let planned = if options.force_rebaseline {
+            forced_rebaseline_baselines(state_dir, sources)?
+        } else {
+            Vec::new()
+        };
         return Ok(UpdateReport {
             group: options.group.clone(),
             run_id: run_id.to_owned(),
@@ -210,9 +234,19 @@ fn run_update_inner(
             enrichment: EnrichmentMode::Disabled,
             built_incremental: None,
             package_high_water_mark: None,
-            rebaselined: false,
-            adopted_baselines: Vec::new(),
+            rebaselined: options.force_rebaseline,
+            // In a dry run NOTHING is adopted; this lists the baselines a real run WOULD adopt.
+            adopted_baselines: planned.into_iter().map(|(_, name)| name).collect(),
             exit_class: "dry-run",
+        });
+    }
+
+    // Fail fast (no lock, no DB connection) when a FORCED rebaseline has nothing on disk to re-anchor:
+    // no source in the group has a fetched + integrity-checked baseline yet. The authoritative forced set
+    // is still recomputed under the lock below; this is only a cheap read-only precondition check.
+    if options.force_rebaseline && forced_rebaseline_baselines(state_dir, sources)?.is_empty() {
+        return Err(ProducerError::NothingToRebaseline {
+            group: options.group.clone(),
         });
     }
 
@@ -229,18 +263,33 @@ fn run_update_inner(
     //     under this same lock) is now seen as adopted: this run becomes an ordinary incremental and
     //     never builds a duplicate rebaseline. ---
     let auto = config.baseline_refresh.mode == AUTO_REBASELINE_MODE;
-    let new_baselines = match group_run_kind(state_dir, sources)? {
-        RunKind::Rebaseline {
-            sources_with_new_baseline,
-        } => sources_with_new_baseline,
-        RunKind::Incremental => Vec::new(),
+    // FORCED repair (operator `rebaseline`): re-anchor to each source's currently-fetched baseline,
+    // bypassing the mode gate and the "is a NEWER baseline pending?" detection (the operator has decided
+    // to rebuild). It still drives the SAME discard-and-rebuild path below — it does NOT skip any
+    // integrity/order/convergence check, all of which live inside ingest + `rebaseline_cycle`.
+    let new_baselines = if options.force_rebaseline {
+        let forced = forced_rebaseline_baselines(state_dir, sources)?;
+        if forced.is_empty() {
+            // Nothing on disk to re-anchor: no source in the group has a fetched+verified baseline yet.
+            return Err(ProducerError::NothingToRebaseline {
+                group: options.group.clone(),
+            });
+        }
+        forced
+    } else {
+        match group_run_kind(state_dir, sources)? {
+            RunKind::Rebaseline {
+                sources_with_new_baseline,
+            } => sources_with_new_baseline,
+            RunKind::Incremental => Vec::new(),
+        }
     };
-    if !new_baselines.is_empty() && !auto {
+    if !options.force_rebaseline && !new_baselines.is_empty() && !auto {
         // `manual` mode: REFUSE rather than cross the baseline boundary as a delta (an operator runs the
         // manual rebaseline repair command — M7). This is the hard backstop.
         ensure_incremental_may_proceed(state_dir, sources)?;
     }
-    let do_rebaseline = !new_baselines.is_empty() && auto;
+    let do_rebaseline = options.force_rebaseline || (!new_baselines.is_empty() && auto);
     if do_rebaseline {
         record.kind = RunKindTag::Rebaseline;
         record.save(state_dir)?;
@@ -583,6 +632,63 @@ fn adopt_new_baselines(
         }
     }
     Ok(adopted)
+}
+
+/// The per-source baselines a FORCED (operator repair) rebaseline would re-anchor + re-adopt: for EVERY
+/// source in the group that has a fetched + integrity-checked baseline on disk (the fetch cursor's
+/// `baseline_file_name`), the `(source_token, baseline_file_name)` pair — WHETHER OR NOT it is already
+/// adopted. Unlike the automatic path (which acts only on a NEWER pending baseline), a repair re-anchors
+/// the whole `core` corpus to the current DILA baseline set regardless. Sources with no fetched baseline
+/// yet contribute nothing (there is nothing to re-anchor them to). Read-only: no DB, no network, no lock.
+fn forced_rebaseline_baselines(
+    state_dir: &Path,
+    sources: &[ArchiveSource],
+) -> Result<Vec<(String, String)>, ProducerError> {
+    let mut forced = Vec::new();
+    for &source in sources {
+        let cursor = FetchCursor::load(state_dir, source)?;
+        if let Some(baseline) = cursor.baseline_file_name {
+            forced.push((source.as_str().to_owned(), baseline));
+        }
+    }
+    Ok(forced)
+}
+
+/// The preview of what an operator `rebaseline` repair run for `group` WOULD do, computed purely from the
+/// on-disk fetch cursors (no DB, no network, no lock, no mutation). Drives the `--dry-run` report and is
+/// the planning seam tests assert against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedRebaselinePlan {
+    pub group: String,
+    /// The group's ordered DILA sources.
+    pub sources: Vec<String>,
+    /// `(source_token, fetched_baseline_file_name)` the rebaseline would re-anchor + re-adopt. A source
+    /// with no fetched baseline yet is absent here.
+    pub baselines: Vec<(String, String)>,
+}
+
+impl ForcedRebaselinePlan {
+    /// True when at least one source has a fetched baseline to re-anchor to (a real run would publish).
+    #[must_use]
+    pub fn has_work(&self) -> bool {
+        !self.baselines.is_empty()
+    }
+}
+
+/// Plan a FORCED rebaseline for the named fetch `group` from the on-disk fetch cursors. Read-only — it
+/// neither fetches, locks, nor mutates; it reports the per-source baselines a real `rebaseline` run would
+/// re-anchor + re-adopt through the SAME discard-and-rebuild `rebaseline_cycle` path as the automatic run.
+pub fn plan_forced_rebaseline(
+    config: &ProducerConfig,
+    group: &str,
+) -> Result<ForcedRebaselinePlan, ProducerError> {
+    let sources = config.resolve_group(group)?;
+    let baselines = forced_rebaseline_baselines(&config.producer.state_dir, &sources)?;
+    Ok(ForcedRebaselinePlan {
+        group: group.to_owned(),
+        sources: sources.iter().map(|s| s.as_str().to_owned()).collect(),
+        baselines,
+    })
 }
 
 /// The rebaseline (full-snapshot) build params: the same storage fingerprint + builder versions as an

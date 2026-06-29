@@ -57,6 +57,11 @@ pub enum ProducerError {
         source_token: String,
         baseline: String,
     },
+    #[error(
+        "fetch group `{group}` has no source with a fetched DILA baseline yet; nothing to rebaseline \
+         (run `jurisearch-producer fetch`/`update` first)"
+    )]
+    NothingToRebaseline { group: String },
     #[error("alert hook `{command}` failed: {message}")]
     AlertHook { command: String, message: String },
     #[error("io error at `{path}`: {source}")]
@@ -78,7 +83,8 @@ impl ProducerError {
             | ProducerError::ConfigInvalid(_)
             | ProducerError::Secret { .. }
             | ProducerError::UnknownGroup(_)
-            | ProducerError::UnknownSource(_) => "config-invalid",
+            | ProducerError::UnknownSource(_)
+            | ProducerError::NothingToRebaseline { .. } => "config-invalid",
             ProducerError::Fetch(_) => "fetch-failed",
             ProducerError::Ingest(_) => "ingest-failed",
             ProducerError::Enrich(_) => "enrich-degraded",

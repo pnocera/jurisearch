@@ -15,10 +15,11 @@ use jurisearch_producer::alert::{self, AlertEvent};
 use jurisearch_producer::config::ProducerConfig;
 use jurisearch_producer::error::ProducerError;
 use jurisearch_producer::exit::exit_code_for;
-use jurisearch_producer::update::UpdateOptions;
+use jurisearch_producer::freshness::JudilibreAccelerator;
+use jurisearch_producer::update::{UpdateOptions, plan_forced_rebaseline};
 use jurisearch_producer::{
     PRODUCER_CONFIG_EXAMPLE, build_status, cron_equivalent, fetch, install, provision_db,
-    run_update,
+    run_retention, run_update,
 };
 use serde_json::json;
 
@@ -86,6 +87,38 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Operator REPAIR: force a recorded rebaseline (discard-and-rebuild) run for a source's group,
+    /// re-anchoring `core` to the currently-fetched DILA baselines. Drives the SAME `rebaseline_cycle`
+    /// path, lock, integrity/order/convergence checks, per-source adoption, and run record as the
+    /// automatic path. NOT the default operating mode — automatic rebaseline shipped in M3.
+    Rebaseline {
+        #[arg(long)]
+        config: PathBuf,
+        /// One of: legi, cass, capp, inca, jade. The repair runs over the source's fetch group.
+        #[arg(long)]
+        source: String,
+        /// Report what it WOULD rebaseline/re-adopt without fetching, locking, or mutating anything.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        skip_fetch: bool,
+        #[arg(long)]
+        skip_enrich: bool,
+    },
+    /// Reclaim ONLY temporary/partial/quarantined download files. Accepted official archives and
+    /// published packages are retained indefinitely and never touched. `--dry-run` (default) reports only.
+    Retention {
+        #[arg(long)]
+        config: PathBuf,
+        /// Report reclaimable files without deleting (the default; mutually exclusive with `--delete`).
+        #[arg(long)]
+        dry_run: bool,
+        /// Opt in to actually deleting the reclaimable temp/partial/quarantine files.
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Report the v1 freshness policy and the DEFERRED Judilibre accelerator status (decision #6).
+    Freshness,
 }
 
 /// A command's JSON document plus its classified exit class (drives the process exit code).
@@ -257,6 +290,122 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                 serde_json::to_value(&status).expect("status json"),
             ))
         }
+        Command::Rebaseline {
+            config,
+            source,
+            dry_run,
+            skip_fetch,
+            skip_enrich,
+        } => {
+            let cfg = ProducerConfig::load(&config)?;
+            // A rebaseline re-anchors the whole `core` corpus; the run is locked + ingested per GROUP, so
+            // resolve the requested SOURCE to its fetch group and run the repair over that group.
+            let group = cfg.group_for_source(&source)?;
+            if dry_run {
+                // Pure preview: no fetch, no lock, no mutation — just what a real run WOULD re-anchor.
+                let plan = plan_forced_rebaseline(&cfg, &group)?;
+                return Ok(CommandOutput {
+                    exit_class: "dry-run",
+                    json: json!({
+                        "status": "ok",
+                        "command": "rebaseline",
+                        "dry_run": true,
+                        "source": source,
+                        "group": plan.group,
+                        "sources": plan.sources,
+                        "would_rebaseline": plan.has_work(),
+                        "planned_baselines": plan
+                            .baselines
+                            .iter()
+                            .map(|(token, name)| json!({ "source": token, "baseline": name }))
+                            .collect::<Vec<_>>(),
+                        "exit_class": "dry-run",
+                    }),
+                });
+            }
+            let mut options = UpdateOptions::rebaseline(group.clone());
+            options.skip_fetch = skip_fetch;
+            options.skip_enrich = skip_enrich;
+            match run_update(&cfg, &options) {
+                Ok(report) => {
+                    let _ = alert::fire_if_triggered(
+                        &cfg,
+                        &AlertEvent {
+                            exit_class: report.exit_class,
+                            group: &report.group,
+                            run_id: &report.run_id,
+                            message: "rebaseline completed",
+                        },
+                    );
+                    Ok(CommandOutput {
+                        exit_class: report.exit_class,
+                        json: json!({
+                            "status": "ok",
+                            "command": "rebaseline",
+                            "dry_run": false,
+                            "source": source,
+                            "group": report.group,
+                            "run_id": report.run_id,
+                            "sources": report.sources,
+                            "exit_class": report.exit_class,
+                            "rebaselined": report.rebaselined,
+                            "adopted_baselines": report.adopted_baselines,
+                            "published_package": report.built_incremental,
+                            "enrichment": format!("{:?}", report.enrichment),
+                        }),
+                    })
+                }
+                Err(err) => {
+                    let _ = alert::fire_if_triggered(
+                        &cfg,
+                        &AlertEvent {
+                            exit_class: err.class(),
+                            group: &group,
+                            run_id: "",
+                            message: &err.to_string(),
+                        },
+                    );
+                    Err(err)
+                }
+            }
+        }
+        Command::Retention {
+            config,
+            dry_run,
+            delete,
+        } => {
+            let cfg = ProducerConfig::load(&config)?;
+            // Default-safe: delete ONLY when `--delete` is explicit. `--dry-run` is the default and
+            // never combines with delete.
+            if dry_run && delete {
+                return Err(ProducerError::ConfigInvalid(
+                    "pass either --dry-run (default) or --delete, not both".to_owned(),
+                ));
+            }
+            let report = run_retention(&cfg, delete)?;
+            Ok(ok(
+                "ok",
+                json!({
+                    "status": "ok",
+                    "command": "retention",
+                    "dry_run": report.dry_run,
+                    "reclaimable_files": report.reclaimable_files,
+                    "reclaimable_bytes": report.reclaimable_bytes,
+                    "deleted_files": report.deleted_files,
+                    "deleted_bytes": report.deleted_bytes,
+                    "items": serde_json::to_value(&report.items).expect("items json"),
+                }),
+            ))
+        }
+        Command::Freshness => Ok(ok(
+            "ok",
+            json!({
+                "status": "ok",
+                "command": "freshness",
+                "judilibre_accelerator": serde_json::to_value(JudilibreAccelerator::status())
+                    .expect("freshness json"),
+            }),
+        )),
     }
 }
 

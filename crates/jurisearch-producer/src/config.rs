@@ -417,6 +417,25 @@ impl ProducerConfig {
         Ok(())
     }
 
+    /// Resolve a DILA source token (e.g. `cass`) to the name of the fetch group that schedules it. The
+    /// operator `rebaseline --source <src>` repair targets a SOURCE, but a rebaseline re-anchors the whole
+    /// `core` corpus and the run is locked + ingested PER GROUP, so the repair runs over the source's group.
+    pub fn group_for_source(&self, token: &str) -> Result<String, ProducerError> {
+        // Reject an unknown token up front with the same diagnostic as the other source-taking commands.
+        if ArchiveSource::from_token(token).is_none() {
+            return Err(ProducerError::UnknownSource(token.to_owned()));
+        }
+        self.fetch_groups
+            .iter()
+            .find(|g| g.sources.iter().any(|s| s == token))
+            .map(|g| g.name.clone())
+            .ok_or_else(|| {
+                ProducerError::ConfigInvalid(format!(
+                    "source `{token}` is not listed in any [[fetch_group]]"
+                ))
+            })
+    }
+
     /// Resolve a named fetch group to its ordered DILA sources.
     pub fn resolve_group(&self, name: &str) -> Result<Vec<ArchiveSource>, ProducerError> {
         let group = self
