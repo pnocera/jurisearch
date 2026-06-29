@@ -30,7 +30,7 @@ It is the **producer-side** counterpart to `01-makeitsimpletodeploy.md` (which i
   `corpus_for_source()` map **all five sources to the single `core` package corpus**
   (`crates/jurisearch-package/src/corpus.rs`). So v1 fetches LEGI and jurisprudence on their own
   cadences but **packages everything as `core`** via one `producer_cycle("core")`. A true separate
-  `jurisprudence` package corpus is a larger prerequisite (see Open decisions), not v1.
+  `jurisprudence` package corpus is a larger prerequisite (see resolved decisions), not v1.
 - Both use the same **DILA "Freemium"** archive scheme the code already understands: one big baseline
   `Freemium_<src>_global_<YYYYMMDD>-<HHMMSS>.tar.gz` (re-issued occasionally — the current LEGI/CASS
   baselines observed are dated 2025-07-13) plus dated deltas `<SRC>_<YYYYMMDD>-<HHMMSS>.tar.gz`.
@@ -145,9 +145,9 @@ bytes come from `echanges.dila.gouv.fr`.
 
 **Role split (recommended):** DILA Freemium archives are the **canonical, deterministic, package-able
 document source** (they reproduce byte-for-byte, which suits signed packages and the existing ingest).
-PISTE/Judilibre is the **enrichment source** (official `zones`/`visa`) and an **optional freshness
-accelerator** for Cassation decisions in the days before the next CASS (weekly) / INCA delta. Do not make the
-canonical corpus depend on a live API.
+PISTE/Judilibre is the **enrichment source** (official `zones`/`visa`) and a deferred optional
+freshness accelerator for Cassation decisions in the days before the next CASS (weekly) / INCA delta.
+Do not make the canonical corpus depend on a live API.
 
 ---
 
@@ -210,6 +210,9 @@ One config file; the orchestration command takes a **fetch group** (`legislation
 and always packages the single `core` corpus afterward.
 
 ```sh
+# install generated producer config/service/timer files for the update-server role:
+jurisearch-producer install --config /etc/jurisearch/producer.toml --no-start
+
 # one-time DB bootstrap against the external producer PostgreSQL:
 jurisearch-producer provision-db --config /etc/jurisearch/producer.toml
 
@@ -279,7 +282,7 @@ base_url      = "https://echanges.dila.gouv.fr/OPENDATA"
 user_agent    = "jurisearch-producer/<version> (+contact)"
 max_concurrency = 2
 timeout_secs  = 120
-retain_deltas = "all"        # or a window; baselines retained until superseded + applied
+retain_deltas = "all"        # v1: keep every accepted official archive on Storebox
 
 # Fetch groups = SCHEDULING units (what a timer fetches+ingests), NOT package corpora.
 # Generic so JORF/KALI/CONSTIT light up later by adding a source here + to KNOWN_SOURCES.
@@ -325,8 +328,8 @@ api_key_env = "OPENROUTER_API_KEY"
 
 [baseline_refresh]
 # DILA re-issues Freemium baselines occasionally (no fixed schedule; detect from the listing).
-# Adopting a new baseline = a rebaseline, an explicit policy — see Phase 5.
-mode = "manual"   # "manual" | "auto-on-new-baseline"
+# Adopting a new baseline = a rebaseline; v1 does this automatically — see Phase 5.
+mode = "auto-on-new-baseline"   # v1 default; "manual" is only an operator repair/debug override
 ```
 
 ---
@@ -362,12 +365,14 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
 
 - **Goal.** One idempotent command that takes a **fetch group** from "new bytes on DILA" to a
   "published signed `core` package", reusing every existing step.
-- **Prerequisite.** Resolve open-decision #1 (orchestration boundary) first — it determines whether
-  this command calls library functions or shells out to `jurisearch` / `jurisearch-package`.
-  Additionally, implement the producer-side external PostgreSQL seam: today's ingest/enrich/embed and
-  `producer_cycle()` flow is `ManagedPostgres`/`--index-dir` based, but v1 must run those DB-mutating
-  steps against the configured external producer database (`[database]`, CT 110 on bear). A Phase 2
-  test must prove the external-PostgreSQL mode actually drives ingest/enrich/embed/package end to end.
+- **Prerequisite.** The v1 orchestration boundary is resolved as **library-first**: extract reusable
+  ingest, enrichment, embedding, and package-publish entrypoints and have `jurisearch-producer update`
+  call them in-process. Do not build the v1 producer around shelling out to `jurisearch` /
+  `jurisearch-package`. Additionally, implement the producer-side external PostgreSQL seam: today's
+  ingest/enrich/embed and `producer_cycle()` flow is `ManagedPostgres`/`--index-dir` based, but v1 must
+  run those DB-mutating steps against the configured external producer database (`[database]`, CT 110
+  on bear). A Phase 2 test must prove the external-PostgreSQL mode actually drives
+  ingest/enrich/embed/package end to end.
 - **Builds on.** Phase 1 fetch; `ingest plan-archives/legi-archives/juri-archives` (+ the existing
   `jurisearch sync --since` incremental filter); `enrich-zones`, `build-zone-units`,
   `embed-zone-units`, `embed-chunks`; `producer_cycle()`.
@@ -381,6 +386,9 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
   - `jurisearch-producer update --config <path> --group <legislation|jurisprudence>` driving the full
     chain per Part C.1, with `--dry-run`, `--skip-fetch`, `--skip-enrich`, and `--only <step>` for ops.
     The packaged corpus is always `core` (from `[package].corpus`), not the group name.
+  - Reusable library APIs for the current ingest/enrich/embed/package operations that live behind CLI
+    surfaces today. The producer must call typed Rust entrypoints with typed config/results/errors so
+    checkpoints, status, and retries are derived from step outcomes rather than child-process output.
   - Wire `producer_cycle("core")` to this command (the missing CLI seam). Run the **DB-mutating** part
     of `update` (ingest → enrich → embed → `producer_cycle("core")`) under `state_dir/update-core.lock`,
     acquired **before ingest** (see Phase 3); the package builder's existing per-corpus build lock is
@@ -390,12 +398,10 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
     OpenRouter/OpenAI-compatible bge-m3. The command must keep storage fingerprint fields
     (`model_name`, `dimension`, `normalize`) separate from provider request fields (`request_model`,
     `base_url`, credentials). It must verify that the produced storage fingerprint matches the
-    site-local query embedder contract before publishing a package. Under the recommended shell-out
-    orchestration path, `request_model` must be passed through the pool spec
-    (`JURISEARCH_EMBED_POOL` / `EmbeddingPoolEndpointConfigFile.request_model`), not by setting
-    `JURISEARCH_EMBED_MODEL`; the single-endpoint env surface has no request-model field and would
-    corrupt the stored fingerprint. It must never reuse this external provider for site/customer query
-    text.
+    site-local query embedder contract before publishing a package. The reusable embedding API must
+    expose `request_model` as a provider/request field and must not overload storage fingerprint fields
+    such as `model_name`; a regression test must catch any translation that would corrupt the stored
+    fingerprint. It must never reuse this external provider for site/customer query text.
   - **Three explicit cursors — do not conflate the clocks** (these live in different coordinate
     systems and must stay separate):
     1. **Fetch cursor** (per DILA source, from Phase 1): highest `ArchiveTimestamp` + filename +
@@ -424,8 +430,9 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
   - The producer OpenRouter request model (`request_model = "baai/bge-m3"`) does not change the stored
     fingerprint (`model_name = "bge-m3"`); tests compute the producer and site fingerprints from the
     example TOMLs and assert equality.
-  - Shell-out embedding env generation maps `request_model` through `JURISEARCH_EMBED_POOL` and never
-    through `JURISEARCH_EMBED_MODEL`; a regression test catches the fingerprint-changing mistake.
+  - Reusable embedding config mapping keeps `request_model` in provider/request config and never
+    writes it into the storage fingerprint's `model_name`; a regression test catches the
+    fingerprint-changing mistake.
   - The configured producer database is the external PostgreSQL server, not a local `index_dir`; the
     test chain must fail if any step silently falls back to `ManagedPostgres`.
   - A failure in any step leaves a resumable checkpoint and does **not** publish a partial package.
@@ -442,6 +449,9 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
 - **Goal.** Run `update` unattended on the right cadence, safely, with no overlap.
 - **Builds on.** Phases 1–2; the `deploy/systemd/*.service` conventions from work/09 + `01-…deploy`.
 - **Deliverables.**
+  - `jurisearch-producer install --config <path> [--no-start|--dry-run]` owns update-server
+    service/timer installation. Keep producer runtime/admin commands under `jurisearch-producer` for
+    v1; `jurisearchctl` remains the customer site deploy tool.
   - `jurisearch-producer-legislation.service` + `.timer` — **daily**, e.g. `OnCalendar=*-*-* 22:30
     Europe/Paris` (after LEGI's ~20–22h drop) with `RandomizedDelaySec` to avoid hammering on the hour.
   - `jurisearch-producer-jurisprudence.service` + `.timer` — **daily** (e.g. `OnCalendar=*-*-* 23:30`),
@@ -449,11 +459,11 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
     CAPP/INCA irregular), so a daily run that **no-ops sources with no new archive** picks each up
     promptly without a per-source timer matrix. A weekly timer would add up to ~6 days of latency to
     JADE/CAPP/INCA for no benefit.
-  - Producer service/timer templates, example `producer.toml`, and any required shell-out binaries are
-    shipped by the root release script in the distinct `dist/update-server/` bundle. Runtime outputs
-    from the producer are not release-bundle payloads. Downloaded archives, packages, manifests, and
-    temporary download files live on Storebox in the current bear deployment; database/vector-index
-    state lives in the PostgreSQL CT, not in the update-server bundle or rootfs.
+  - Producer service/timer templates and example `producer.toml` are shipped by the root release script
+    in the distinct `dist/update-server/` bundle. Runtime outputs from the producer are not
+    release-bundle payloads. Downloaded archives, packages, manifests, and temporary download files
+    live on Storebox in the current bear deployment; database/vector-index state lives in the
+    PostgreSQL CT, not in the update-server bundle or rootfs.
   - A cron equivalent (documented) for non-systemd hosts.
   - **Mutual exclusion — one `core` update lock around all DB-mutating work.** Both timers write the
     *same* `core` outbox, and the package builder selects rows by corpus (not by source/group/run), so
@@ -524,24 +534,29 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
 - **Deliverables.**
   - Detection: fetch notices a new baseline id newer than the cursor's known baseline **for a given
     source** (baselines are per-source: `Freemium_legi_global_*`, `Freemium_cass_global_*`, …).
-  - Policy gate (`baseline_refresh.mode`): `manual` (default — fetch + alert, await
-    `jurisearch-producer rebaseline --source <src>`) or `auto-on-new-baseline`.
+  - Automatic policy (`baseline_refresh.mode = "auto-on-new-baseline"` by default): after a newer
+    baseline passes download/integrity checks, the producer runs the rebaseline path without waiting
+    for a human command. A manual `jurisearch-producer rebaseline --source <src>` command may still
+    exist as an operator repair/debug override, but it is not the normal v1 operating mode.
   - A `rebaseline` path that re-ingests the new per-source baseline and emits a **`core` rebaseline
     package** (the package corpus is still `core`) so sites re-anchor via the existing
     `apply_rebaseline`, rather than trying to delta across a baseline cut. Note a new baseline for *one*
     source still rebuilds the whole `core` baseline, since `core` spans all sources — call this out in
     ops docs as a heavier operation than a delta.
 - **Invariants under test.**
-  - A new baseline is never silently adopted under `manual`.
+  - A new baseline is automatically adopted only through a recorded rebaseline run; it is never
+    "silently" adopted by mutating the cursor or by applying deltas across the new baseline boundary as
+    ordinary incrementals.
   - Deltas straddling a baseline boundary are ordered correctly / rejected, never mis-applied.
   - Sites converge to the new baseline through the published rebaseline package, not an ad-hoc reset.
 - **Done when.** A simulated baseline re-issue produces a published rebaseline that a fresh and an
   existing site both converge on.
 
-### Phase 6 — (Optional) Judilibre freshness accelerator
+### Phase 6 — Deferred Judilibre freshness accelerator
 
 - **Goal.** Close the up-to-7-day gap created by CASS's weekly DILA delta for *published* (Bulletin)
-  Cassation decisions, using the API already in `jurisearch-official-api`.
+  Cassation decisions, using the API already in `jurisearch-official-api`. This is explicitly
+  **deferred from v1**; daily DILA polling is the v1 freshness path.
 - **Builds on.** `judilibre_transactional_history`, `judilibre_search`, `judilibre_decision`.
 - **Deliverables.**
   - An incremental Judilibre pull (via `/transactionalhistory` or `/export`) that feeds the *same*
@@ -577,44 +592,35 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
 | Integrity | corrupt gzip quarantined; truncated download not accepted; clean tar accepted |
 | Producer DB provisioning | blank external PG reports "run producer provision-db first"; provision installs extensions/roles/migrations; rerun idempotent |
 | Producer DB model | external PostgreSQL mode actually drives ingest/enrich/embed/package end to end against the configured producer DB; no silent `ManagedPostgres` fallback |
-| Update-server release | `dist/update-server/` contains producer binary, required shell-out binaries, config and service/timer templates; excludes DB/index/archive/package/model payloads |
-| Producer embedding | OpenRouter/OpenAI-compatible document embedding over public text; provider `request_model` separate from fingerprint `model_name`; shell-out maps request model through `JURISEARCH_EMBED_POOL`, not `JURISEARCH_EMBED_MODEL`; no external site-query embedding; producer/site storage fingerprint parity computed from example configs |
+| Update-server release | `dist/update-server/` contains producer binary, config and service/timer templates; excludes DB/index/archive/package/model payloads |
+| Producer embedding | OpenRouter/OpenAI-compatible document embedding over public text; provider `request_model` separate from fingerprint `model_name`; reusable embedding API keeps request model out of storage fingerprint fields; no external site-query embedding; producer/site storage fingerprint parity computed from example configs |
 | Cursor coordinate systems | archive selected by `ArchiveTimestamp` after a published package (NOT by `change_seq`); ingest journal skips already-done filenames |
 | Corpus attribution | jurisprudence ingest (cass/capp/inca/jade) produces **`core`** outbox rows (`corpus_for_source`); `producer_cycle("core")` packages them; `--group jurisprudence` never targets a non-existent `jurisprudence` corpus |
 | Orchestration | empty outbox ⇒ no incremental built BUT manifest refreshed; "publish nothing" only via preflight gate; resumable mid-step failure; no partial publish |
 | Enrichment honesty | no creds ⇒ `SkippedNoCredentials`; manifest never claims un-run enrichment |
 | Scheduling | single `core` update lock spans ingest→enrich→embed→publish (download may overlap); **held jurisprudence run blocks a concurrent legislation publish from shipping half-processed scopes**; daily run no-ops when a source has nothing new; persistent misfire recovery; absolute-path units |
 | Observability | exit-class taxonomy; `status --json` current/stale/broken; behind-upstream detection |
-| Rebaseline | manual gate holds; auto mode adopts once; delta/baseline boundary ordering |
+| Rebaseline | auto-on-new-baseline adopts once through recorded rebaseline; manual repair path; delta/baseline boundary ordering |
 | Judilibre accel | dedup vs DILA delta; API-down degrades gracefully |
 | Site watchdog | stalled-cursor detection; read-only |
 
 ---
 
-## Open decisions (need a human call)
+## Resolved decisions
 
-1. **Crate placement + orchestration boundary.** The full chain needs *ingest*, *Judilibre/Légifrance
-   enrichment*, and *embedding* — which today live in the `jurisearch-cli` **binary** crate (only
-   `[[bin]]`, no reusable library), while `jurisearch-package-build` depends only on
-   `jurisearch-package` / `jurisearch-storage`. So a `jurisearch-producer` bin in
-   `jurisearch-package-build` **cannot directly call** those steps as library functions. Two options:
-   - **(A, recommended for v1) Orchestrate by shelling out** to the existing `jurisearch` and
-     `jurisearch-package` binaries with strict `--json` parsing + per-step checkpointing. Fewest moving
-     parts; no refactor; the orchestrator owns only fetch + the three cursors + scheduling. This still
-     requires adding an external-PostgreSQL execution mode to the invoked commands; shelling out must
-     not silently fall back to `--index-dir`/`ManagedPostgres`.
-   - **(B, later) Extract reusable library crates** for ingest/enrich/embed entrypoints so a producer
-     bin can call them in-process. Cleaner long-term, but a real refactor of `jurisearch-cli`.
-   *Recommendation: ship (A); treat (B) as a follow-up. Phase 2 is underspecified until this is chosen,
-   so it is a prerequisite decision, not a detail.* (Mirrors the `jurisearchctl` decision in `01-…deploy`.)
-2. **Single `core` corpus vs split `jurisprudence` corpus.** Today `KNOWN_SOURCES` attributes all five
-   sources to `core`, so v1 packages legislation + jurisprudence as one `core` chain (this plan's
-   model). A genuine `jurisprudence` package corpus — so sites could subscribe to case law without
-   legislation — is a **larger prerequisite project**: change `KNOWN_SOURCES`, extend the storage
-   backfill `CASE` in lock-step (the drift test enforces this), create/publish a `jurisprudence`
-   baseline + catalog row, teach sites to subscribe to both, and add attribution regression tests.
-   *Recommendation: keep the single `core` corpus for v1; treat the split as its own scoped effort if a
-   product requirement needs corpus-level separation.*
+1. **Crate placement + orchestration boundary — resolved for v1.** The full chain needs *ingest*,
+   *Judilibre/Légifrance enrichment*, and *embedding* — which today live behind the `jurisearch-cli`
+   binary surface. For v1, refactor those operations into reusable library crates/APIs and have
+   `jurisearch-producer` call them in-process. Do not implement the producer update path by shelling
+   out to `jurisearch` / `jurisearch-package` as the primary design. The refactor costs more up front,
+   but it gives typed configs/results/errors, cleaner checkpointing, better tests, and fewer fragile
+   env/CLI translations around external PostgreSQL and embedding request-model handling.
+2. **Single `core` corpus vs split `jurisprudence` corpus — resolved for v1.** Today `KNOWN_SOURCES`
+   attributes LEGI/CASS/CAPP/INCA/JADE to `core`, so v1 packages legislation + jurisprudence as one
+   `core` chain. Do not create a separate `jurisprudence` corpus just to split those DILA sources in
+   v1. Future restricted add-ons such as INPI are different: they should be separate subscription
+   corpora with their own source attribution, baseline/rebaseline chain, manifest, site cursor, and
+   entitlement policy.
 3. **Producer DB model.** Resolved for v1: use the external PostgreSQL producer database. On bear,
    CT 111 (`jurisearch-update`) is the lightweight scheduler/fetch/orchestration host and CT 110
    (`jurisearch`) is the PostgreSQL 18 database host. This requires new producer-side connection-based
@@ -622,20 +628,24 @@ mode = "manual"   # "manual" | "auto-on-new-baseline"
    `ManagedPostgres`/`--index-dir` based. Do not implement a local `producer.index_dir` fallback for
    v1; it would put database data/vector indexes on the update-server root disk or on Storebox, both of
    which are explicitly wrong for the current deployment.
-4. **Jurisprudence freshness.** Ship Phase 6 (Judilibre accelerator) now, or rely on DILA cadence for
-   v1? Note DILA jurisprudence is **mostly already daily** (JADE daily; CAPP/INCA several times a
-   week), so the only real same-day gap the accelerator closes is **CASS published (Bulletin)
-   decisions**, which can appear in Judilibre the day of but only land in the weekly CASS delta later.
-   *Recommendation: defer — a daily jurisprudence timer over DILA already keeps JADE/CAPP/INCA current;
-   add the Judilibre accelerator only if same-day **Cassation Bulletin** case law is a product
-   requirement.*
-5. **Baseline-refresh default.** `manual` (safe, recommended) vs `auto-on-new-baseline`.
+4. **Jurisprudence freshness — resolved for v1.** Defer Phase 6. V1 relies on daily DILA polling for
+   jurisprudence freshness. DILA jurisprudence is **mostly already daily** (JADE daily; CAPP/INCA
+   several times a week), so the only real same-day gap the accelerator closes is **CASS published
+   (Bulletin) decisions**, which can appear in Judilibre the day of but only land in the weekly CASS
+   delta later. Add the Judilibre accelerator later only if same-day **Cassation Bulletin** case law
+   becomes a product requirement.
+5. **Baseline-refresh default — resolved for v1.** Use `auto-on-new-baseline`: when DILA publishes a
+   newer global baseline for a source, the producer automatically runs the rebaseline path and
+   publishes a signed `core` rebaseline package. The adoption must be recorded and must pass the normal
+   integrity, ordering, and convergence checks; manual rebaseline remains an operator repair/debug
+   command, not the default operating mode.
 6. **Where the producer runs.** Resolved for current v1 deployment: a dedicated update-server CT
    (`jurisearch-update`, CT 111) orchestrates fetch/schedule/publish work, while DB-heavy work targets
    the dedicated PostgreSQL CT (`jurisearch`, CT 110). Future deployments may co-locate those roles,
    but the implementation must not require co-location.
-7. **Retention.** How long to keep downloaded deltas/baselines in `archives_dir` after they're ingested
-   and published (disk vs. reproducibility).
+7. **Retention — resolved for v1.** Keep every accepted official baseline and delta in `archives_dir`
+   on Storebox. This favors reproducibility, auditability, rebuilds, and debugging over early cleanup.
+   Only temporary/partial downloads and controlled quarantine handling are cleanup candidates in v1.
 
 ---
 
@@ -651,6 +661,9 @@ from `01` alone; the `update-server` bundle is complete only after this plan's P
 `jurisearch-producer` and producer service/timer templates. This plan defines the update-server runtime
 contents.
 Neither changes the package format, trust model, or query protocol.
+Subscription-aware pre-download checks do not require a format change: the signed remote manifest
+contract already carries the corpus entitlement listing needed for an early open-vs-subscription
+decision. The signed embedded package's apply-time entitlement check remains authoritative.
 
 ---
 

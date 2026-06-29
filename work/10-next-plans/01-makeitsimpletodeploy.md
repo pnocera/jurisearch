@@ -74,6 +74,8 @@ rely on `jurisearch-client --local` unless it binds exactly the `$XDG_RUNTIME_DI
 path that `--local` resolves. `demo up` must apply a small fixture corpus or a configured package root
 so `demo smoke` can run real status/fetch/search legs; a status-only demo is not sufficient product
 proof. The bundled fixture must expose a documented known id for the `--fetch-id <demo-id>` smoke leg.
+CI/demo acceptance uses this tiny signed fixture package and its stable fixture id. Operated
+acceptance on bear uses a real DILA document id after the producer has published real packages.
 If the demo enables hybrid search, it must also start a loopback bge-m3 endpoint and require the
 model/tokenizer assets to be present or fetched via `jurisearchctl embed fetch-assets`; otherwise the
 hybrid leg is skipped only with an explicit recorded reason.
@@ -231,8 +233,12 @@ become:
 - `jurisearch`: local CLI plus `serve-site`;
 - `jurisearch-syncd`: package consumer and daemon;
 - `jurisearch-client`: thin query client;
-- `jurisearch-package`: producer/package tooling;
+- `jurisearch-producer`: update-server fetch/ingest/embed/package orchestration and admin;
 - `jurisearchctl`: deployment, provisioning, config rendering, doctor, smoke, and demo commands.
+
+Existing package-building internals may still expose developer/debug tooling, but the v1 release role
+bundle is `jurisearch-producer`, not a shell-out dependency on a standalone `jurisearch-package`
+binary.
 
 `jurisearchctl` may initially live in `crates/jurisearch-deploy` with a `[[bin]]` named
 `jurisearchctl`.
@@ -314,6 +320,13 @@ configured license token requires a `license`-purpose trust anchor before it can
 installed. Package key rotation is represented by adding another `[[trust.anchor]]` entry; replacing an
 existing anchor is an explicit operator action.
 
+Subscription add-ons are corpus-level products, not hidden URLs. The sync/apply layer already treats
+entitlement as an apply precondition, and the deploy flow should also check entitlement before
+downloading subscription-tier package artifacts. This uses the signed remote manifest's existing
+per-corpus entitlement listing for an early, advisory open-vs-subscription decision. It avoids wasting
+bandwidth/storage and gives a clear "not subscribed to corpus X" diagnostic, while the signed embedded
+package's apply-time entitlement check remains the mandatory security gate.
+
 ### Generated runtime files
 
 `jurisearchctl site render` writes:
@@ -373,7 +386,10 @@ storage fingerprint.
     absolute.
   - `sync.corpora` must be non-empty and must correspond to corpora the configured producer actually
     publishes. For the current v1 producer this means `core` only; a missing producer manifest for any
-    configured corpus is a distinct doctor/catch-up failure, not a generic network failure.
+    configured corpus is a distinct doctor/catch-up failure, not a generic network failure. When
+    restricted add-on corpora such as INPI are introduced, they are added here as separate corpus
+    tokens (for example `["core", "inpi"]`) and must be covered by local license tokens before package
+    artifacts are downloaded.
   - `database.admin_user` and `database.admin_database` must be present because external PostgreSQL
     provisioning needs a bootstrap connection before the target DB/roles necessarily exist.
   - Any configured `database.*_password_file` path must be absolute, owned by root or the configured
@@ -519,6 +535,11 @@ storage fingerprint.
 - **Behavior.**
   - Install package and license-purpose trust anchors from config if absent.
   - Install license token if configured and absent.
+  - Before downloading package artifacts for a configured corpus, fetch and verify its remote manifest
+    and check whether the manifest's entitlement listing is open or covered by a locally installed
+    valid license token. Subscription-tier corpora that are not covered fail with a clear
+    "not subscribed to corpus <name>" diagnostic before artifact download; apply-time entitlement
+    enforcement still runs and remains authoritative.
   - Run one-shot `jurisearch-syncd update` for each corpus before enabling the daemon.
   - With `--wait`, fetch and verify the producer manifest for each corpus, then poll/run catch-up until
     the local cursor sequence equals the verified manifest head sequence, or until a timeout expires.
@@ -527,6 +548,8 @@ storage fingerprint.
 - **Invariants under test.**
   - No trust anchor is silently replaced; key rotation requires an explicit command.
   - A failed license/token/package verification leaves the cursor unchanged.
+  - A subscription-tier add-on corpus without a covering token is rejected before artifact download and
+    again at apply if the package is somehow presented locally.
   - Catch-up cannot be reported green if no active corpus exists or if the local cursor is behind the
     verified producer head.
   - Active-but-unstamped, stale, and malformed readiness are separate failures.
@@ -593,6 +616,7 @@ storage fingerprint.
 - **Builds on.** Phases 1-7.
 - **Deliverables.**
   - `jurisearchctl site smoke --config <path> --fetch-id <id>`.
+  - A tiny signed fixture package for CI/demo smoke, with a documented stable fixture document id.
   - `work/10-next-plans/scripts/deploy-single-host-acceptance.sh` as the operated acceptance harness.
   - Updated two-host runbook that uses `jurisearchctl` commands instead of manual unit/env setup.
 - **Smoke legs.**
@@ -628,25 +652,26 @@ storage fingerprint.
     directory `/dist`. It may delegate to `cargo xtask dist --out ./dist`, but the operator-facing
     contract is the root script.
   - `./dist/manifest.toml` describing version, git commit, target triples, bundle filenames, checksums,
-    binary versions, and intentionally external prerequisites.
+    binary versions, and intentionally external prerequisites. The first release target is
+    `x86_64-unknown-linux-gnu`; additional server/client targets are later work.
   - Distinct deployment bundles:
     - `./dist/update-server/`: producer/update-ingest assets for the package origin, including
-      `jurisearch-producer`, the package/ingest binaries required by
-      `02-auto-update-server-crons.md` Phase 2 / open decision #1, producer systemd service/timer
-      templates, example `producer.toml`, checksums, and an archive such as
-      `jurisearch-update-server-<version>-<target>.tar.zst`. Under the recommended shell-out path, this
-      intentionally includes the heavy `jurisearch` binary plus `jurisearch-package`; the thin-cone
-      invariant applies to `./dist/cli/`, not to the update-server role.
+      `jurisearch-producer`, producer systemd service/timer templates, example `producer.toml`,
+      checksums, and `jurisearch-update-server-<version>-x86_64-unknown-linux-gnu.tar.zst`. The v1
+      producer is library-first, so the update-server bundle should not depend on bundling heavy CLI
+      binaries only so `jurisearch-producer` can shell out to them; the thin-cone invariant still
+      applies to `./dist/cli/`, not to the update-server role.
     - `./dist/site-server/`: customer site assets, including `jurisearch`, `jurisearch-syncd`,
       `jurisearchctl`, site/bge-m3/syncd systemd templates, example `site.toml`, checksums, and an
-      archive such as `jurisearch-site-server-<version>-<target>.tar.zst`.
+      archive such as `jurisearch-site-server-<version>-x86_64-unknown-linux-gnu.tar.zst`.
     - `./dist/cli/`: thin-client assets, including `jurisearch-client`, shell completions/manpage if
-      generated, checksums, and an archive such as `jurisearch-cli-<version>-<target>.tar.zst`.
+      generated, checksums, and an archive such as
+      `jurisearch-cli-<version>-x86_64-unknown-linux-gnu.tar.zst`.
   - No release bundle contains database contents, corpus packages, vector indexes, model weights, or
     tokenizer files. If model/tokenizer fetch automation is shipped, the dist output contains only a
     signed/checksummed asset manifest and fetch command wiring, not the huge assets themselves.
-  - Optional Debian package metadata later, preserving the same three role boundaries:
-    update-server, site-server, and cli.
+  - Debian package metadata is deferred until the `.tar.zst` install/upgrade flow is stable; when added
+    later, it must preserve the same three role boundaries: update-server, site-server, and cli.
   - `jurisearchctl site upgrade --config <path> --bundle <tarball>`.
   - `jurisearchctl site rollback --config <path> --to <version>`.
   - `jurisearchctl backup pre-upgrade --config <path>`.
@@ -661,9 +686,8 @@ storage fingerprint.
   - Running `./dist.sh` from the repository root creates a fresh repository-local `./dist/` with
     update-server, site-server, cli, and top-level manifest/checksum outputs.
   - Each bundle is installable independently and contains only the assets for its deployment role.
-  - The update-server bundle includes every binary needed by the selected producer orchestration
-    strategy, including shell-out dependencies if `02-auto-update-server-crons.md` Phase 2 / open
-    decision #1 chooses that path.
+  - The update-server bundle includes `jurisearch-producer` and the producer templates/config examples
+    needed by the library-first producer orchestration path.
   - The site-server bundle can render/install services without the source tree.
   - The cli bundle has no storage, embedder, ingest, PostgreSQL, or producer dependencies.
   - The release builder fails if a huge/runtime asset is accidentally included in a bundle.
@@ -696,7 +720,7 @@ storage fingerprint.
 
 - Replace the manual install comments in `deploy/systemd/*.service` with "generated by
   `jurisearchctl site install`; templates live here for reference."
-- Add `work/10-next-plans/02-deploy-runbook.md` after implementation starts, containing:
+- Add `work/10-next-plans/03-deploy-runbook.md` after implementation starts, containing:
   - single-host demo;
   - production site host;
   - thin client install;
@@ -722,9 +746,11 @@ storage fingerprint.
 8. Smoke tests and operated acceptance.
 9. Release packaging plus upgrade/rollback.
 
-The first useful milestone is phases 1-4: an operator can render, validate, and install the same
-services that already exist today. The second useful milestone is phases 5-8: a fresh site can prove it
-has data and can answer a thin client. Packaging and upgrade hardening come after the deploy path is
-correct and repeatable. `./dist.sh` can emit `site-server` and `cli` bundles from this plan alone, but
-the complete `update-server` bundle is gated on `02-auto-update-server-crons.md` Phase 2-3 because that
-plan creates `jurisearch-producer` and the producer service/timer templates.
+Within the site plan, phases 1-4 let an operator render, validate, and install the same services that
+already exist today. Phases 5-8 let a fresh site prove it has data and can answer a thin client. For
+cross-plan implementation ordering, `00-macro-implementation-plan.md` governs: start with the shared
+substrate plus producer vertical slice so the external producer PostgreSQL and update-server risks are
+resolved early. Packaging and upgrade hardening come after the deploy/update path is correct and
+repeatable. `./dist.sh` can emit `site-server` and `cli` bundles from this plan alone, but the complete
+`update-server` bundle is gated on `02-auto-update-server-crons.md` Phase 2-3 because that plan creates
+`jurisearch-producer` and the producer service/timer templates.

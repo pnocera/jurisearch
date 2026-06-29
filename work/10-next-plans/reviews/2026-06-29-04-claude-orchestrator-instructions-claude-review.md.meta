@@ -1,0 +1,12 @@
+started_at=2026-06-29T12:41:19+02:00
+workdir=/home/pierre/Work/jurisearch
+workspace=jurisearch-reviews
+pane_id=8
+review_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-04-claude-orchestrator-instructions-claude-review.md
+tmp_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-04-claude-orchestrator-instructions-claude-review.md.tmp
+done_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-04-claude-orchestrator-instructions-claude-review.md.done
+prompt_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-04-claude-orchestrator-instructions-claude-prompt.md
+driver_prompt=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-04-claude-orchestrator-instructions-claude-review.md.driver-prompt.md
+pane_file=/home/pierre/Work/jurisearch/work/10-next-plans/reviews/2026-06-29-04-claude-orchestrator-instructions-claude-review.md.pane.txt
+timeout=4800
+keep_open=0
