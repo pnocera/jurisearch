@@ -16,9 +16,14 @@ pub mod verify;
 pub use baseline::{
     BaselineBuildReport, BaselineParams, RebaselineBuildReport, build_baseline, build_rebaseline,
 };
-pub use cycle::{EnrichmentMode, ProducerCycleConfig, ProducerCycleReport, producer_cycle};
+pub use cycle::{
+    EnrichmentMode, ProducerCycleConfig, ProducerCycleReport, PublishFault, producer_cycle,
+    producer_cycle_faulted,
+};
 pub use error::BuildError;
 pub use incremental::{IncrementalBuildReport, IncrementalParams, build_incremental};
-pub use publish::{publish_package, publish_remote_manifest, published_manifest_path};
+pub use publish::{
+    publish_package, publish_remote_manifest, published_manifest_path, staged_pending_dir,
+};
 pub use remote_manifest::{RemoteManifestParams, build_remote_manifest};
 pub use verify::{PublishedVerifyReport, verify_published_root};

@@ -1149,6 +1149,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-producer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "fs2",
+ "hex",
+ "jurisearch-core",
+ "jurisearch-deploy",
+ "jurisearch-embed",
+ "jurisearch-fetch",
+ "jurisearch-ingest",
+ "jurisearch-official-api",
+ "jurisearch-package",
+ "jurisearch-package-build",
+ "jurisearch-pipeline",
+ "jurisearch-storage",
+ "jurisearch-syncd",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "jurisearch-query"
 version = "0.1.0"
 dependencies = [

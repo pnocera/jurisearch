@@ -267,24 +267,13 @@ fn publish_then_update_converges_and_producer_cycle_extends_the_chain() -> Resul
         "UPDATE documents SET title='rev3' WHERE document_id='cass:P1';",
         "cass:P1",
     )?;
-    let build_dir = tempfile::Builder::new()
-        .prefix("js-pub-cycle.")
-        .tempdir()
-        .map_err(StorageError::Io)?;
     let config = ProducerCycleConfig {
         incremental_params: incremental_params("r3"),
         remote_manifest_params: remote_manifest_params(&sgnr, 100),
         enrichment: EnrichmentMode::Ran { zones_enriched: 0 },
     };
-    let cycle = producer_cycle(
-        &producer,
-        "core",
-        published.path(),
-        build_dir.path(),
-        &sgnr,
-        &config,
-    )
-    .expect("producer cycle");
+    let cycle = producer_cycle(&producer, "core", published.path(), &sgnr, &config)
+        .expect("producer cycle");
     assert!(
         cycle.built_incremental.is_some(),
         "the cycle built an incremental"

@@ -27,6 +27,16 @@ pub fn published_manifest_path(root: &Path, corpus: &str) -> PathBuf {
     root.join(corpus).join("manifest.json")
 }
 
+/// The producer's per-corpus STAGING slot (`root/<corpus>/.staging/pending`). A built-but-not-yet-
+/// published incremental is materialised here FIRST (durable on the served filesystem, under a dot-dir
+/// the served layout — `manifest.json` + `packages/` — never references), so a crash between the catalog
+/// insert and the publish leaves a recoverable artifact. `producer_cycle` resumes it on its next pass.
+/// At most one is pending per corpus (the per-corpus build lock serialises builds).
+#[must_use]
+pub fn staged_pending_dir(root: &Path, corpus: &str) -> PathBuf {
+    root.join(corpus).join(".staging").join("pending")
+}
+
 /// Publish one built artifact directory under the deterministic root. Published package ids are
 /// IMMUTABLE (plan P9 r1 WARN): a package id maps to exactly one artifact. The live directory is NEVER
 /// removed — staging into a sibling `.tmp` then renaming is atomic ONLY when the destination did not
