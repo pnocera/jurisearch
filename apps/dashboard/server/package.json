@@ -1,0 +1,10 @@
+{
+  "name": "@jurisearch-dashboard/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "module": "main.ts",
+  "dependencies": {
+    "@jurisearch-dashboard/shared": "workspace:*"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "//": "Strict shared base for the dashboard workspace. Per-package tsconfigs (web) extend this. This config also drives the root `tsc -p tsconfig.json --noEmit` over the pure-TS packages (shared + server + scripts); web (.vue) is typechecked separately with vue-tsc.",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ESNext"],
+    "types": ["bun"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
+  },
+  "include": ["shared/src", "server", "scripts"],
+  "exclude": ["node_modules", "dist", "web"]
+}

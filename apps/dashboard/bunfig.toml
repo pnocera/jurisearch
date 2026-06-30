@@ -1,0 +1,12 @@
+# JuriSearch dashboard — Bun config.
+# Bun is PINNED to 1.3.14 (see package.json "packageManager"). The compiled binary
+# (`bun run compile`) targets bun-linux-x64; its --version GNU triple is x86_64-unknown-linux-gnu,
+# matching dist.sh's $TARGET. Keep the pin in sync if the toolchain is bumped.
+
+[install]
+# Reproducible installs: write exact versions into bun.lock.
+exact = true
+
+[test]
+# `bun test` discovers *.test.ts across the workspace (currently shared/src/index.test.ts).
+root = "."

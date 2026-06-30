@@ -1,0 +1,11 @@
+{
+  "//": "Web (Vue SPA) typecheck config — extends the strict workspace base, adds DOM + Vue. Driven by vue-tsc (.vue aware), not the root tsc.",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+    "jsx": "preserve"
+  },
+  "include": ["src", "vite.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

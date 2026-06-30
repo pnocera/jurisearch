@@ -1,0 +1,29 @@
+{
+  "name": "jurisearch-dashboard-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "//": "Bun is pinned to 1.3.14 (packageManager below + bunfig.toml). The compile target's GNU triple x86_64-unknown-linux-gnu must equal dist.sh's $TARGET so the --version stamp passes the release audit.",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "stamp": "bun run scripts/stamp.ts",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "bun run stamp && tsc -p tsconfig.json --noEmit && bun run typecheck:web",
+    "typecheck:web": "vue-tsc -p web/tsconfig.json --noEmit",
+    "test": "bun run stamp && bun test",
+    "build": "cd web && bun run build",
+    "compile": "bun run stamp && bun build server/main.ts --compile --target=bun-linux-x64 --outfile dist/jurisearch-dashboard"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.1",
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3",
+    "vue-tsc": "2.2.12"
+  }
+}

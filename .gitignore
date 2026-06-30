@@ -31,4 +31,7 @@ __pycache__/
 *.done
 *.inprogress
 *.lock
+# but DO track the dashboard's reproducible Bun workspace lockfile (the *.lock rule above is a
+# codex-review byproduct pattern, not meant to catch package-manager lockfiles).
+!/apps/dashboard/bun.lock
 *.failed
