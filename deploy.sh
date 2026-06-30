@@ -171,8 +171,10 @@ esac
 log "Phase 2/6 — prepare config + secrets"
 umask 077
 gen_seed() {
-  if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
-  else head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; fi
+  local s
+  if command -v openssl >/dev/null 2>&1; then s="$(openssl rand -hex 32)"
+  else s="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"; fi
+  printf '%s' "$s"
 }
 printf '%s' "$PG_ADMIN_PASSWORD"  > "$LOCAL_TMP/postgres-admin-password"
 printf '%s' "$PG_WRITER_PASSWORD" > "$LOCAL_TMP/jurisearch-write-password"
