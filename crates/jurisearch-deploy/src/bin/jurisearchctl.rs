@@ -35,7 +35,7 @@ use jurisearch_deploy::{DeployError, SiteConfig};
 #[command(
     name = "jurisearchctl",
     about = "JuriSearch deployment admin (site config, validation, rendering, doctor, lifecycle)",
-    version
+    version = jurisearch_buildinfo::version!()
 )]
 struct Cli {
     #[command(subcommand)]

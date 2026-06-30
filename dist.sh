@@ -51,7 +51,22 @@ fi
 # Configuration
 # ---------------------------------------------------------------------------------------------------
 TARGET="x86_64-unknown-linux-gnu"
-VERSION="${JURISEARCH_DIST_VERSION:-0.1.0}"
+
+# Single source of truth for the version: the root Cargo.toml `[workspace.package]` `version = "..."`,
+# which every crate inherits via `version.workspace = true`. (The only line-anchored `version = "` in the
+# root manifest is the workspace one — workspace.dependencies pin versions inline as `crate = { version ...`.)
+# This is NOT overridable: the binaries derive their `--version` from `env!("CARGO_PKG_VERSION")` (the same
+# workspace version), and the post-build audit below compares their `--version` to $VERSION. An override
+# that differed from the manifest could never pass that audit, so we single-source it here to keep
+# `--version`, the manifest, and the audit consistent.
+workspace_version() {
+  grep -m1 -E '^version = "' "$REPO_ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/'
+}
+VERSION="$(workspace_version)"
+if [ -z "$VERSION" ]; then
+  echo "dist.sh: could not derive workspace version from $REPO_ROOT/Cargo.toml [workspace.package]" >&2
+  exit 2
+fi
 
 # Binaries that belong in each role bundle (bin name -> appears under <bundle>/bin/).
 UPDATE_SERVER_BINS=(jurisearch-producer)
@@ -233,7 +248,20 @@ fi
 # CARGO_TARGET_DIR=/abs/path cannot push build outputs outside the repo. Both the explicit flag and the
 # exported env point at the same validated directory; BIN_SRC is derived from it.
 export CARGO_TARGET_DIR="$TARGET_DIR"
-echo "dist.sh: building release for target $TARGET (target-dir $TARGET_DIR) ..."
+
+# Stamp a DETERMINISTIC build commit into every binary's --version. jurisearch-buildinfo's build.rs reads
+# this override (its precedence: non-empty JURISEARCH_BUILD_COMMIT → git → "unknown"), so a release build
+# pins the same 12-char short commit the --version audit asserts below — regardless of working-tree state.
+# Falls back to a short of any visible full commit, else "unknown" for a no-git build. The manifest's full
+# [release] git_commit (GIT_COMMIT, below) stays the un-shortened value.
+BUILD_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)"
+if [ -z "$BUILD_COMMIT" ]; then
+  full_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+  if [ "$full_commit" = "unknown" ]; then BUILD_COMMIT="unknown"; else BUILD_COMMIT="${full_commit:0:12}"; fi
+fi
+export JURISEARCH_BUILD_COMMIT="$BUILD_COMMIT"
+
+echo "dist.sh: building release for target $TARGET (target-dir $TARGET_DIR, commit $BUILD_COMMIT) ..."
 cargo build --release --target "$TARGET" --target-dir "$TARGET_DIR" "${BIN_ARGS[@]}"
 BIN_SRC="$TARGET_DIR/$TARGET/release"
 
@@ -241,6 +269,27 @@ for b in "${BUILD_BINS[@]}"; do
   if [ ! -x "$BIN_SRC/$b" ]; then
     echo "dist.sh: expected built binary missing: $BIN_SRC/$b" >&2; exit 4
   fi
+done
+
+# Version-stamp audit: every role binary must answer --version with the single workspace $VERSION, the
+# pinned short commit, and this release TARGET. clap prints --version and exits BEFORE any app logic, and
+# these are native x86_64-linux binaries on an x86_64-linux host, so they run here. A mismatch (a binary
+# built without the buildinfo wiring, or a stale/relabelled artifact) FAILS the release.
+echo "dist.sh: verifying binary --version stamps ($VERSION ($BUILD_COMMIT, $TARGET)) ..."
+for b in "${BUILD_BINS[@]}"; do
+  # EXACT-match the whole clap line — a substring check would pass mislabels (e.g. `10.1.0` contains
+  # `0.1.0 (`). clap prints `<binary-name> <version-string>`, and each binary's `--version` prefix is its
+  # own filename `$b` (verified for all five), so the full expected line is deterministic.
+  expected="$b $VERSION ($BUILD_COMMIT, $TARGET)"
+  ver_out="$("$BIN_SRC/$b" --version 2>/dev/null || true)"
+  ver_out="${ver_out%$'\r'}"   # tolerate a stray trailing CR
+  if [[ "$ver_out" != "$expected" ]]; then
+    echo "dist.sh: --version stamp mismatch for '$b'" >&2
+    echo "  expected exactly: '$expected'" >&2
+    echo "  got:              '$ver_out'" >&2
+    exit 6
+  fi
+  echo "  ok: $b -> $ver_out"
 done
 
 # ---------------------------------------------------------------------------------------------------
@@ -257,16 +306,13 @@ trap cleanup EXIT
 
 GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 
-# Crate versions (binary versions for the manifest) read straight from Cargo.toml (no --version needed).
-crate_version() {
-  local crate="$1"
-  grep -m1 '^version' "$REPO_ROOT/crates/$crate/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/'
-}
-VER_PRODUCER="$(crate_version jurisearch-producer)"
-VER_CLI="$(crate_version jurisearch-cli)"
-VER_SYNCD="$(crate_version jurisearch-syncd)"
-VER_DEPLOY="$(crate_version jurisearch-deploy)"
-VER_CLIENT="$(crate_version jurisearch-client)"
+# Every crate now inherits the SINGLE workspace version (`version.workspace = true`), so the per-binary
+# manifest versions are all the one $VERSION derived above — no per-crate Cargo.toml grep needed.
+VER_PRODUCER="$VERSION"
+VER_CLI="$VERSION"
+VER_SYNCD="$VERSION"
+VER_DEPLOY="$VERSION"
+VER_CLIENT="$VERSION"
 
 # ---------------------------------------------------------------------------------------------------
 # Helpers to assemble a bundle

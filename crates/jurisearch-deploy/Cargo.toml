@@ -1,6 +1,6 @@
 [package]
 name = "jurisearch-deploy"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,6 +18,8 @@ name = "jurisearchctl"
 path = "src/bin/jurisearchctl.rs"
 
 [dependencies]
+# Single-source --version stamping: the build.rs calls `stamp()`; this dep exposes the `version!()` macro.
+jurisearch-buildinfo = { path = "../jurisearch-buildinfo" }
 # Reuse the embedder config + loopback classifier; do NOT duplicate fingerprint/base-url logic.
 jurisearch-embed = { path = "../jurisearch-embed" }
 # M4 operator commands WRAP the already-built site/syncd/embedder + storage provisioning/readiness.
@@ -43,6 +45,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 url.workspace = true
+
+# build.rs stamps the git commit + build target into this crate's compile env (see build.rs).
+[build-dependencies]
+jurisearch-buildinfo = { path = "../jurisearch-buildinfo" }
 
 [dev-dependencies]
 tempfile.workspace = true

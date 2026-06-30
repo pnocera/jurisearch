@@ -1,0 +1,11 @@
+[package]
+name = "jurisearch-buildinfo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Std-only build-metadata helper: a binary crate's build.rs calls `stamp()` to bake the resolved git
+# commit + build target into that crate's compile env, and the `version!()` macro reads them back through
+# `env!` to form clap's `--version` string. Deliberately dependency-free so every bin crate can pull it
+# into BOTH [dependencies] and [build-dependencies] without widening the dependency graph.

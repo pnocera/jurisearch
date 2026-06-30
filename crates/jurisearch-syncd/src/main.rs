@@ -26,6 +26,7 @@ use jurisearch_syncd::{
 #[derive(Parser)]
 #[command(
     name = "jurisearch-syncd",
+    version = jurisearch_buildinfo::version!(),
     about = "JuriSearch consumer client (trust + subscribe + update + status)"
 )]
 struct Cli {

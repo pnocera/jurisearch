@@ -29,6 +29,7 @@ use serde_json::json;
 #[derive(Parser)]
 #[command(
     name = "jurisearch-client",
+    version = jurisearch_buildinfo::version!(),
     about = "JuriSearch thin client — query a site service by URL (versioned site protocol)"
 )]
 struct Cli {

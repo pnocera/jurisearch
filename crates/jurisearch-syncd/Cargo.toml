@@ -1,6 +1,6 @@
 [package]
 name = "jurisearch-syncd"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,6 +18,8 @@ name = "jurisearch-syncd"
 path = "src/main.rs"
 
 [dependencies]
+# Single-source --version stamping: the build.rs calls `stamp()`; this dep exposes the `version!()` macro.
+jurisearch-buildinfo = { path = "../jurisearch-buildinfo" }
 jurisearch-package = { path = "../jurisearch-package" }
 jurisearch-storage = { path = "../jurisearch-storage" }
 anyhow.workspace = true
@@ -28,6 +30,10 @@ postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# build.rs stamps the git commit + build target into this crate's compile env (see build.rs).
+[build-dependencies]
+jurisearch-buildinfo = { path = "../jurisearch-buildinfo" }
 
 [dev-dependencies]
 tempfile.workspace = true

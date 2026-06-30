@@ -1,6 +1,6 @@
 [package]
 name = "jurisearch-cli"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# Single-source --version stamping: the build.rs calls `stamp()`; this dep exposes the `version!()` macro.
+jurisearch-buildinfo = { path = "../jurisearch-buildinfo" }
 jurisearch-core = { path = "../jurisearch-core" }
 jurisearch-embed = { path = "../jurisearch-embed" }
 jurisearch-ingest = { path = "../jurisearch-ingest" }
@@ -27,6 +29,10 @@ serde_json.workspace = true
 sha2.workspace = true
 toml.workspace = true
 url.workspace = true
+
+# build.rs stamps the git commit + build target into this crate's compile env (see build.rs).
+[build-dependencies]
+jurisearch-buildinfo = { path = "../jurisearch-buildinfo" }
 
 [dev-dependencies]
 assert_cmd.workspace = true

@@ -972,6 +972,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "jurisearch-buildinfo"
+version = "0.1.0"
+
+[[package]]
 name = "jurisearch-cli"
 version = "0.1.0"
 dependencies = [
@@ -979,6 +983,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "flate2",
+ "jurisearch-buildinfo",
  "jurisearch-client",
  "jurisearch-core",
  "jurisearch-embed",
@@ -1006,6 +1011,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jurisearch-buildinfo",
  "jurisearch-core",
  "jurisearch-render",
  "jurisearch-transport",
@@ -1030,6 +1036,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jurisearch-buildinfo",
  "jurisearch-client",
  "jurisearch-core",
  "jurisearch-embed",
@@ -1160,6 +1167,7 @@ dependencies = [
  "flate2",
  "fs2",
  "hex",
+ "jurisearch-buildinfo",
  "jurisearch-core",
  "jurisearch-deploy",
  "jurisearch-embed",
@@ -1217,6 +1225,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "jurisearch-buildinfo",
  "jurisearch-package",
  "jurisearch-storage",
  "libc",

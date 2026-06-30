@@ -26,6 +26,7 @@ use serde_json::json;
 #[derive(Debug, Parser)]
 #[command(
     name = "jurisearch-producer",
+    version = jurisearch_buildinfo::version!(),
     about = "JuriSearch update-server (producer) orchestrator: DILA fetch → ingest → enrich → embed → \
              producer_cycle(core) → signed manifest, over an external PostgreSQL."
 )]

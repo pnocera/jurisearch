@@ -23,7 +23,7 @@ use crate::{
 
 #[derive(Debug, Parser)]
 #[command(name = "jurisearch")]
-#[command(version, about = "Local-first French legal search CLI for AI agents.")]
+#[command(version = jurisearch_buildinfo::version!(), about = "Local-first French legal search CLI for AI agents.")]
 #[command(disable_help_subcommand = true)]
 pub(crate) struct Cli {
     /// Path to the index directory (overrides $JURISEARCH_INDEX_DIR). Use an ABSOLUTE path.
