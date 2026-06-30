@@ -69,9 +69,22 @@ if [ -z "$VERSION" ]; then
 fi
 
 # Binaries that belong in each role bundle (bin name -> appears under <bundle>/bin/).
+# NOTE: UPDATE_SERVER_BINS / SITE_SERVER_BINS / CLI_BINS list the CARGO binaries only — the ones built by
+# `cargo build --bin` and copied via copy_bin from $BIN_SRC. The update-server bundle ALSO ships the
+# dashboard, which is NOT a Cargo bin (it is built by Bun; see below), so its bundle membership is tracked
+# separately by UPDATE_SERVER_BUNDLE_BINS to keep "cargo build set" and "bundle membership" cleanly apart.
 UPDATE_SERVER_BINS=(jurisearch-producer)
 SITE_SERVER_BINS=(jurisearch jurisearch-syncd jurisearchctl)
 CLI_BINS=(jurisearch-client)
+
+# The dashboard is a Bun-compiled, self-contained binary (apps/dashboard → `bun run compile`), NOT a Cargo
+# bin. It is a legitimate member of the update-server bundle and must be accepted by the role audit and
+# listed in the manifest, but it must NEVER be added to the cargo `--bin` build set (BUILD_BINS).
+DASHBOARD_BIN="jurisearch-dashboard"
+# Full set of binaries that legitimately live in the update-server bundle (Cargo producer + Bun dashboard).
+# Used for role-distinctness (ALL_BINS), the audit allowed-list, and the manifest `binaries` — NOT for the
+# cargo build/copy loops, which iterate UPDATE_SERVER_BINS.
+UPDATE_SERVER_BUNDLE_BINS=("${UPDATE_SERVER_BINS[@]}" "$DASHBOARD_BIN")
 
 # ---------------------------------------------------------------------------------------------------
 # Forbidden-asset audit
@@ -102,7 +115,9 @@ FORBIDDEN_GLOBS=(
 )
 
 # Every bin name across all roles — used to assert role-distinctness (no foreign binary in a bundle).
-ALL_BINS=("${UPDATE_SERVER_BINS[@]}" "${SITE_SERVER_BINS[@]}" "${CLI_BINS[@]}")
+# Uses the update-server BUNDLE bins (incl. the Bun dashboard) so the dashboard is treated as a KNOWN
+# role binary: allowed only at update-server/bin/, and flagged as a leak if it appears in any other bundle.
+ALL_BINS=("${UPDATE_SERVER_BUNDLE_BINS[@]}" "${SITE_SERVER_BINS[@]}" "${CLI_BINS[@]}")
 
 # audit_dir <dir> <release_tarball_basename> <space-separated allowed bin names>
 # Fails (returns non-zero) on any forbidden asset, any role-binary leak anywhere in the bundle, or any
@@ -189,7 +204,7 @@ if [ "${1:-}" = "--audit-only" ]; then
   role="$(basename "$target_dir")"
   rt="$(release_tarball_for_role "$role")"
   case "$role" in
-    update-server) audit_dir "$target_dir" "$rt" "${UPDATE_SERVER_BINS[@]}";;
+    update-server) audit_dir "$target_dir" "$rt" "${UPDATE_SERVER_BUNDLE_BINS[@]}";;
     site-server)   audit_dir "$target_dir" "$rt" "${SITE_SERVER_BINS[@]}";;
     cli)           audit_dir "$target_dir" "$rt" "${CLI_BINS[@]}";;
     *)             audit_dir "$target_dir" "" "${ALL_BINS[@]}";;
@@ -244,6 +259,23 @@ if ! rustup target list --installed 2>/dev/null | grep -qx "$TARGET"; then
   exit 5
 fi
 
+# Bun preflight: the dashboard binary is built by Bun (`bun run compile`), not Cargo. Mirror the rustup
+# preflight — require Bun up front and ANNOUNCE the pinned toolchain (apps/dashboard/bunfig.toml +
+# package.json `packageManager` → bun@1.3.14), so a release fails clearly HERE rather than midway through
+# packaging. The hard release gate remains the exact `--version` audit below; a version drift only WARNs.
+EXPECTED_BUN="1.3.14"
+if ! command -v bun >/dev/null 2>&1; then
+  echo "dist.sh: required tool 'bun' is not installed (needed to build $DASHBOARD_BIN; pin: bun@$EXPECTED_BUN)." >&2
+  echo "dist.sh: install Bun $EXPECTED_BUN and re-run (see apps/dashboard/bunfig.toml)." >&2
+  exit 5
+fi
+BUN_VERSION="$(bun --version 2>/dev/null || true)"
+if [ "$BUN_VERSION" != "$EXPECTED_BUN" ]; then
+  echo "dist.sh: WARNING: bun '$BUN_VERSION' detected, expected pinned '$EXPECTED_BUN' (apps/dashboard pin)." >&2
+else
+  echo "dist.sh: bun $BUN_VERSION (pinned) OK."
+fi
+
 # BLOCKER 2: pin Cargo's output dir to the repo-local (symlink-validated) target/, so an inherited
 # CARGO_TARGET_DIR=/abs/path cannot push build outputs outside the repo. Both the explicit flag and the
 # exported env point at the same validated directory; BIN_SRC is derived from it.
@@ -291,6 +323,41 @@ for b in "${BUILD_BINS[@]}"; do
   fi
   echo "  ok: $b -> $ver_out"
 done
+
+# ---------------------------------------------------------------------------------------------------
+# Build the dashboard (NON-Cargo: Bun-compiled self-contained binary) and version-audit it identically.
+# ---------------------------------------------------------------------------------------------------
+# The dashboard is not a Cargo bin, so it is deliberately NOT in BUILD_BINS / the cargo `--bin` loop above.
+# It is compiled by Bun with the SAME exported JURISEARCH_BUILD_COMMIT stamp (its build.rs-equivalent stamp
+# step reads that override), so its clap-style `--version` line resolves to the exact same release format
+# `<bin> $VERSION ($BUILD_COMMIT, $TARGET)` and is held to the SAME exact-match gate below.
+#
+# WRITE SET: `bun run compile` writes more than dist/jurisearch-dashboard. It also (re)generates, in-tree,
+# the gitignored build artifacts apps/dashboard/server/buildinfo.ts (the --version stamp),
+# apps/dashboard/server/embedded-assets.generated.ts (the embed manifest), and apps/dashboard/web/dist/
+# (the Vite SPA build). All are repo-local and gitignored — they are NOT placed in any bundle and do not
+# affect the bundle/checksum/--version audits (only dist/jurisearch-dashboard is installed below). These
+# are intentionally NOT redirected under $TARGET_DIR: the Bun toolchain expects them at their in-tree paths.
+DASHBOARD_DIR="$REPO_ROOT/apps/dashboard"
+DASHBOARD_BUILT="$DASHBOARD_DIR/dist/$DASHBOARD_BIN"
+echo "dist.sh: building $DASHBOARD_BIN via Bun (bun run compile, commit $BUILD_COMMIT) ..."
+( cd "$DASHBOARD_DIR" && bun run compile )
+if [ ! -x "$DASHBOARD_BUILT" ]; then
+  echo "dist.sh: expected Bun-built dashboard missing: $DASHBOARD_BUILT" >&2; exit 4
+fi
+echo "dist.sh: verifying $DASHBOARD_BIN --version stamp ($VERSION ($BUILD_COMMIT, $TARGET)) ..."
+dash_expected="$DASHBOARD_BIN $VERSION ($BUILD_COMMIT, $TARGET)"
+dash_ver_out="$("$DASHBOARD_BUILT" --version 2>/dev/null || true)"
+dash_ver_out="${dash_ver_out%$'\r'}"   # tolerate a stray trailing CR
+if [[ "$dash_ver_out" != "$dash_expected" ]]; then
+  echo "dist.sh: --version stamp mismatch for '$DASHBOARD_BIN'" >&2
+  echo "  expected exactly: '$dash_expected'" >&2
+  echo "  got:              '$dash_ver_out'" >&2
+  exit 6
+fi
+echo "  ok: $DASHBOARD_BIN -> $dash_ver_out"
+# The exact-match audit above guarantees the dashboard reports the single workspace $VERSION.
+VER_DASHBOARD="$VERSION"
 
 # ---------------------------------------------------------------------------------------------------
 # Fresh repo-local ./dist/
@@ -348,6 +415,9 @@ echo "dist.sh: assembling update-server bundle ..."
 US="$DIST_DIR/update-server"
 mkdir -p "$US/bin" "$US/config" "$US/systemd"
 for b in "${UPDATE_SERVER_BINS[@]}"; do copy_bin "$US" "$b"; done
+# The Bun-built dashboard is NOT under $BIN_SRC (not a Cargo bin), so copy_bin can't fetch it — install the
+# audited Bun artifact explicitly into the bundle's bin/ (mode 0755, same as copy_bin).
+install -D -m 0755 "$DASHBOARD_BUILT" "$US/bin/$DASHBOARD_BIN"
 
 # Producer config example (operator template; secrets are referenced by path/env, never inline).
 producer_config_example "$US/config/producer.toml.example"
@@ -380,7 +450,7 @@ PY
 cp "$RENDER_OUT"/*.service "$RENDER_OUT"/*.timer "$US/systemd/"
 
 write_checksums "$US"
-audit_dir "$US" "" "${UPDATE_SERVER_BINS[@]}"
+audit_dir "$US" "" "${UPDATE_SERVER_BUNDLE_BINS[@]}"
 make_tarball "$US" "jurisearch-update-server-$VERSION-$TARGET"
 
 # ---------------------------------------------------------------------------------------------------
@@ -438,6 +508,7 @@ CL_TAR="$CL/jurisearch-cli-$VERSION-$TARGET.tar.zst"
   echo ""
   echo "[binary_versions]"
   echo "jurisearch-producer = \"$VER_PRODUCER\""
+  echo "jurisearch-dashboard = \"$VER_DASHBOARD\""
   echo "jurisearch = \"$VER_CLI\""
   echo "jurisearch-syncd = \"$VER_SYNCD\""
   echo "jurisearchctl = \"$VER_DEPLOY\""
@@ -445,7 +516,7 @@ CL_TAR="$CL/jurisearch-cli-$VERSION-$TARGET.tar.zst"
   echo ""
   echo "[[bundle]]"
   echo "role = \"update-server\""
-  echo "binaries = [\"jurisearch-producer\"]"
+  echo "binaries = [\"jurisearch-producer\", \"jurisearch-dashboard\"]"
   echo "tarball = \"update-server/$(basename "$US_TAR")\""
   echo "tarball_sha256 = \"$(tarball_sha "$US_TAR")\""
   echo "files = ["
@@ -506,7 +577,7 @@ Every output here is **repository-local** (\`./dist/\`); \`dist.sh\` never write
 
 | Role | Binaries | Tarball |
 |---|---|---|
-| \`update-server\` | \`jurisearch-producer\` | \`update-server/$(basename "$US_TAR")\` |
+| \`update-server\` | \`jurisearch-producer\`, \`jurisearch-dashboard\` | \`update-server/$(basename "$US_TAR")\` |
 | \`site-server\` | \`jurisearch\`, \`jurisearch-syncd\`, \`jurisearchctl\` | \`site-server/$(basename "$SS_TAR")\` |
 | \`cli\` | \`jurisearch-client\` | \`cli/$(basename "$CL_TAR")\` |
 
@@ -549,6 +620,7 @@ install -m0755 /opt/jurisearch-update/bin/jurisearch-producer /usr/local/bin/
 # copy & edit config/producer.toml.example -> /etc/jurisearch/producer.toml, then:
 jurisearch-producer provision-db --config /etc/jurisearch/producer.toml
 jurisearch-producer install --config /etc/jurisearch/producer.toml   # renders the systemd units
+# This bundle also ships bin/jurisearch-dashboard; its service/config install is completed by deploy.sh.
 
 # site-server
 tar --use-compress-program=unzstd -xf site-server/$(basename "$SS_TAR") -C /opt/jurisearch-site
@@ -579,7 +651,7 @@ EOF
 # Final verification: re-audit every bundle and verify checksums on the real output.
 # ---------------------------------------------------------------------------------------------------
 echo "dist.sh: final verification ..."
-audit_dir "$US" "$(release_tarball_for_role update-server)" "${UPDATE_SERVER_BINS[@]}"
+audit_dir "$US" "$(release_tarball_for_role update-server)" "${UPDATE_SERVER_BUNDLE_BINS[@]}"
 audit_dir "$SS" "$(release_tarball_for_role site-server)" "${SITE_SERVER_BINS[@]}"
 audit_dir "$CL" "$(release_tarball_for_role cli)" "${CLI_BINS[@]}"
 for d in "$US" "$SS" "$CL"; do
