@@ -8,5 +8,8 @@
 exact = true
 
 [test]
-# `bun test` discovers *.test.ts across the workspace (currently shared/src/index.test.ts).
+# `bun test` discovers *.test.ts across the workspace (shared + server + web).
 root = "."
+# Preload a minimal `.vue` SFC loader so web component tests can render SFCs with vue/server-renderer
+# (no DOM). Harmless for the pure-TS shared/server tests, which import no `.vue`.
+preload = ["./web/test/vue-loader.ts"]

@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/dist", "!server/buildinfo.ts", "!**/*.vue"]
+    "includes": ["**", "!**/dist", "!server/buildinfo.ts", "!**/*.vue", "!**/*.css"]
   },
   "formatter": {
     "enabled": true,

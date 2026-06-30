@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+/* Class-based dark mode: `.dark` on <html> flips the token set below. */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design system tokens (design §6.3). shadcn-vue colour variables + the dashboard's R/A/G semantic
+ * tokens. The R/A/G colours are referenced from exactly one place (`lib/severity.ts`), never
+ * hard-coded per component.
+ */
+:root {
+  --background: oklch(0.99 0 0);
+  --foreground: oklch(0.22 0.02 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.02 260);
+  /* Brand/active = near-foreground INK (chroma ~0). R/A/G stay the only chroma on the page. */
+  --primary: oklch(0.26 0.01 260);
+  --primary-foreground: oklch(0.98 0 0);
+  --secondary: oklch(0.96 0.01 260);
+  --secondary-foreground: oklch(0.3 0.02 260);
+  --muted: oklch(0.96 0.01 260);
+  --muted-foreground: oklch(0.53 0.02 260);
+  --accent: oklch(0.95 0.02 260);
+  --accent-foreground: oklch(0.3 0.02 260);
+  --destructive: oklch(0.58 0.22 27);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.91 0.01 260);
+  --input: oklch(0.91 0.01 260);
+  --ring: oklch(0.5 0.01 260);
+  --radius: 0.6rem;
+
+  /* `--font-body` is the requested body token; the literal stacks live in the `@theme` block below
+     (`--font-sans`/`--font-display`/`--font-mono`) so they double as Tailwind font utilities. */
+  --font-body: var(--font-sans);
+
+  /* R/A/G semantic tokens — the single source consumed by lib/severity.ts. */
+  --rag-green: oklch(0.62 0.16 150);
+  --rag-amber: oklch(0.72 0.16 75);
+  --rag-red: oklch(0.6 0.22 27);
+  --rag-neutral: oklch(0.6 0.03 260);
+}
+
+.dark {
+  --background: oklch(0.19 0.02 260);
+  --foreground: oklch(0.95 0.01 260);
+  --card: oklch(0.23 0.02 260);
+  --card-foreground: oklch(0.95 0.01 260);
+  --popover: oklch(0.23 0.02 260);
+  --popover-foreground: oklch(0.95 0.01 260);
+  /* Brand/active = near-white INK in dark (chroma ~0). */
+  --primary: oklch(0.92 0.01 260);
+  --primary-foreground: oklch(0.2 0.02 260);
+  --secondary: oklch(0.29 0.02 260);
+  --secondary-foreground: oklch(0.95 0.01 260);
+  --muted: oklch(0.29 0.02 260);
+  --muted-foreground: oklch(0.68 0.02 260);
+  --accent: oklch(0.32 0.02 260);
+  --accent-foreground: oklch(0.95 0.01 260);
+  --destructive: oklch(0.62 0.2 27);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.32 0.02 260);
+  --input: oklch(0.34 0.02 260);
+  --ring: oklch(0.6 0.01 260);
+
+  --rag-green: oklch(0.72 0.16 150);
+  --rag-amber: oklch(0.78 0.15 80);
+  --rag-red: oklch(0.68 0.2 27);
+  --rag-neutral: oklch(0.7 0.03 260);
+}
+
+/* Map the CSS variables onto Tailwind's utility colour space (v4 `@theme inline`). */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-rag-green: var(--rag-green);
+  --color-rag-amber: var(--rag-amber);
+  --color-rag-red: var(--rag-red);
+  --color-rag-neutral: var(--rag-neutral);
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+/*
+ * The type system as Tailwind theme keys — these become BOTH the `font-sans`/`font-display`/
+ * `font-mono` utilities AND `:root` custom properties. Display/body = Space Grotesk (grotesk);
+ * data = JetBrains Mono. Loaded offline via @fontsource (woff2 bundled into web/dist/assets).
+ */
+@theme {
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  /* Headings + the brand read in the display grotesk; data stays mono (per-element `font-mono`). */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-display);
+  }
+}

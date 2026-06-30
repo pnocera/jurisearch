@@ -340,7 +340,13 @@ describe("DevAssetSource over the committed web/dist", () => {
   });
 
   test("serves a real hashed asset with a JS content-type", async () => {
-    const a = await src.asset("/assets/index-DYlrPGmm.js");
+    // web/dist is content-addressed (hashes change every build), so discover a real hashed JS
+    // asset from the committed dist rather than pinning a build-specific hash.
+    const { readdirSync } = await import("node:fs");
+    const assetsDir = resolve(dist, "assets");
+    const jsName = readdirSync(assetsDir).find((f) => f.endsWith(".js"));
+    expect(jsName).toBeDefined();
+    const a = await src.asset(`/assets/${jsName}`);
     expect(a).not.toBeNull();
     expect(a?.contentType).toContain("javascript");
   });
