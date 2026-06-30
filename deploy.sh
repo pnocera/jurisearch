@@ -46,6 +46,10 @@
 #   DEPLOY_PG_WRITER_PASSWORD  password set for the jurisearch_write role          (default 20Sense20)
 #   DEPLOY_PG_READ_PASSWORD    password set for the jurisearch_read role           (default 20Sense20)
 #   OPENROUTER_API_KEY    embedding provider key written into producer.env (optional; updates need it)
+#   PISTE_API_KEY              Judilibre KeyId         written into producer.env (optional; enables enrichment)
+#   PISTE_OAUTH_CLIENT_ID      Legifrance client_id    written into producer.env (optional; enables enrichment)
+#   PISTE_OAUTH_CLIENT_SECRET  Legifrance client_secret written into producer.env (optional; enables enrichment)
+#                         (the three PISTE creds power Judilibre/Legifrance enrichment on the production PISTE env)
 
 set -euo pipefail
 
@@ -64,6 +68,9 @@ PG_ADMIN_PASSWORD="${DEPLOY_PG_ADMIN_PASSWORD:-20Sense20}"
 PG_WRITER_PASSWORD="${DEPLOY_PG_WRITER_PASSWORD:-20Sense20}"
 PG_READ_PASSWORD="${DEPLOY_PG_READ_PASSWORD:-20Sense20}"
 OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-}"
+PISTE_API_KEY="${PISTE_API_KEY:-}"
+PISTE_OAUTH_CLIENT_ID="${PISTE_OAUTH_CLIENT_ID:-}"
+PISTE_OAUTH_CLIENT_SECRET="${PISTE_OAUTH_CLIENT_SECRET:-}"
 
 # Remote layout — MUST match the bundled producer.toml.example ([install] + [database] + [package]).
 R_BIN="/usr/local/bin/jurisearch-producer"
@@ -187,14 +194,21 @@ gen_seed                          > "$LOCAL_TMP/producer-signing.seed"
 {
   echo "# JuriSearch producer runtime env (systemd EnvironmentFile, mode 0600). Operator secrets only."
   echo "# OPENROUTER_API_KEY powers producer-side document embedding; updates fail (config error) until set."
-  if [ -n "$OPENROUTER_API_KEY" ]; then
-    echo "OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
-  else
-    echo "OPENROUTER_API_KEY="
-  fi
+  echo "# PISTE_API_KEY / PISTE_OAUTH_CLIENT_ID / PISTE_OAUTH_CLIENT_SECRET power Judilibre/Legifrance"
+  echo "# enrichment (mode=auto); absence is honest + non-fatal (SkippedNoCredentials), not a config error."
+  # Emit a managed-cred line ONLY when non-empty. The remote merge UPSERTS exactly these provided
+  # keys and never blanks an omitted one, so an empty assignment must NOT be staged. The header lines
+  # above always write, keeping the file non-empty/existent even when no creds are provided.
+  [ -n "$OPENROUTER_API_KEY" ]        && echo "OPENROUTER_API_KEY=$OPENROUTER_API_KEY"
+  [ -n "$PISTE_API_KEY" ]             && echo "PISTE_API_KEY=$PISTE_API_KEY"
+  [ -n "$PISTE_OAUTH_CLIENT_ID" ]     && echo "PISTE_OAUTH_CLIENT_ID=$PISTE_OAUTH_CLIENT_ID"
+  [ -n "$PISTE_OAUTH_CLIENT_SECRET" ] && echo "PISTE_OAUTH_CLIENT_SECRET=$PISTE_OAUTH_CLIENT_SECRET"
+  :
 } > "$LOCAL_TMP/producer.env"
 [ -n "$OPENROUTER_API_KEY" ] || info "WARNING: no OPENROUTER_API_KEY provided; nightly updates will fail until \
 it is set in $R_ENV (deploy/provision/timers still come up)."
+{ [ -n "$PISTE_API_KEY" ] && [ -n "$PISTE_OAUTH_CLIENT_ID" ] && [ -n "$PISTE_OAUTH_CLIENT_SECRET" ]; } || \
+  info "info: incomplete PISTE creds; Judilibre/Legifrance enrichment is SkippedNoCredentials until set in $R_ENV (deploy/provision/timers still come up)."
 
 # producer.toml from the bundle example, with read_password_file UNCOMMENTED (we set a read password and
 # CT 110 uses password auth). Everything else already matches the CT topology.
@@ -338,12 +352,37 @@ install_secret jurisearch-write-password "\$FORCE_PASSWORDS"
 install_secret jurisearch-read-password  "\$FORCE_PASSWORDS"
 install_secret producer-signing.seed     0   # install-once; never rotate via deploy
 
-# producer.env (systemd EnvironmentFile): refresh when a key was provided (non-empty line staged) or
-# when absent; otherwise keep the existing operator file.
-if [ ! -f "\$R_ENV" ] || grep -q '^OPENROUTER_API_KEY=.\+' "\$STAGING/producer.env"; then
+# producer.env (systemd EnvironmentFile): MERGE-UPSERT, never wholesale-blank. The staged file carries
+# ONLY the managed creds provided THIS run (non-empty). On a fresh box install it as-is; on an existing
+# box, upsert each provided key into the live file (replace in place if present, else append) and leave
+# every omitted managed key AND every operator-added extra line untouched — so a partial re-export can
+# never blank a cred it did not re-provide. Values are opaque literals (UUIDs/keys): the merge reads each
+# value VERBATIM from the staged file's content (substr) and re-emits it byte-for-byte — a value NEVER
+# passes through awk -v, sed replacement text, or any other escape-interpreting channel (so literal
+# backslash sequences like \\n/\\t survive intact). Only the safe managed KEY NAMES travel via -v, and
+# keys match by literal prefix (no regex metachar pitfalls).
+MANAGED_ENV_KEYS="OPENROUTER_API_KEY PISTE_API_KEY PISTE_OAUTH_CLIENT_ID PISTE_OAUTH_CLIENT_SECRET"
+if [ ! -f "\$R_ENV" ]; then
   install -o root -g root -m 0600 "\$STAGING/producer.env" "\$R_ENV"; say "wrote \$R_ENV"
 else
-  say "kept existing \$R_ENV"
+  merged="\$(mktemp)"
+  awk -v keys="\$MANAGED_ENV_KEYS" '
+    BEGIN { n = split(keys, ka, " ") }
+    function mkey(line,   i, k) { for (i = 1; i <= n; i++) { k = ka[i]; if (index(line, k "=") == 1) return k } return "" }
+    NR == FNR {                              # staged file: capture non-empty managed values verbatim
+      k = mkey(\$0)
+      if (k != "") { v = substr(\$0, length(k) + 2); if (v != "") { val[k] = v; have[k] = 1 } }
+      next
+    }
+    {                                        # existing base file: replace managed lines we have, else keep
+      k = mkey(\$0)
+      if (k != "" && have[k]) { if (!printed[k]) { print k "=" val[k]; printed[k] = 1 } }
+      else { print }
+    }
+    END { for (i = 1; i <= n; i++) { k = ka[i]; if (have[k] && !printed[k]) print k "=" val[k] } }
+  ' "\$STAGING/producer.env" "\$R_ENV" > "\$merged"
+  if ! cmp -s "\$merged" "\$R_ENV"; then install -o root -g root -m 0600 "\$merged" "\$R_ENV"; say "merged creds into \$R_ENV"; else say "kept existing \$R_ENV"; fi
+  rm -f "\$merged"
 fi
 # Converge metadata on EVERY path (fresh-write AND kept-on-upgrade): producer.env is the systemd
 # EnvironmentFile read by PID1 as root, so it is intentionally root:root 0600. A kept-existing file can
@@ -475,5 +514,5 @@ if [ "$DO_SMOKE" = "1" ]; then
 fi
 
 log "DONE — update-server ${MODE}ed and armed on $DEPLOY_HOST."
-info "First live publish (operator step; needs OPENROUTER_API_KEY in $R_ENV):"
+info "First live publish (operator step; needs OPENROUTER_API_KEY in $R_ENV; PISTE_* creds enable Judilibre/Legifrance enrichment):"
 info "  ssh $DEPLOY_SSH_USER@$DEPLOY_HOST '$R_BIN update --config $R_CONF --group legislation'"
