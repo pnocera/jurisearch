@@ -1,0 +1,53 @@
+{
+  "payload": {
+    "manifest_version": 1,
+    "generated_at": "2026-06-30T08:32:03Z",
+    "publisher": "jurisearch",
+    "corpus": "core",
+    "environment": "production",
+    "head_sequence": 1,
+    "min_available_sequence": 1,
+    "active_baseline": {
+      "baseline_id": "core-bootstrap-v1",
+      "generation": "core_g0001",
+      "package_kind": "baseline",
+      "sequence": 1,
+      "schema_version": 24,
+      "minimum_client_version": "0.1.0",
+      "artifact_uri": "media://core/packages/core-1-1",
+      "compressed_size_bytes": 155435205911,
+      "uncompressed_size_bytes": 155435205911,
+      "estimated_load_seconds": 600,
+      "sha256": "sha256:8fd76dc00531a8b390359ee2b2d94dde9b0584498ad14c9df3e41445078310da",
+      "signature": {
+        "algorithm": "ed25519",
+        "key_id": "producer-k1",
+        "key_epoch": 1,
+        "signature_hex": "b31819b3f55e071955fd303d9b9f80e2fd15ece1c487c51952c520b0d074a8433ea4b9e90bdff205517ee14d87eb9299ad1b244b2b7954972e63efea06e80b0d"
+      }
+    },
+    "packages": [],
+    "catchup_ranges": [],
+    "catchup_policy": {
+      "max_incremental_packages": 120,
+      "max_cumulative_diff_to_baseline_permille": 330,
+      "max_cumulative_uncompressed_to_baseline_permille": 500,
+      "max_apply_seconds_budget": 2700
+    },
+    "entitlement": {
+      "corpus": "core",
+      "tier": "open",
+      "license_epoch": 0
+    },
+    "signing": {
+      "key_id": "producer-k1",
+      "algorithm": "ed25519"
+    }
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "producer-k1",
+    "key_epoch": 1,
+    "signature_hex": "bc834a8e14562d2eb6505d9fded752a1f5567eb08dbe7ef21581eb0bcf4dafe284cb703cbd3a95a4ff51cec253763c715a2f1a183594a508f179e5a09dfbde07"
+  }
+}

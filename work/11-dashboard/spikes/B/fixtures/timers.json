@@ -1,0 +1,1 @@
+[{"next":1782859358634878,"left":1782859358634878,"last":1782818696168904,"passed":0,"unit":"jurisearch-producer-legislation.timer","activates":"jurisearch-producer-legislation.service"},{"next":1782863290585276,"left":1782863290585276,"last":1782818696168904,"passed":0,"unit":"jurisearch-producer-jurisprudence.timer","activates":"jurisearch-producer-jurisprudence.service"}]

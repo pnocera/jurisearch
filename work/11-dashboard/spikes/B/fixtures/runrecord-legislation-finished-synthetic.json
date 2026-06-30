@@ -1,0 +1,35 @@
+{
+  "run_id": "legislation-1782730000-000000000-042",
+  "group": "legislation",
+  "sources": [
+    "legi"
+  ],
+  "kind": "incremental",
+  "started_at": "2026-06-29T11:30:00Z",
+  "ended_at": "2026-06-29T11:42:17Z",
+  "outcome": "success",
+  "exit_class": "published",
+  "error": null,
+  "fetch_cursors": [
+    {
+      "source": "legi",
+      "latest_file_name": "LEGI_20260629-223234.tar.gz",
+      "latest_compact_timestamp": "20260629223234"
+    }
+  ],
+  "ingest_journals": [
+    {
+      "source": "legi",
+      "run_id": "legislation-1782730000-000000000-042",
+      "journal_compact_timestamp": "20260629223234",
+      "archives_ingested": 1
+    }
+  ],
+  "package_high_water_mark": {
+    "corpus": "core",
+    "head_sequence": 2,
+    "included_change_seq_high": 184213
+  },
+  "published_package": "core-1-2",
+  "adopted_baselines": []
+}

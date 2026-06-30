@@ -1,0 +1,72 @@
+Spike C — raw probe transcript
+Date: 2026-06-30
+Target: CT 111 — host 100.71.35.39, hostname jurisearch-update, x86_64, glibc 2.41
+Dashboard identity under test: User=jurisearch (uid 999, gid 991), no journal group today.
+
+== Preflight: identity + group + tailnet addr ==
+$ getent group systemd-journal
+systemd-journal:x:999:
+$ id jurisearch
+uid=999(jurisearch) gid=991(jurisearch) groups=991(jurisearch)
+$ ip -o -4 addr show tailscale0
+3: tailscale0    inet 100.71.35.39/32 scope global tailscale0
+# systemd-journal group EXISTS (gid 999) but jurisearch is NOT a member today.
+
+
+== PROBE 1: journalctl as jurisearch, NO journal group ==
+$ runuser -u jurisearch -- journalctl -u jurisearch-producer-legislation.service -o json -n 1
+No journal files were opened due to insufficient permissions.
+EXIT=1
+# OUTCOME: FAIL (expected). Unprivileged jurisearch cannot read the journal.
+
+
+== PROBE 2: journalctl as jurisearch WITH systemd-journal supplementary group ==
+$ runuser -u jurisearch -g systemd-journal -- journalctl -u jurisearch-producer-legislation.service -o json -n 1
+{"INVOCATION_ID":"75cdda870b914311bf2b7c999e4f98c3","CODE_FUNC":"job_emit_start_message","MESSAGE_ID":"7d4958e842da4a758f6c1cdc7b36dcc5","__SEQNUM":"5111","_TRANSPORT":"journal","MESSAGE":"Starting jurisearch-producer-legislation.service - JuriSearch producer update (legislation)...","UNIT":"jurisearch-producer-legislation.service","_MACHINE_ID":"adf5407ac5c742898fb909796edbbe72","_SOURCE_REALTIME_TIMESTAMP":"1782819024079887","_HOSTNAME":"jurisearch-update","__MONOTONIC_TIMESTAMP":"96208928452","CODE_FILE":"src/core/job.c","TID":"1","_SYSTEMD_SLICE":"-.slice","_SYSTEMD_UNIT":"init.scope","_UID":"0","CODE_LINE":"627","_CAP_EFFECTIVE":"1fcfdfcffff","SYSLOG_IDENTIFIER":"systemd","_PID":"1","_BOOT_ID":"b3a51c8f13c64a8482b08fa00dae4359","_EXE":"/usr/lib/systemd/systemd","_CMDLINE":"/sbin/init","PRIORITY":"6","_RUNTIME_SCOPE":"system","__CURSOR":"s=1e89ea3485444968a5b9c7e4f02cc72c;i=13f7;b=b3a51c8f13c64a8482b08fa00dae4359;m=16667fbec4;t=65576e6a10c18;x=da5faa911c5f4394","__SEQNUM_ID":"1e89ea3485444968a5b9c7e4f02cc72c","_SYSTEMD_CGROUP":"/init.scope","_SELINUX_CONTEXT":"unconfined\n","JOB_TYPE":"start","_COMM":"systemd","__REALTIME_TIMESTAMP":"1782819024079896","JOB_ID":"1814","SYSLOG_FACILITY":"3","_GID":"0"}
+EXIT=0
+# OUTCOME: SUCCESS (expected). Adding systemd-journal as a group grants journal read.
+# Note: runuser -g sets the PRIMARY group for this transient invocation only;
+# jurisearch was NOT permanently added to systemd-journal. This proves
+# SupplementaryGroups=systemd-journal is the required fix for the dashboard unit.
+
+
+== PROBE 3: systemctl list-timers as jurisearch (plain, NO group) ==
+$ runuser -u jurisearch -- systemctl list-timers 'jurisearch-producer-*' -o json
+[{"next":1782859358634878,"left":1782859358634878,"last":1782818696168904,"passed":0,"unit":"jurisearch-producer-legislation.timer","activates":"jurisearch-producer-legislation.service"},{"next":1782863290585276,"left":1782863290585276,"last":1782818696168904,"passed":0,"unit":"jurisearch-producer-jurisprudence.timer","activates":"jurisearch-producer-jurisprudence.service"}]
+EXIT=0
+# OUTCOME: SUCCESS plain. Read-only timer listing works as unprivileged jurisearch
+# WITHOUT any extra group (D-Bus read to systemd manager is unrestricted).
+
+
+== PROBE 4: Bun.serve tailnet bind as jurisearch ==
+# Binary: server.ts compiled locally with:
+#   bun build server.ts --compile --target=bun-linux-x64 --outfile jurisearch-spikeC
+# server.ts binds hostname 100.71.35.39 (tailnet addr) port 18082, returns "spikeC ok".
+# scp'd to CT 111 /tmp/spikeC/, chmod 755, run as jurisearch:
+
+$ runuser -u jurisearch -- /tmp/spikeC/jurisearch-spikeC   (backgrounded)
+--- server stdout ---
+spikeC listening on http://100.71.35.39:18082/
+
+$ curl -sS -o /dev/null -w "HTTP=%{http_code}\n" http://100.71.35.39:18082/
+HTTP=200
+CURL_EXIT=0
+$ curl -sS http://100.71.35.39:18082/
+spikeC ok    (CURL_BODY_EXIT=0)
+# OUTCOME: SUCCESS. 200 "spikeC ok" served from tailnet addr by unprivileged jurisearch.
+
+--- guard intent check: NOT listening on loopback/0.0.0.0 ---
+$ curl -sS --connect-timeout 3 http://127.0.0.1:18082/
+curl: (7) Failed to connect to 127.0.0.1 port 18082 after 0 ms: Could not connect to server
+LOOPBACK_HTTP=000  LOOPBACK_CURL_EXIT=7
+$ ss -ltnp | grep 18082
+LISTEN 0  512  100.71.35.39:18082  0.0.0.0:*  users:(("jurisearch-spik",pid=1894,fd=11))
+# Socket is bound ONLY to 100.71.35.39:18082 (tailnet), NOT 0.0.0.0/127.0.0.1.
+# Loopback connection refused (exit 7) confirms the explicit-hostname bind is exact.
+# The dashboard's fail-closed guard must REFUSE a 0.0.0.0 / wildcard bind config and
+# require an explicit tailnet hostname like this. (0.0.0.0 was NOT exposed in this test.)
+
+--- cleanup ---
+$ kill <srv>; rm -rf /tmp/spikeC
+CLEANED: /tmp/spikeC removed
+# No persistent change left on CT 111: no group-add, no installed unit, /tmp/spikeC gone.

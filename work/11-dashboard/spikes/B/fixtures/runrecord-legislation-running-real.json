@@ -1,0 +1,18 @@
+{
+  "run_id": "legislation-1782819024-111818663-787",
+  "group": "legislation",
+  "sources": [
+    "legi"
+  ],
+  "kind": "incremental",
+  "started_at": "2026-06-30T11:30:24Z",
+  "ended_at": null,
+  "outcome": "running",
+  "exit_class": "running",
+  "error": null,
+  "fetch_cursors": [],
+  "ingest_journals": [],
+  "package_high_water_mark": null,
+  "published_package": null,
+  "adopted_baselines": []
+}
