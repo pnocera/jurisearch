@@ -1,0 +1,33 @@
+{
+  "run_id": "legislation-1782740000-000000000-050",
+  "group": "legislation",
+  "sources": ["legi"],
+  "kind": "incremental",
+  "started_at": "2026-06-29T12:30:00Z",
+  "ended_at": "2026-06-29T12:30:05Z",
+  "outcome": "success",
+  "exit_class": "no-op",
+  "error": null,
+  "fetch_cursors": [
+    {
+      "source": "legi",
+      "latest_file_name": null,
+      "latest_compact_timestamp": null
+    }
+  ],
+  "ingest_journals": [
+    {
+      "source": "legi",
+      "run_id": null,
+      "journal_compact_timestamp": null,
+      "archives_ingested": 0
+    }
+  ],
+  "package_high_water_mark": {
+    "corpus": "core",
+    "head_sequence": null,
+    "included_change_seq_high": null
+  },
+  "published_package": null,
+  "adopted_baselines": []
+}

@@ -1,0 +1,96 @@
+{
+  "active_baseline_id": "core-bootstrap-v1",
+  "corpus": "core",
+  "generated_at": "2026-06-30T13:26:08Z",
+  "groups": [
+    {
+      "baselines": [
+        {
+          "adopted_baseline": "Freemium_legi_global_20250713-140000.tar.gz",
+          "fetched_baseline": "Freemium_legi_global_20250713-140000.tar.gz",
+          "source": "legi",
+          "state": "current"
+        }
+      ],
+      "fetch_cursors": [
+        {
+          "latest_compact_timestamp": "20260629223234",
+          "latest_file_name": "LEGI_20260629-223234.tar.gz",
+          "source": "legi"
+        }
+      ],
+      "group": "legislation",
+      "last_ended_at": null,
+      "last_error": null,
+      "last_exit_class": "running",
+      "last_outcome": "running",
+      "last_run_id": "legislation-1782819024-111818663-787",
+      "rebaseline_pending": false,
+      "sources": ["legi"],
+      "stale_by_age": false
+    },
+    {
+      "baselines": [
+        {
+          "adopted_baseline": "Freemium_cass_global_20250713-140000.tar.gz",
+          "fetched_baseline": "Freemium_cass_global_20250713-140000.tar.gz",
+          "source": "cass",
+          "state": "current"
+        },
+        {
+          "adopted_baseline": "Freemium_inca_global_20250713-140000.tar.gz",
+          "fetched_baseline": "Freemium_inca_global_20250713-140000.tar.gz",
+          "source": "inca",
+          "state": "current"
+        },
+        {
+          "adopted_baseline": "Freemium_capp_global_20250713-140000.tar.gz",
+          "fetched_baseline": "Freemium_capp_global_20250713-140000.tar.gz",
+          "source": "capp",
+          "state": "current"
+        },
+        {
+          "adopted_baseline": "Freemium_jade_global_20250713-140000.tar.gz",
+          "fetched_baseline": "Freemium_jade_global_20250713-140000.tar.gz",
+          "source": "jade",
+          "state": "current"
+        }
+      ],
+      "fetch_cursors": [
+        {
+          "latest_compact_timestamp": null,
+          "latest_file_name": null,
+          "source": "cass"
+        },
+        {
+          "latest_compact_timestamp": null,
+          "latest_file_name": null,
+          "source": "inca"
+        },
+        {
+          "latest_compact_timestamp": null,
+          "latest_file_name": null,
+          "source": "capp"
+        },
+        {
+          "latest_compact_timestamp": null,
+          "latest_file_name": null,
+          "source": "jade"
+        }
+      ],
+      "group": "jurisprudence",
+      "last_ended_at": null,
+      "last_error": null,
+      "last_exit_class": null,
+      "last_outcome": null,
+      "last_run_id": null,
+      "rebaseline_pending": false,
+      "sources": ["cass", "inca", "capp", "jade"],
+      "stale_by_age": false
+    }
+  ],
+  "overall": "stale",
+  "published_head_sequence": 1,
+  "published_manifest_generated_at": "2026-06-30T08:32:03Z",
+  "update_lock_held": true
+}

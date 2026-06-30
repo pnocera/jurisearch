@@ -1,0 +1,16 @@
+{
+  "run_id": "jurisprudence-1782819600-000000000-001",
+  "group": "jurisprudence",
+  "sources": ["cass", "inca", "capp", "jade"],
+  "kind": "incremental",
+  "started_at": "2026-06-30T13:40:00Z",
+  "ended_at": null,
+  "outcome": "running",
+  "exit_class": "running",
+  "error": null,
+  "fetch_cursors": [],
+  "ingest_journals": [],
+  "package_high_water_mark": null,
+  "published_package": null,
+  "adopted_baselines": []
+}
