@@ -6,6 +6,7 @@
 export const DASHBOARD_NAME = "Juridia — Update Server";
 export type DashboardName = typeof DASHBOARD_NAME;
 
+export * from "./api.ts";
 export * from "./dto.ts";
 export * from "./exit-class.ts";
 export * from "./mapping.ts";

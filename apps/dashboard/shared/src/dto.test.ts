@@ -14,7 +14,7 @@ import {
   safeParseStatus,
 } from "./dto.ts";
 import { severityOf } from "./exit-class.ts";
-import { runDurationMs } from "./mapping.ts";
+import { groupFromUnit, runDurationMs } from "./mapping.ts";
 
 const FIXTURES = resolve(import.meta.dir, "../../fixtures");
 const fixture = (name: string): Promise<unknown> => Bun.file(resolve(FIXTURES, name)).json();
@@ -110,18 +110,40 @@ describe("PackageDTO ← Signed<RemoteManifest>", () => {
     expect(manifest.activeBaseline.compressedSizeBytes).toBe(155_435_205_911);
     expect(manifest.manifestGeneratedAt).toBe("2026-06-30T08:32:03Z");
   });
+
+  test("maps a non-empty packages[] increment entry (PackageEntryDTO ← RemotePackageEntry)", async () => {
+    const manifest = parsePackage(await fixture("manifest-with-increment-synthetic.json"), "$");
+    expect(manifest.headSequence).toBe(2);
+    expect(manifest.packages.length).toBe(1);
+    const entry = manifest.packages[0];
+    expect(entry?.packageId).toBe("core-1-2");
+    expect(entry?.fromSequence).toBe(1);
+    expect(entry?.toSequence).toBe(2);
+    expect(entry?.compressedSizeBytes).toBe(4_823_344);
+    expect(entry?.uncompressedSizeBytes).toBe(18_211_902);
+    expect(entry?.rowCounts).toEqual({ documents: 1284, chunks: 9173, embeddings: 9173 });
+    expect(entry?.schemaVersion).toBe(24);
+    expect(entry?.embeddingFingerprint).toBe("bge-m3:1024:v1");
+    expect(entry?.sha256).toBe(
+      "sha256:1f4d2c9b7a6e5d3c0b8a17263544f9e8d7c6b5a4938271605f4e3d2c1b0a9988",
+    );
+    expect(entry?.signature).toMatchObject({ algorithm: "ed25519" });
+  });
 });
 
 describe("LogLineDTO ← journalctl -o json", () => {
-  test("coalesces _SYSTEMD_UNIT ?? UNIT; parses string priority/timestamp", async () => {
+  test("lifecycle line: attributes to the producer service in UNIT (not init.scope)", async () => {
     const line = parseLogLine(await fixture("journal-legislation.json"), "$");
-    expect(line.unit).toBe("init.scope"); // _SYSTEMD_UNIT present → wins the coalesce
+    // Producer-first: UNIT=jurisearch-producer-legislation.service wins over _SYSTEMD_UNIT=init.scope.
+    expect(line.unit).toBe("jurisearch-producer-legislation.service");
+    // …so the group derives correctly for /api/logs filtering.
+    expect(groupFromUnit(line.unit ?? "")).toBe("legislation");
     expect(line.priority).toBe(6); // from the string "6"
     expect(line.timestamp).toBe(1_782_819_024_079); // µs string → ms
     expect(line.message?.startsWith("Starting jurisearch-producer-legislation")).toBe(true);
   });
 
-  test("tolerates a service-emitted line (unit only in _SYSTEMD_UNIT) and missing fields", () => {
+  test("service-emitted line: producer unit is in _SYSTEMD_UNIT (UNIT absent)", () => {
     const line = parseLogLine(
       { MESSAGE: "fetch ok", _SYSTEMD_UNIT: "jurisearch-producer-legislation.service" },
       "$",
@@ -129,6 +151,14 @@ describe("LogLineDTO ← journalctl -o json", () => {
     expect(line.unit).toBe("jurisearch-producer-legislation.service");
     expect(line.timestamp).toBeNull();
     expect(line.priority).toBeNull();
+  });
+
+  test("non-producer line: neither field is a producer service → _SYSTEMD_UNIT ?? UNIT fallback", () => {
+    const line = parseLogLine(
+      { MESSAGE: "x", _SYSTEMD_UNIT: "init.scope", UNIT: "some-other.service" },
+      "$",
+    );
+    expect(line.unit).toBe("init.scope"); // fallback keeps _SYSTEMD_UNIT first
   });
 });
 

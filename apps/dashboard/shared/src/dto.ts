@@ -189,22 +189,31 @@ export interface LogLineDTO {
   timestamp: number | null;
   /** Numeric syslog priority from the string `PRIORITY`; `null` if absent. */
   priority: number | null;
-  /** `_SYSTEMD_UNIT ?? UNIT` — service lines carry the unit in the former, lifecycle in the latter. */
+  /**
+   * The owning unit, PRODUCER-FIRST: the first of `UNIT`/`_SYSTEMD_UNIT` that matches
+   * `jurisearch-producer-*.service`, else `_SYSTEMD_UNIT ?? UNIT`. journald splits the unit across
+   * two keys — a systemd LIFECYCLE line (the sparse/common case on CT 111) carries the producer
+   * service in `UNIT` while `_SYSTEMD_UNIT` is `init.scope`; a line emitted *by* the service carries
+   * it in `_SYSTEMD_UNIT`. Producer-first attribution lets `/api/logs` group-filter either way.
+   */
   unit: string | null;
   message: string | null;
 }
 
-/** Bespoke (not schema-driven): journald keys are SCREAMING/underscored and the unit is coalesced. */
+/** Matches a producer service unit (`jurisearch-producer-<group>.service`) for log attribution. */
+const PRODUCER_SERVICE_UNIT = /^jurisearch-producer-.+\.service$/;
+
+/** Bespoke (not schema-driven): journald keys are SCREAMING/underscored; the unit is producer-first. */
 export const parseLogLine: Reader<LogLineDTO> = (input, path) => {
   const record = asRecord(input, path);
-  const systemdUnit = record._SYSTEMD_UNIT;
-  const unitFallback = record.UNIT;
-  const unit =
-    typeof systemdUnit === "string"
-      ? systemdUnit
-      : typeof unitFallback === "string"
-        ? unitFallback
-        : null;
+  const systemdUnit = typeof record._SYSTEMD_UNIT === "string" ? record._SYSTEMD_UNIT : null;
+  const unitField = typeof record.UNIT === "string" ? record.UNIT : null;
+  // Prefer the candidate (UNIT first, then _SYSTEMD_UNIT) that names a producer service; only if
+  // NEITHER does, fall back to _SYSTEMD_UNIT ?? UNIT.
+  const producerUnit = [unitField, systemdUnit].find(
+    (candidate): candidate is string => candidate !== null && PRODUCER_SERVICE_UNIT.test(candidate),
+  );
+  const unit = producerUnit ?? systemdUnit ?? unitField;
   return {
     timestamp: microsToMillis(record.__REALTIME_TIMESTAMP),
     priority: parseIntOrNull(record.PRIORITY),
