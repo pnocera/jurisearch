@@ -4,11 +4,11 @@
 //! contract — and seed the producer catalog. Signing is stubbed behind the `Signer` trait (real in P6).
 
 use std::collections::BTreeMap;
-use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use jurisearch_package::artifact;
-use jurisearch_package::canonical::{canonical_digest, digest_bytes};
+use jurisearch_package::canonical::{canonical_digest, digest_bytes, tee_digest};
 use jurisearch_package::compat::Version;
 use jurisearch_package::corpus::Corpus;
 use jurisearch_package::event::EventKind;
@@ -316,16 +316,18 @@ fn build_media_package(
         let select = baseline_copy_out_select(&mut tx, table, corpus)?;
         let mut reader =
             tx.copy_out(format!("COPY ({select}) TO STDOUT (FORMAT binary)").as_str())?;
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
-        drop(reader);
 
+        // Memory fix: stream the COPY-binary output directly to the payload file while hashing it,
+        // never materialising the (multi-GB at corpus scale) table in RAM. The file bytes and the
+        // per-file digest are byte-identical to the prior `fs::write` + `digest_bytes` path.
         let file_name = artifact::baseline_file_name(table);
-        std::fs::write(
-            artifact::payload_file_path(artifact_dir, &file_name),
-            &bytes,
-        )?;
-        let file_digest = digest_bytes(&bytes);
+        let payload_path = artifact::payload_file_path(artifact_dir, &file_name);
+        let mut writer = std::io::BufWriter::new(std::fs::File::create(&payload_path)?);
+        let file_digest = tee_digest(&mut reader, &mut writer)?;
+        drop(reader);
+        // Surface any deferred write error before relying on the digest/file (BufWriter::drop
+        // would otherwise swallow it).
+        writer.flush()?;
         let row_count = row_counts.get(*table).copied().unwrap_or(0);
         total_rows += row_count;
 

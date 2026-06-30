@@ -13,6 +13,8 @@
 //! This is independent of whether the `serde_json/preserve_order` feature is enabled anywhere in the
 //! workspace (we re-sort explicitly rather than trusting the `Map` backing).
 
+use std::io::{Read, Write};
+
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -53,7 +55,13 @@ pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, CanonicalErro
 pub fn digest_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let hash = hasher.finalize();
+    format_sha256(&hasher.finalize())
+}
+
+/// Format a finalized SHA-256 hash as the canonical `sha256:<lowercase-hex>` string. This is the
+/// single source of truth for the digest format, shared by [`digest_bytes`] and [`tee_digest`] so
+/// streamed and buffered digests are byte-identical.
+fn format_sha256(hash: &[u8]) -> String {
     let mut hex = String::with_capacity(7 + hash.len() * 2);
     hex.push_str("sha256:");
     for byte in hash {
@@ -61,6 +69,31 @@ pub fn digest_bytes(bytes: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+/// Stream `reader` to `writer` while hashing, returning the `sha256:<lowercase-hex>` digest of the
+/// bytes — identical in value and format to [`digest_bytes`] over the same byte sequence, but never
+/// materialising the whole stream in memory (fixed ~1 MiB working buffer). The writer receives the
+/// bytes verbatim and in order.
+///
+/// The caller is responsible for flushing `writer` (e.g. a `BufWriter`) and checking that flush's
+/// error — this function only guarantees that every successfully read byte was handed to
+/// `write_all`.
+///
+/// # Errors
+/// Propagates any [`std::io::Error`] from reading `reader` or writing `writer`.
+pub fn tee_digest<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io::Result<String> {
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20]; // 1 MiB; heap-allocated to keep the stack small.
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        writer.write_all(&buf[..n])?;
+    }
+    Ok(format_sha256(&hasher.finalize()))
 }
 
 /// Recursively rebuild a [`serde_json::Value`] with object keys sorted, rejecting non-finite floats.
@@ -146,6 +179,31 @@ mod tests {
             digest,
             "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn tee_digest_matches_digest_bytes_and_writes_verbatim() {
+        // A payload larger than the 1 MiB chunk buffer to exercise multiple read iterations.
+        let payload: Vec<u8> = (0..(3 * (1 << 20) + 12345))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut reader = std::io::Cursor::new(payload.clone());
+        let mut sink: Vec<u8> = Vec::new();
+        let streamed = tee_digest(&mut reader, &mut sink).unwrap();
+
+        // Digest equality with the buffered path, and verbatim passthrough to the writer.
+        assert_eq!(streamed, digest_bytes(&payload));
+        assert_eq!(sink, payload);
+        assert!(streamed.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn tee_digest_empty_matches_digest_bytes() {
+        let mut reader = std::io::Cursor::new(Vec::<u8>::new());
+        let mut sink: Vec<u8> = Vec::new();
+        let streamed = tee_digest(&mut reader, &mut sink).unwrap();
+        assert_eq!(streamed, digest_bytes(b""));
+        assert!(sink.is_empty());
     }
 
     #[test]
