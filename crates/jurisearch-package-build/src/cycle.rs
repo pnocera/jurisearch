@@ -37,20 +37,29 @@ use std::path::PathBuf;
 
 use jurisearch_package::PackageKind;
 use jurisearch_package::Signer;
+use jurisearch_package::crypto::Verifier;
 use jurisearch_package::manifest::EmbeddedManifest;
 use jurisearch_package::signed::Signed;
 
 use jurisearch_storage::backend::DbClientSource;
+use jurisearch_storage::generations::generation_name;
 use jurisearch_storage::package_catalog::{
-    catalog_rows_for_corpus, delete_unpublished_package_row, package_catalog_status,
+    CatalogRow, acquire_corpus_build_lock, catalog_rows_for_corpus, delete_unpublished_package_row,
+    latest_media_package_for_corpus, package_catalog_status, release_corpus_build_lock,
 };
 use jurisearch_storage::runtime::StorageError;
 
-use crate::baseline::{BaselineParams, RebaselineBuildReport, build_rebaseline};
+use crate::baseline::{BaselineParams, RebaselineBuildReport, build_baseline, build_rebaseline};
 use crate::error::BuildError;
 use crate::incremental::{IncrementalParams, build_incremental};
-use crate::publish::{publish_package, publish_remote_manifest, staged_pending_dir};
-use crate::remote_manifest::{RemoteManifestParams, build_remote_manifest};
+use crate::publish::{
+    publish_package, publish_remote_manifest, published_manifest_path, published_package_dir,
+    staged_pending_dir,
+};
+use crate::remote_manifest::{
+    RemoteManifestParams, build_remote_manifest, verify_catalog_identity,
+};
+use crate::verify::{verify_published_root, verify_signed_remote_manifest};
 
 /// The enrichment outcome for this cycle (recorded, not run, by the cycle — see the module docs). The
 /// CLI decides fail-closed-vs-skip when credentials are absent; the cycle never fabricates a "ran".
@@ -418,6 +427,502 @@ fn mark_package_published(
         }));
     }
     Ok(())
+}
+
+// --- First-baseline bootstrap (publish an EXISTING in-DB corpus as the FIRST signed baseline) ---
+
+/// Inputs for [`bootstrap_first_baseline`]. Mirrors [`RebaselineCycleConfig`] minus enrichment (a
+/// bootstrap publishes the corpus already in `public`; it runs no enrich/embed pass). The
+/// `baseline_params.embedding_fingerprint`/`embedding_model`/`embedding_dimension` are the storage
+/// embedding contract the preflight checks the actual DB rows against.
+#[derive(Debug, Clone)]
+pub struct BootstrapBaselineConfig {
+    pub baseline_params: BaselineParams,
+    pub remote_manifest_params: RemoteManifestParams,
+}
+
+/// What a first-baseline bootstrap published (identity + the self-verification result).
+#[derive(Debug, Clone)]
+pub struct BootstrapBaselineReport {
+    pub corpus: String,
+    pub package_id: String,
+    pub generation: String,
+    pub baseline_id: String,
+    /// Always 1 — the canonical first-baseline package sequence.
+    pub sequence: u64,
+    pub included_change_seq_high: u64,
+    pub total_rows: u64,
+    /// The published artifact's aggregate payload digest (its embedded `integrity.artifact_sha256`).
+    pub artifact_sha256: String,
+    pub remote_manifest_path: PathBuf,
+    pub head_sequence: u64,
+    /// Artifacts the post-publish [`verify_published_root`] checked (the baseline + retained packages).
+    pub artifacts_verified: usize,
+}
+
+/// A TEST-ONLY fault seam for [`bootstrap_first_baseline`], mirroring [`PublishFault`]: where (if
+/// anywhere) to inject a simulated crash so a gated test can prove the resumable / no-partial-publish
+/// bootstrap contract. Each variant reproduces a distinct crash window the finalize path must recover.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapFault {
+    /// Production: no injected fault.
+    None,
+    /// Fail right AFTER [`build_baseline`] catalogs the `built` row + stages the artifact, BEFORE
+    /// [`publish_package`] — the artifact exists ONLY in the `.staging` slot.
+    AfterCatalogInsert,
+    /// Fail AFTER [`publish_package`] copies the artifact to `packages/`, BEFORE `mark_package_published`
+    /// — the artifact is served but the catalog row is still `built`.
+    AfterPublishPackage,
+    /// Fail AFTER `mark_package_published` (row `published`, artifact served), BEFORE the manifest phase —
+    /// a served, published artifact with NO client-visible `manifest.json`.
+    AfterMarkPublished,
+    /// Fail AFTER the in-memory pre-rename verify succeeds, BEFORE [`publish_remote_manifest`] — the
+    /// manifest verified but never became client-visible.
+    BeforeManifestRename,
+}
+
+/// Publish the EXISTING in-DB `corpus` (already ingested + embedded in `public`) as the producer's FIRST
+/// signed baseline — WITHOUT fetching or re-embedding. Mirrors [`rebaseline_cycle`]'s structure (so the
+/// in-module [`mark_package_published`] stays private) but for the bootstrap case where NO media root is
+/// cataloged yet.
+///
+/// The locked span ([`bootstrap_locked`]) decides BUILD-vs-RESUME-vs-REFUSE from the newest `core` media
+/// catalog row, so a crash between cataloging a `built`/`published` row and writing `manifest.json` is
+/// RECOVERABLE on a re-run (the finalize is idempotent), never a permanent dead-end. In order: take the
+/// per-corpus package build advisory lock; classify + (build OR resume); release the build lock; then
+/// [`build_remote_manifest`] (which re-acquires that same advisory lock transiently on its OWN connection
+/// — so it MUST run after we release, never while we hold it); VERIFY the in-memory signed manifest +
+/// every referenced artifact BEFORE it becomes client-visible; atomically [`publish_remote_manifest`];
+/// then self-verify the served root with the PUBLIC `verifier` as a final readback.
+///
+/// The safety property is that no client-visible `manifest.json` is published until the artifact it
+/// references exists at the served root AND the pre-rename verify accepts it.
+///
+/// # Errors
+/// [`BuildError`] on a failed preflight (schema/embedding/fingerprint), a repair-refusal (a divergent or
+/// unrecoverable existing media row), an already-baselined refusal, or a build/publish/manifest/verify/
+/// DB/IO/signing failure.
+pub fn bootstrap_first_baseline(
+    producer: &impl DbClientSource,
+    corpus: &str,
+    published_root: &Path,
+    signer: &dyn Signer,
+    verifier: &dyn Verifier,
+    config: &BootstrapBaselineConfig,
+) -> Result<BootstrapBaselineReport, BuildError> {
+    bootstrap_first_baseline_faulted(
+        producer,
+        corpus,
+        published_root,
+        signer,
+        verifier,
+        config,
+        BootstrapFault::None,
+    )
+}
+
+/// [`bootstrap_first_baseline`] with a test fault seam. Hidden from docs; production callers use
+/// [`bootstrap_first_baseline`].
+///
+/// # Errors
+/// [`BuildError`] on any bootstrap failure (or the injected fault).
+#[doc(hidden)]
+pub fn bootstrap_first_baseline_faulted(
+    producer: &impl DbClientSource,
+    corpus: &str,
+    published_root: &Path,
+    signer: &dyn Signer,
+    verifier: &dyn Verifier,
+    config: &BootstrapBaselineConfig,
+    fault: BootstrapFault,
+) -> Result<BootstrapBaselineReport, BuildError> {
+    let uri_base = &config.remote_manifest_params.uri_base;
+
+    // A durable staging slot under the served root (the served layout — `manifest.json` + `packages/` —
+    // never references this dot-dir), so a crash before publish leaves a recoverable, non-served artifact.
+    let staging = published_root
+        .join(corpus)
+        .join(".staging")
+        .join("bootstrap-baseline");
+
+    // Serialize the classify + build/resume + catalog span against any concurrent package build for this
+    // corpus. Released BEFORE the remote-manifest build, which re-acquires it on its own connection.
+    let mut lock_db = producer.client()?;
+    acquire_corpus_build_lock(&mut lock_db, corpus)?;
+    let outcome = bootstrap_locked(
+        producer,
+        corpus,
+        published_root,
+        signer,
+        verifier,
+        &staging,
+        config,
+        fault,
+    );
+    let _ = release_corpus_build_lock(&mut lock_db, corpus);
+    let identity = outcome?;
+
+    // Build the signed remote manifest from the published artifacts. `build_remote_manifest` re-acquires
+    // the build lock transiently and binds the catalog identity to the published artifact.
+    let signed = build_remote_manifest(
+        producer,
+        corpus,
+        published_root,
+        signer,
+        &config.remote_manifest_params,
+    )?;
+
+    // VERIFY the in-memory manifest + every referenced artifact BEFORE it becomes client-visible — the
+    // referenced artifacts already exist under `packages/`, so resolving each `artifact_uri` to disk
+    // works pre-rename. Only a manifest that verifies is ever atomically published.
+    verify_signed_remote_manifest(published_root, corpus, uri_base, &signed, verifier)?;
+    if fault == BootstrapFault::BeforeManifestRename {
+        return Err(bootstrap_fail(
+            "injected bootstrap fault (test seam): after pre-rename verify, before manifest rename"
+                .to_owned(),
+        ));
+    }
+
+    // Atomic temp-then-rename publish, so a reader never sees a manifest referencing a half-staged
+    // artifact, then self-verify the served root exactly as a client would (the final readback).
+    let remote_manifest_path = publish_remote_manifest(published_root, corpus, &signed)?;
+    let verified = verify_published_root(published_root, corpus, uri_base, verifier)?;
+
+    let artifact_sha256 = published_artifact_sha256(published_root, corpus, &identity.package_id)?;
+    let (head_sequence, _included) = published_head(producer, corpus)?;
+
+    Ok(BootstrapBaselineReport {
+        corpus: corpus.to_owned(),
+        package_id: identity.package_id,
+        generation: identity.generation,
+        baseline_id: identity.baseline_id,
+        sequence: 1,
+        included_change_seq_high: identity.included_change_seq_high,
+        total_rows: identity.total_rows,
+        artifact_sha256,
+        remote_manifest_path,
+        head_sequence: head_sequence.unwrap_or(1),
+        artifacts_verified: verified.artifacts_checked,
+    })
+}
+
+/// The identity of the first baseline the locked span built or resumed — the coordinates the finalize
+/// phase needs after the build lock is released.
+struct BootstrapIdentity {
+    package_id: String,
+    generation: String,
+    baseline_id: String,
+    included_change_seq_high: u64,
+    total_rows: u64,
+}
+
+/// The locked span of [`bootstrap_first_baseline_faulted`]: classify the newest `core` media row, then
+/// take ONE of three paths (all inside the per-corpus build lock):
+/// 1. NO media row → FULL BUILD (embedding/schema preflight, then build → publish → mark → clean).
+/// 2. a media row that is NOT the canonical first baseline → PRECISE REPAIR-REFUSAL.
+/// 3. the canonical first baseline → REFUSE if its served manifest already verifies (already baselined),
+///    otherwise RESUME the finalize without rebuilding (recover the published artifact, mark published).
+#[allow(clippy::too_many_arguments)]
+fn bootstrap_locked(
+    producer: &impl DbClientSource,
+    corpus: &str,
+    published_root: &Path,
+    signer: &dyn Signer,
+    verifier: &dyn Verifier,
+    staging: &Path,
+    config: &BootstrapBaselineConfig,
+    fault: BootstrapFault,
+) -> Result<BootstrapIdentity, BuildError> {
+    let params = &config.baseline_params;
+    let uri_base = &config.remote_manifest_params.uri_base;
+
+    let media = latest_media_package_for_corpus(&mut producer.client()?, corpus)?;
+    let Some(row) = media else {
+        // PATH 1 — FULL BUILD: no `core` media row exists yet (the canonical first-baseline path).
+        bootstrap_preflight(producer, params)?;
+        clean_dir(staging)?;
+        std::fs::create_dir_all(staging)?;
+        let report = build_baseline(producer, corpus, staging, signer, params)?;
+        if fault == BootstrapFault::AfterCatalogInsert {
+            // Crash AFTER the `built` catalog row + staged artifact, BEFORE publish (artifact only in
+            // staging) — a re-run must RESUME by publishing the staged artifact.
+            return Err(bootstrap_fail(
+                "injected bootstrap fault (test seam): after catalog insert, before publish"
+                    .to_owned(),
+            ));
+        }
+        publish_package(published_root, corpus, &report.package_id, staging)?;
+        if fault == BootstrapFault::AfterPublishPackage {
+            // Crash AFTER publish, BEFORE mark (served artifact, row still `built`).
+            return Err(bootstrap_fail(
+                "injected bootstrap fault (test seam): after publish, before mark published"
+                    .to_owned(),
+            ));
+        }
+        mark_package_published(producer, corpus, &report.package_id)?;
+        if fault == BootstrapFault::AfterMarkPublished {
+            // Crash AFTER mark (served, published artifact), BEFORE the manifest phase (no manifest yet).
+            return Err(bootstrap_fail(
+                "injected bootstrap fault (test seam): after mark published, before manifest"
+                    .to_owned(),
+            ));
+        }
+        clean_dir(staging)?; // the artifact is now durably published under `packages/`
+        return Ok(BootstrapIdentity {
+            package_id: report.package_id,
+            generation: report.generation,
+            baseline_id: report.baseline_id,
+            included_change_seq_high: report.included_change_seq_high,
+            total_rows: report.total_rows,
+        });
+    };
+
+    // A media row exists. First classify it: a NON-canonical row is a manual-repair situation (PATH 2).
+    classify_first_baseline_row(&row, corpus, params)?;
+
+    // PATH 3 — it IS the canonical first baseline. If the served manifest already verifies cleanly the
+    // bootstrap is complete: REFUSE (this keeps the gated "second run is refused" tests valid).
+    if published_manifest_path(published_root, corpus).exists()
+        && verify_published_root(published_root, corpus, uri_base, verifier).is_ok()
+    {
+        return Err(bootstrap_fail(format!(
+            "a `{corpus}` first baseline `{}` is already published and its served manifest verifies; \
+             nothing to resume — refusing to republish",
+            row.package_id
+        )));
+    }
+
+    // RESUME: the manifest is missing OR failed verification. Finalize WITHOUT rebuilding.
+    resume_first_baseline(producer, corpus, published_root, staging, &row)
+}
+
+/// PATH 2 guard: a media row that is NOT the canonical first baseline is a manual-repair situation — fail
+/// with a PRECISE message naming the diverging field (distinct from the "already baselined" refusal).
+fn classify_first_baseline_row(
+    row: &CatalogRow,
+    corpus: &str,
+    params: &BaselineParams,
+) -> Result<(), BuildError> {
+    let expected_id = format!("{corpus}-1-1");
+    let expected_generation = generation_name(corpus, 1);
+    let diverging = if row.package_id != expected_id {
+        Some(format!(
+            "package_id `{}` != `{expected_id}`",
+            row.package_id
+        ))
+    } else if row.package_sequence != 1 {
+        Some(format!("package_sequence {} != 1", row.package_sequence))
+    } else if row.package_kind != "baseline" {
+        Some(format!("package_kind `{}` != `baseline`", row.package_kind))
+    } else if row.generation != expected_generation {
+        Some(format!(
+            "generation `{}` != `{expected_generation}`",
+            row.generation
+        ))
+    } else if row.baseline_id != params.baseline_id {
+        Some(format!(
+            "baseline_id `{}` != `{}`",
+            row.baseline_id, params.baseline_id
+        ))
+    } else if row.embedding_fingerprint != params.embedding_fingerprint {
+        Some(format!(
+            "embedding_fingerprint `{}` != `{}`",
+            row.embedding_fingerprint, params.embedding_fingerprint
+        ))
+    } else if row.status != "built" && row.status != "published" {
+        Some(format!(
+            "status `{}` is neither `built` nor `published`",
+            row.status
+        ))
+    } else {
+        None
+    };
+    if let Some(field) = diverging {
+        return Err(bootstrap_fail(format!(
+            "an existing `{corpus}` media row diverges from the canonical first baseline ({field}); \
+             manual repair required before a bootstrap can resume — refusing to rebuild over it"
+        )));
+    }
+    Ok(())
+}
+
+/// PATH 3 RESUME: finalize a canonical-but-unfinished first baseline WITHOUT rebuilding. Recover the
+/// published artifact (from `packages/`, else by publishing the `.staging` slot), bind it to its catalog
+/// row, mark the row published if still `built`, and derive the build identity from the row + artifact.
+fn resume_first_baseline(
+    producer: &impl DbClientSource,
+    corpus: &str,
+    published_root: &Path,
+    staging: &Path,
+    row: &CatalogRow,
+) -> Result<BootstrapIdentity, BuildError> {
+    let package_id = &row.package_id;
+    let package_dir = published_package_dir(published_root, corpus, package_id);
+    let package_manifest = jurisearch_package::artifact::manifest_path(&package_dir);
+    let staged_manifest = jurisearch_package::artifact::manifest_path(staging);
+
+    if !package_manifest.exists() {
+        // The artifact never reached `packages/`. The ONLY safe source is the staging slot (a crash after
+        // the catalog insert, before publish). Anything else is unrecoverable — manual repair.
+        if !staged_manifest.exists() {
+            return Err(bootstrap_fail(format!(
+                "cannot resume `{corpus}` first baseline `{package_id}`: the published artifact is \
+                 absent from `packages/` and no `.staging/bootstrap-baseline` slot holds it — manual \
+                 repair required"
+            )));
+        }
+        publish_package(published_root, corpus, package_id, staging)?;
+    }
+
+    // Recover + bind the now-published artifact to its catalog row (digest + canonical-manifest digest +
+    // identity). A mismatch is a manual-repair situation, distinct from the "already baselined" refusal.
+    let bytes = std::fs::read(&package_manifest)?;
+    let signed: Signed<EmbeddedManifest> = serde_json::from_slice(&bytes)?;
+    verify_catalog_identity(row, &signed, false).map_err(|error| {
+        bootstrap_fail(format!(
+            "cannot resume `{corpus}` first baseline `{package_id}`: the published artifact does not \
+             match its catalog row ({error}); manual repair required"
+        ))
+    })?;
+
+    if row.status == "built" {
+        mark_package_published(producer, corpus, package_id)?;
+    }
+    clean_dir(staging)?;
+
+    let total_rows = signed
+        .payload
+        .apply
+        .postconditions
+        .row_counts
+        .values()
+        .sum();
+    Ok(BootstrapIdentity {
+        package_id: row.package_id.clone(),
+        generation: row.generation.clone(),
+        baseline_id: row.baseline_id.clone(),
+        included_change_seq_high: u64::try_from(row.included_change_seq_high).unwrap_or(0),
+        total_rows,
+    })
+}
+
+/// Fail-closed real-DB embedding/schema preconditions for a FULL first-baseline build (Codex adjustment
+/// 7). Each rejection carries an exact, actionable message; none mutate. Verified against the producer's
+/// `public` tables under the config-supplied embedding contract. The existing-media-row decision (build
+/// vs resume vs refuse) is made by [`bootstrap_locked`] BEFORE this runs, so a resume never re-checks
+/// embeddings — this only guards the path that actually builds a fresh baseline.
+fn bootstrap_preflight(
+    producer: &impl DbClientSource,
+    params: &BaselineParams,
+) -> Result<(), BuildError> {
+    let mut db = producer.client()?;
+
+    // 1. The producer schema must be exactly what this binary builds for.
+    let schema_version: i64 = db
+        .query_one(
+            "SELECT coalesce(max(version), 0) FROM schema_migrations;",
+            &[],
+        )?
+        .get(0);
+    let expected = i64::from(jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION);
+    if schema_version != expected {
+        return Err(bootstrap_fail(format!(
+            "producer schema_version {schema_version} != CURRENT_SCHEMA_VERSION {expected}; migrate \
+             the producer database before publishing the first baseline"
+        )));
+    }
+
+    // 2. EVERY chunk must have a matching embedding under the publish fingerprint/model/dimension, and
+    //    `chunks.embedding_fingerprint` must be stamped consistently — else the baseline is package-valid
+    //    but query-incomplete under a client's bge-m3 query embedder.
+    let dimension = i32::try_from(params.embedding_dimension).unwrap_or(i32::MAX);
+    let missing_chunks: i64 = db
+        .query_one(
+            "SELECT count(*) FROM chunks c \
+             LEFT JOIN chunk_embeddings e ON e.chunk_id = c.chunk_id \
+               AND e.embedding_fingerprint = $1 AND e.model = $2 AND e.dimension = $3 \
+             WHERE e.chunk_id IS NULL;",
+            &[
+                &params.embedding_fingerprint,
+                &params.embedding_model,
+                &dimension,
+            ],
+        )?
+        .get(0);
+    if missing_chunks > 0 {
+        return Err(bootstrap_fail(format!(
+            "{missing_chunks} `chunks` row(s) have no matching `chunk_embeddings` under fingerprint \
+             `{}` / model `{}` / dimension {dimension}; the corpus is not fully embedded — re-embed \
+             before publishing",
+            params.embedding_fingerprint, params.embedding_model
+        )));
+    }
+    let inconsistent_chunks: i64 = db
+        .query_one(
+            "SELECT count(*) FROM chunks WHERE embedding_fingerprint IS DISTINCT FROM $1;",
+            &[&params.embedding_fingerprint],
+        )?
+        .get(0);
+    if inconsistent_chunks > 0 {
+        return Err(bootstrap_fail(format!(
+            "{inconsistent_chunks} `chunks` row(s) carry an embedding_fingerprint other than `{}`; the \
+             stored fingerprint is inconsistent with the publish fingerprint",
+            params.embedding_fingerprint
+        )));
+    }
+
+    // 3. Same coverage + consistency for zone units (an empty zone set trivially passes).
+    let missing_zones: i64 = db
+        .query_one(
+            "SELECT count(*) FROM zone_units z \
+             LEFT JOIN zone_unit_embeddings e ON e.zone_unit_id = z.zone_unit_id \
+               AND e.embedding_fingerprint = $1 AND e.model = $2 AND e.dimension = $3 \
+             WHERE e.zone_unit_id IS NULL;",
+            &[
+                &params.embedding_fingerprint,
+                &params.embedding_model,
+                &dimension,
+            ],
+        )?
+        .get(0);
+    if missing_zones > 0 {
+        return Err(bootstrap_fail(format!(
+            "{missing_zones} `zone_units` row(s) have no matching `zone_unit_embeddings` under \
+             fingerprint `{}` / model `{}` / dimension {dimension}; zone units are not fully embedded",
+            params.embedding_fingerprint, params.embedding_model
+        )));
+    }
+    let inconsistent_zones: i64 = db
+        .query_one(
+            "SELECT count(*) FROM zone_units WHERE embedding_fingerprint IS DISTINCT FROM $1;",
+            &[&params.embedding_fingerprint],
+        )?
+        .get(0);
+    if inconsistent_zones > 0 {
+        return Err(bootstrap_fail(format!(
+            "{inconsistent_zones} `zone_units` row(s) carry an embedding_fingerprint other than `{}`",
+            params.embedding_fingerprint
+        )));
+    }
+    Ok(())
+}
+
+/// The published artifact's aggregate payload digest (its embedded `integrity.artifact_sha256`).
+fn published_artifact_sha256(
+    root: &Path,
+    corpus: &str,
+    package_id: &str,
+) -> Result<String, BuildError> {
+    let dir = published_package_dir(root, corpus, package_id);
+    let bytes = std::fs::read(jurisearch_package::artifact::manifest_path(&dir))?;
+    let signed: Signed<EmbeddedManifest> = serde_json::from_slice(&bytes)?;
+    Ok(signed.payload.integrity.artifact_sha256)
+}
+
+/// A preflight/bootstrap rejection (mapped to the producer `publish-failed` class by the caller).
+fn bootstrap_fail(message: String) -> BuildError {
+    BuildError::Storage(StorageError::Generations { message })
 }
 
 /// The newest cataloged package's `(package_sequence, included_change_seq_high)` for `corpus`, or

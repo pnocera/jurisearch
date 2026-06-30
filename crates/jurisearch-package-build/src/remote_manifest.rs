@@ -229,7 +229,7 @@ fn read_published_manifest(
 /// compatibility / postconditions slip through with the same payload bytes). Recomputes the canonical
 /// EMBEDDED-manifest digest and checks every identity field; for a retained incremental, also enforces
 /// the incremental shape (`to == from + 1`).
-fn verify_catalog_identity(
+pub(crate) fn verify_catalog_identity(
     row: &CatalogRow,
     signed: &Signed<EmbeddedManifest>,
     expect_incremental: bool,

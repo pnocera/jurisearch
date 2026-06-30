@@ -19,7 +19,7 @@ use jurisearch_producer::freshness::JudilibreAccelerator;
 use jurisearch_producer::update::{UpdateOptions, plan_forced_rebaseline};
 use jurisearch_producer::{
     PRODUCER_CONFIG_EXAMPLE, build_status, cron_equivalent, fetch, install, provision_db,
-    run_retention, run_update,
+    run_publish_baseline, run_retention, run_update,
 };
 use serde_json::json;
 
@@ -48,6 +48,18 @@ enum Command {
     ProvisionDb {
         #[arg(long)]
         config: PathBuf,
+    },
+    /// Publish the EXISTING in-DB `core` corpus (already ingested + embedded in the external producer
+    /// PostgreSQL) as the producer's FIRST signed `core` baseline — WITHOUT fetching DILA and WITHOUT
+    /// re-embedding. Runs preflight + build + serve + signed manifest + self-verify under the
+    /// `update-core` lock. Does NOT seed the producer `state_dir` adoption markers (a separate operation).
+    PublishBaseline {
+        #[arg(long)]
+        config: PathBuf,
+        /// Stable baseline id (default `core-bootstrap-v1`). NEVER clock-derived, so retries are
+        /// idempotent and never collide with a different identity.
+        #[arg(long)]
+        baseline_id: Option<String>,
     },
     /// Render + install the systemd service/timer units (and print the cron equivalent).
     Install {
@@ -180,6 +192,32 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                     "roles_provisioned": report.roles_provisioned,
                 }),
             ))
+        }
+        Command::PublishBaseline {
+            config,
+            baseline_id,
+        } => {
+            let cfg = ProducerConfig::load(&config)?;
+            let report = run_publish_baseline(&cfg, baseline_id.as_deref())?;
+            Ok(CommandOutput {
+                exit_class: report.exit_class,
+                json: json!({
+                    "status": "ok",
+                    "command": "publish-baseline",
+                    "corpus": report.corpus,
+                    "generation": report.generation,
+                    "baseline_id": report.baseline_id,
+                    "package_id": report.package_id,
+                    "sequence": report.sequence,
+                    "included_change_seq_high": report.included_change_seq_high,
+                    "total_rows": report.total_rows,
+                    "artifact_sha256": report.artifact_sha256,
+                    "manifest_path": report.manifest_path,
+                    "head_sequence": report.head_sequence,
+                    "artifacts_verified": report.artifacts_verified,
+                    "exit_class": report.exit_class,
+                }),
+            })
         }
         Command::Install { config, dry_run } => {
             let cfg = ProducerConfig::load(&config)?;

@@ -17,9 +17,10 @@ pub use baseline::{
     BaselineBuildReport, BaselineParams, RebaselineBuildReport, build_baseline, build_rebaseline,
 };
 pub use cycle::{
-    EnrichmentMode, ProducerCycleConfig, ProducerCycleReport, PublishFault, RebaselineCycleConfig,
-    RebaselineCycleReport, producer_cycle, producer_cycle_faulted, rebaseline_cycle,
-    rebaseline_cycle_faulted,
+    BootstrapBaselineConfig, BootstrapBaselineReport, BootstrapFault, EnrichmentMode,
+    ProducerCycleConfig, ProducerCycleReport, PublishFault, RebaselineCycleConfig,
+    RebaselineCycleReport, bootstrap_first_baseline, bootstrap_first_baseline_faulted,
+    producer_cycle, producer_cycle_faulted, rebaseline_cycle, rebaseline_cycle_faulted,
 };
 pub use error::BuildError;
 pub use incremental::{IncrementalBuildReport, IncrementalParams, build_incremental};
@@ -27,4 +28,4 @@ pub use publish::{
     publish_package, publish_remote_manifest, published_manifest_path, staged_pending_dir,
 };
 pub use remote_manifest::{RemoteManifestParams, build_remote_manifest};
-pub use verify::{PublishedVerifyReport, verify_published_root};
+pub use verify::{PublishedVerifyReport, verify_published_root, verify_signed_remote_manifest};

@@ -391,7 +391,7 @@ fn run_update_inner(
 
 /// Fail with a clear `producer-db-unprovisioned` diagnostic when the external DB has no schema yet,
 /// instead of a raw SQL error deep in ingest.
-fn ensure_provisioned(db: &WriterHandle) -> Result<(), ProducerError> {
+pub(crate) fn ensure_provisioned(db: &WriterHandle) -> Result<(), ProducerError> {
     let mut client = db.client()?;
     let provisioned: bool = client
         .query_one("SELECT to_regclass('public.documents') IS NOT NULL;", &[])
@@ -736,7 +736,7 @@ fn incremental_params(config: &ProducerConfig, run_id: &str) -> IncrementalParam
 }
 
 /// The remote-manifest params, derived from the producer config (single `core` corpus, open tier).
-fn remote_manifest_params(
+pub(crate) fn remote_manifest_params(
     config: &ProducerConfig,
     signer: &jurisearch_package::crypto::Ed25519Signer,
 ) -> RemoteManifestParams {

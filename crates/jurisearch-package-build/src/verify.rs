@@ -49,6 +49,26 @@ pub fn verify_published_root(
         ))
     })?;
     let signed: Signed<RemoteManifest> = serde_json::from_slice(&bytes)?;
+    verify_signed_remote_manifest(root, corpus, uri_base, &signed, verifier)
+}
+
+/// Verify an IN-MEMORY `Signed<RemoteManifest>` plus every artifact it references under `root`, WITHOUT
+/// re-reading `manifest.json` from disk. Backs both [`verify_published_root`]'s post-publish readback and
+/// the producer's PRE-rename gate (verify the manifest before it ever becomes client-visible — plan P9
+/// r1+ BLOCKER): signature + corpus, then for the active baseline + each retained incremental the
+/// artifact exists, its embedded signature matches the remote entry AND verifies with `verifier`, and its
+/// `integrity.artifact_sha256` equals the remote `sha256`.
+///
+/// # Errors
+/// [`BuildError`] if the signature/corpus is wrong, an artifact is missing, a remote entry's
+/// `sha256`/signature disagrees with the published artifact, or on an IO failure.
+pub fn verify_signed_remote_manifest(
+    root: &Path,
+    corpus: &str,
+    uri_base: &str,
+    signed: &Signed<RemoteManifest>,
+    verifier: &dyn Verifier,
+) -> Result<PublishedVerifyReport, BuildError> {
     signed.verify(verifier).map_err(|error| {
         fail(format!(
             "published remote manifest signature invalid: {error}"

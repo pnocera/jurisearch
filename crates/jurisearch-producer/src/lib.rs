@@ -30,6 +30,7 @@ pub mod exit;
 pub mod fetch;
 pub mod freshness;
 pub mod lock;
+pub mod publish_baseline;
 pub mod render;
 pub mod retention;
 pub mod runrecord;
@@ -43,6 +44,7 @@ pub use error::ProducerError;
 pub use exit::{exit_code_for, is_success};
 pub use fetch::{FetchStepReport, fetch_source, read_fetch_cursor};
 pub use freshness::JudilibreAccelerator;
+pub use publish_baseline::{PublishBaselineReport, run_publish_baseline};
 pub use render::{InstallReport, cron_equivalent, install, render_all};
 pub use retention::{
     ReclaimCategory, ReclaimItem, RetentionReport, run_retention, scan_reclaimable,
