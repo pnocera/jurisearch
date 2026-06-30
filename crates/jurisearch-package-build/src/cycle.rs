@@ -818,14 +818,16 @@ fn bootstrap_preflight(
 ) -> Result<(), BuildError> {
     let mut db = producer.client()?;
 
-    // 1. The producer schema must be exactly what this binary builds for.
-    let schema_version: i64 = db
+    // 1. The producer schema must be exactly what this binary builds for. `schema_migrations.version`
+    //    is `integer` (int4), so it MUST be read as `i32` — reading it as `i64` panics in rust-postgres
+    //    with a deserialization error (the migration applier reads it the same way).
+    let schema_version: i32 = db
         .query_one(
             "SELECT coalesce(max(version), 0) FROM schema_migrations;",
             &[],
         )?
         .get(0);
-    let expected = i64::from(jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION);
+    let expected = jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION;
     if schema_version != expected {
         return Err(bootstrap_fail(format!(
             "producer schema_version {schema_version} != CURRENT_SCHEMA_VERSION {expected}; migrate \
