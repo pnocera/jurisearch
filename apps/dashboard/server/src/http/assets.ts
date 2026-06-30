@@ -57,3 +57,43 @@ export class DevAssetSource implements AssetSource {
     return { body: await file.bytes(), contentType: file.type || "application/octet-stream" };
   }
 }
+
+/**
+ * M5 embedded asset source: serves the SPA + fonts from bytes bundled INTO the compiled binary
+ * (Spike A `with { type: "file" }`), so the binary runs standalone with NO on-disk `web/dist`.
+ * Backed by the generated manifest (`build/gen-embed.ts`): `index()`/`asset(pathname)` look up the
+ * embedded virtual-path string and read it via `Bun.file`, which supplies the Content-Type the same
+ * way `DevAssetSource` does (`.js`→`text/javascript`, `.woff2`→`font/woff2`, …). `index.html` is
+ * forced to `text/html` because its embedded virtual path may not carry a `.html` extension. The
+ * Spike A 404 discipline stays in the ROUTER; this seam only resolves an exact asset or the index.
+ * Read-only; constructed ONLY for the compiled binary at the composition root.
+ */
+export class EmbeddedAssetSource implements AssetSource {
+  constructor(
+    private readonly indexPath: string | null,
+    private readonly assets: Readonly<Record<string, string>>,
+  ) {}
+
+  async index(): Promise<AssetResponse | null> {
+    if (this.indexPath === null) {
+      return null;
+    }
+    return { body: await Bun.file(this.indexPath).bytes(), contentType: INDEX_CONTENT_TYPE };
+  }
+
+  async asset(pathname: string): Promise<AssetResponse | null> {
+    if (pathname === "/" || isUnsafePath(pathname)) {
+      return null;
+    }
+    const embeddedPath = this.assets[pathname];
+    if (embeddedPath === undefined) {
+      return null;
+    }
+    const file = Bun.file(embeddedPath);
+    // An exact GET /index.html keeps text/html; everything else infers from `Bun.file().type`.
+    const contentType = pathname.endsWith(".html")
+      ? INDEX_CONTENT_TYPE
+      : file.type || "application/octet-stream";
+    return { body: await file.bytes(), contentType };
+  }
+}

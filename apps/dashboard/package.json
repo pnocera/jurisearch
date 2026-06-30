@@ -12,13 +12,14 @@
   ],
   "scripts": {
     "stamp": "bun run scripts/stamp.ts",
+    "gen:embed": "bun run build/gen-embed.ts",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "typecheck": "bun run stamp && tsc -p tsconfig.json --noEmit && bun run typecheck:web",
+    "typecheck": "bun run stamp && bun run gen:embed && tsc -p tsconfig.json --noEmit && bun run typecheck:web",
     "typecheck:web": "vue-tsc -p web/tsconfig.json --noEmit",
-    "test": "bun run stamp && bun test",
+    "test": "bun run stamp && bun run gen:embed && bun test",
     "build": "cd web && bun run build",
-    "compile": "bun run stamp && bun build server/main.ts --compile --target=bun-linux-x64 --outfile dist/jurisearch-dashboard"
+    "compile": "bun run build/compile.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.1",

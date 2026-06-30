@@ -1,0 +1,13 @@
+No findings.
+
+The prior WARN is resolved. `apps/dashboard/server/main.ts:48` now routes all selection through `selectAssetSource`, and the embedded branch at `apps/dashboard/server/main.ts:53` throws when `EMBEDDED_INDEX === null` instead of returning `DevAssetSource`. That error is still caught by the guarded entrypoint at `apps/dashboard/server/main.ts:136`, printed as `jurisearch-dashboard: fatal: ...`, and exits nonzero. The non-embedded path remains `DevAssetSource`, so the generated stub is only valid for dev/test imports. I also verified `server/select-assets.test.ts` directly: 3 pass / 0 fail.
+
+The blessed compile path now refuses the real stub-producing case before producing a binary. `apps/dashboard/package.json:22` points `bun run compile` at `apps/dashboard/build/compile.ts`, which runs build, runs `gen:embed`, then checks `web/dist/index.html` at `apps/dashboard/build/compile.ts:40` before invoking `bun build --compile` with `process.env.DASHBOARD_EMBEDDED=1` at `apps/dashboard/build/compile.ts:49`. A direct compile against a stub is still fail-closed at startup through the selector.
+
+The `import.meta.main` guard does not break normal startup semantics: direct execution and the compiled binary still enter `run`, while test imports no longer bind a port. `--version` remains before asset resolution at `apps/dashboard/server/main.ts:80`, so it prints the exact contract line without touching the embedded manifest; the existing compiled binary printed `jurisearch-dashboard 0.1.0 (9fd7b113c48f, x86_64-unknown-linux-gnu)`.
+
+The prior NIT is resolved. `apps/dashboard/server/embed-smoke.test.ts:182` enumerates every file under `web/dist`, explicitly requires `/index.html`, then fetches every path from a binary copied by itself into a temporary run directory (`apps/dashboard/server/embed-smoke.test.ts:153`, `apps/dashboard/server/embed-smoke.test.ts:178`). It checks `/`, `/runs`, per-extension content-type classes, nonempty non-HTML bytes, and `/assets/nope.js` 404. That proves the served assets come from the embedded manifest rather than a filesystem `web/dist`, and covers lazy chunks, nested assets, and both `.woff`/`.woff2` outputs.
+
+Content-type, 404, and read-only behavior are intact. `EmbeddedAssetSource` preserves forced HTML content type for index and `Bun.file().type` inference for other embedded files in `apps/dashboard/server/src/http/assets.ts:77`; the router still 404s missing asset-shaped paths at `apps/dashboard/server/src/http/router.ts:101` and rejects non-GET/HEAD methods at `apps/dashboard/server/src/http/router.ts:119`.
+
+VERDICT: GO

@@ -7,7 +7,14 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/dist", "!server/buildinfo.ts", "!**/*.vue", "!**/*.css"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!server/buildinfo.ts",
+      "!server/embedded-assets.generated.ts",
+      "!**/*.vue",
+      "!**/*.css"
+    ]
   },
   "formatter": {
     "enabled": true,
