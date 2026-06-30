@@ -380,13 +380,19 @@ pub fn corpus_table_digests_with_client<C: GenericClient>(
     let mut digests = Vec::with_capacity(REPLICATED_DIGEST_SPECS.len());
     for spec in REPLICATED_DIGEST_SPECS {
         let sql = format!(
+            // Per-row `md5(sig)` BEFORE aggregating: a full-corpus `string_agg` over the raw row JSON
+            // (`sig`) materialises one >1 GB string and trips PostgreSQL's 1 GB string-buffer limit at
+            // production scale (2.88M rows). Hashing each row first makes every element a fixed 32-char
+            // md5, so the aggregate stays ~95 MB at that scale and scales ~30x further — the same
+            // scalable shape as `replay_snapshot::snapshot_component`. Still a deterministic,
+            // order-stable, md5-rooted digest of the table's content.
             "WITH scoped AS (\
                  SELECT (to_jsonb({row_alias}){strip_volatile})::text AS sig, \
                         {order_by} AS sort_key \
                  FROM {from_clause} \
                  WHERE {corpus_predicate} = {corpus_lit}) \
              SELECT count(*)::bigint AS n, \
-                    COALESCE(md5(string_agg(sig, '|' ORDER BY sort_key)), '') AS digest \
+                    COALESCE(md5(string_agg(md5(sig), '|' ORDER BY sort_key)), '') AS digest \
              FROM scoped;",
             row_alias = spec.row_alias,
             from_clause = spec.from_clause,

@@ -237,7 +237,18 @@ fn corpus_digests_are_independent_of_the_outbox() -> Result<(), StorageError> {
         .find(|d| d.table_name == "chunk_embeddings")
         .expect("chunk_embeddings digest present");
     assert_eq!(embeddings.row_count, 1);
+    // `to_jsonb(<vector>)` round-tripped into a non-empty content digest (the per-row `md5(sig)`
+    // wrapper that keeps the aggregate under PostgreSQL's 1 GB string-buffer limit at scale must not
+    // collapse a real row to the empty-set sentinel).
     assert_ne!(embeddings.digest, "md5:");
+
+    // Determinism: recomputing over the SAME unchanged content yields byte-identical digests. This is
+    // the property the producer (build) and client (verify) rely on — both compute via this one fn.
+    let recomputed = corpus_table_digests(&postgres, "core", DigestSource::ProducerPublic)?;
+    assert_eq!(
+        recomputed, digests,
+        "same content -> identical per-table counts + digests (deterministic, order-stable)"
+    );
 
     // A change to a column the OLD hand-written signature omitted (official_api_responses.error)
     // now changes the digest — the §5.4 backstop covers all replicated content (WARN-1 fix).
