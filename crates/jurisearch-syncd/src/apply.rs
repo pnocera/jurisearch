@@ -3,7 +3,7 @@
 //! its indexes are built (INV-6): all work happens inside an invisible `building` generation, and the
 //! only globally-visible mutation is the atomic [`activate_generation`] switch.
 
-use std::io::Write;
+use std::io::BufRead;
 use std::path::Path;
 
 use jurisearch_package::compat::Version;
@@ -591,8 +591,13 @@ fn verify_per_file_digests(
     for file in &manifest.payload.files {
         let name = &file.file_name;
         let path = jurisearch_package::artifact::payload_file_path(artifact_dir, name);
-        let bytes = std::fs::read(&path)?;
-        let digest = jurisearch_package::canonical::digest_bytes(&bytes);
+        // Stream the file through the hasher (fixed ~1 MiB buffer) instead of materialising the whole
+        // payload in RAM — the baseline `documents.copybin` is ~77 GB (OOM). `tee_digest` returns the
+        // SAME `sha256:<hex>` string `digest_bytes` would over identical bytes, so every downstream
+        // check below (per-file reject, `verified` insert/duplicate reject, exact-match against
+        // `integrity.per_file_digests`, and the aggregate recompute) is byte-for-byte unchanged.
+        let mut reader = std::io::BufReader::new(std::fs::File::open(&path)?);
+        let digest = jurisearch_package::canonical::tee_digest(&mut reader, &mut std::io::sink())?;
         if digest != file.digest {
             return Err(SyncError::reject(
                 RejectCode::DigestMismatch,
@@ -743,7 +748,6 @@ fn copy_payload_in(
             continue; // a table can be absent from a payload (no rows) but present in apply_order
         };
         let path = jurisearch_package::artifact::payload_file_path(artifact_dir, &file.file_name);
-        let bytes = std::fs::read(&path)?;
         let columns = file
             .columns
             .iter()
@@ -764,8 +768,15 @@ fn copy_payload_in(
             sql_identifier(schema),
             sql_identifier(&file.table),
         );
+        // Open the local payload file BEFORE entering server COPY mode: a local file-open failure
+        // should surface as a plain IO error (the pre-change ordering) rather than aborting an
+        // already-open COPY. Stream the file straight into the COPY writer (fixed buffer) instead of
+        // loading the whole payload into RAM — a ~77 GB baseline `documents.copybin` would OOM. The
+        // `postgres` COPY-in writer implements `std::io::Write`, so `std::io::copy` feeds it the file
+        // bytes verbatim and in order — byte-for-byte identical to the previous `write_all(&bytes)`.
+        let mut reader = std::io::BufReader::new(std::fs::File::open(&path)?);
         let mut writer = db.copy_in(copy_sql.as_str()).map_err(SyncError::Postgres)?;
-        writer.write_all(&bytes)?;
+        std::io::copy(&mut reader, &mut writer)?;
         writer.finish().map_err(SyncError::Postgres)?;
     }
     Ok(())
@@ -1108,6 +1119,16 @@ pub fn apply_incremental(
 
 /// Apply the diff's JSONL files in the manifest's dependency order onto `schema`. Returns the scope
 /// count. Replace-set digests are verified against the generation rows post-apply (§5.3).
+///
+/// INTEGRITY ORDERING: every payload file has ALREADY been digest-verified against the SIGNED manifest
+/// by `verify_per_file_digests` (called in `apply_incremental` before this function runs — see the
+/// `verify_per_file_digests(artifact_dir, manifest)?` call preceding `apply_incremental_files`). Each
+/// file's bytes were streamed through the hasher and matched the signed per-file digest, so a corrupt /
+/// short-read / mismatched file is rejected UP FRONT. Consequently the streaming here (bounded-batch
+/// Upsert/Delete and line-by-line replace-set) cannot change the effective integrity outcome: any bytes
+/// that reach apply already matched the signature, and a genuine corruption was already rejected. The
+/// per-record replace-set `set_digest` check below is a post-apply belt-and-suspenders check on
+/// already-verified bytes, NOT the primary integrity gate.
 fn apply_incremental_files(
     tx: &mut postgres::Transaction<'_>,
     schema: &str,
@@ -1121,19 +1142,36 @@ fn apply_incremental_files(
         for file in manifest.payload.files.iter().filter(|f| &f.table == token) {
             let path =
                 jurisearch_package::artifact::payload_file_path(artifact_dir, &file.file_name);
-            let text = std::fs::read_to_string(&path)?;
+            // Stream the JSONL file line-by-line instead of slurping the whole file into a `String` —
+            // incremental payloads can be large and slurping risks OOM. Each file carries exactly one
+            // op, so the reader is consumed once. `BufRead::lines()` and `str::lines()` both split on
+            // `\n`, strip a trailing `\r`, and yield NO trailing empty line, and both paths filter
+            // `.trim().is_empty()` — so line partitioning is identical to the previous `read_to_string`.
+            let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
             match file.op {
                 jurisearch_package::EventKind::Upsert => {
-                    let rows = parse_jsonl(&text)?;
                     let pk = pk_map.get(token).cloned().unwrap_or_default();
-                    apply_upserts(tx, schema, token, &file.columns, &pk, &rows)?;
-                    scopes += rows.len();
+                    // Stream the payload in bounded batches instead of buffering the whole `.jsonl`
+                    // (legislation `documents.upsert.jsonl` is ~8.3 GB → OOM). `apply_upserts` executes
+                    // ONE statement per row internally, so applying consecutive batches emits the
+                    // identical ordered sequence of per-row `execute` calls in the SAME `tx` as one
+                    // whole-file call — same rows, same order, same cumulative count — while bounding
+                    // peak memory to a single batch.
+                    let count = stream_jsonl_batched(reader, |rows| {
+                        apply_upserts(tx, schema, token, &file.columns, &pk, rows)?;
+                        Ok(())
+                    })?;
+                    scopes += count;
                 }
                 jurisearch_package::EventKind::Delete => {
-                    let keys = parse_jsonl(&text)?;
                     let pk = pk_map.get(token).cloned().unwrap_or_default();
-                    apply_deletes(tx, schema, token, &pk, &keys)?;
-                    scopes += keys.len();
+                    // Same bounded-batch streaming as Upsert: `apply_deletes` is per-row internally, so
+                    // per-batch application is byte-for-byte equivalent to one whole-file call.
+                    let count = stream_jsonl_batched(reader, |keys| {
+                        apply_deletes(tx, schema, token, &pk, keys)?;
+                        Ok(())
+                    })?;
+                    scopes += count;
                 }
                 jurisearch_package::EventKind::ReplaceSet => {
                     let group = replace_set_group(token).ok_or_else(|| {
@@ -1142,8 +1180,12 @@ fn apply_incremental_files(
                             format!("unknown replace_set group token `{token}`"),
                         )
                     })?;
-                    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                        let rs: ReplaceSet = serde_json::from_str(line)?;
+                    for line in reader.lines() {
+                        let line = line?;
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let rs: ReplaceSet = serde_json::from_str(&line)?;
                         let doc = rs.scope.document_id.clone();
                         apply_replace_set(tx, schema, group, &doc, &rs.rows, |table| {
                             Ok(columns_map.get(table).cloned().unwrap_or_default())
@@ -1164,11 +1206,54 @@ fn apply_incremental_files(
     Ok(scopes)
 }
 
-fn parse_jsonl(text: &str) -> Result<Vec<serde_json::Value>, SyncError> {
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).map_err(SyncError::Json))
-        .collect()
+/// Rows accumulated before an apply. Legislation `documents` rows carry large text, so a tighter bound
+/// is favoured: 2_000 keeps peak accumulator memory to one small batch. Because `apply_upserts` /
+/// `apply_deletes` execute one statement PER ROW internally, the batch size only trades accumulator
+/// memory against a negligible number of extra loop-boundary applies — correctness, row order, and the
+/// total count are all independent of it.
+const APPLY_BATCH: usize = 2_000;
+
+/// Stream a JSONL payload from `reader`, applying rows in bounded batches of at most `APPLY_BATCH`, and
+/// return the total number of rows applied. Split on `\n` (with a stripped trailing `\r`), skip
+/// blank/whitespace-only lines, parse the rest with `serde_json` (errors → `SyncError::Json`),
+/// preserving line order; read errors propagate as `SyncError::Io` via `?`. Because
+/// `apply_upserts`/`apply_deletes` execute one statement per row internally, per-batch application is
+/// byte-for-byte equivalent to one whole-file call (same rows, same order, same tx) while bounding peak
+/// memory to a single batch.
+fn stream_jsonl_batched<R: BufRead>(
+    reader: R,
+    apply_batch: impl FnMut(&[serde_json::Value]) -> Result<(), SyncError>,
+) -> Result<usize, SyncError> {
+    stream_jsonl_batched_sized(reader, APPLY_BATCH, apply_batch)
+}
+
+/// [`stream_jsonl_batched`] with an explicit batch size — the batch bound is a parameter so a DB-free
+/// unit test can exercise the batching boundary with a small size; the production path always passes
+/// `APPLY_BATCH`.
+fn stream_jsonl_batched_sized<R: BufRead>(
+    reader: R,
+    batch_size: usize,
+    mut apply_batch: impl FnMut(&[serde_json::Value]) -> Result<(), SyncError>,
+) -> Result<usize, SyncError> {
+    let mut batch: Vec<serde_json::Value> = Vec::new();
+    let mut total = 0usize;
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        batch.push(serde_json::from_str::<serde_json::Value>(&line).map_err(SyncError::Json)?);
+        if batch.len() >= batch_size {
+            apply_batch(&batch)?;
+            total += batch.len();
+            batch.clear();
+        }
+    }
+    if !batch.is_empty() {
+        apply_batch(&batch)?;
+        total += batch.len();
+    }
+    Ok(total)
 }
 
 fn replace_set_group(token: &str) -> Option<ReplaceSetGroup> {
@@ -1178,5 +1263,105 @@ fn replace_set_group(token: &str) -> Option<ReplaceSetGroup> {
         "zone_units" => Some(ReplaceSetGroup::ZoneUnits),
         "decision_zones" => Some(ReplaceSetGroup::DecisionZones),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+
+    /// The streaming per-file digest (site 1: `tee_digest` over a `BufReader` into a `sink`) must equal
+    /// `digest_bytes` over the same bytes — this identity is what keeps every downstream integrity check
+    /// in `verify_per_file_digests` unchanged after the OOM fix. Pure, DB-free, self-contained.
+    #[test]
+    fn streaming_file_digest_equals_digest_bytes() {
+        // Bytes chosen to cross the 1 MiB `tee_digest` chunk boundary a few times plus a ragged tail,
+        // so the streamed path exercises multiple read iterations rather than a single buffer fill.
+        let bytes: Vec<u8> = (0..(2 * (1 << 20) + 4242))
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        let mut file = tempfile::NamedTempFile::new().expect("create temp file");
+        file.write_all(&bytes).expect("write payload");
+        file.flush().expect("flush payload");
+
+        // Exactly the site-1 approach: stream the file through the hasher into a sink.
+        let mut reader = std::io::BufReader::new(
+            std::fs::File::open(file.path()).expect("reopen temp file for reading"),
+        );
+        let streamed =
+            jurisearch_package::canonical::tee_digest(&mut reader, &mut std::io::sink()).unwrap();
+
+        assert_eq!(
+            streamed,
+            jurisearch_package::canonical::digest_bytes(&bytes),
+            "streamed per-file digest must be byte-identical to the buffered digest_bytes"
+        );
+        assert!(streamed.starts_with("sha256:"));
+    }
+
+    /// `stream_jsonl_batched_sized` must partition a JSONL payload into bounded batches WITHOUT a DB:
+    /// blank lines are skipped, order is preserved across batches, the returned total equals the number
+    /// of non-blank lines, and every batch except possibly the last is exactly `batch_size` (proving the
+    /// accumulator is bounded). Uses a tiny size so the boundary is crossed many times cheaply; the
+    /// production path calls the same helper with `APPLY_BATCH`.
+    #[test]
+    fn stream_jsonl_batched_partitions_bounded_and_ordered() {
+        use serde_json::Value;
+
+        const BATCH: usize = 3;
+        // 8 non-blank JSON lines, interleaved with blank/whitespace-only lines and a trailing newline —
+        // crosses the batch boundary twice (3 + 3 + 2), with a short final batch.
+        let payload = "\
+{\"i\":0}
+{\"i\":1}
+
+{\"i\":2}
+
+{\"i\":3}
+{\"i\":4}
+{\"i\":5}
+\t
+{\"i\":6}
+{\"i\":7}
+";
+        let expected: Vec<Value> = (0..8).map(|i| serde_json::json!({ "i": i })).collect();
+
+        let mut batches: Vec<Vec<Value>> = Vec::new();
+        let reader = std::io::BufReader::new(std::io::Cursor::new(payload));
+        let total = super::stream_jsonl_batched_sized(reader, BATCH, |rows| {
+            batches.push(rows.to_vec());
+            Ok(())
+        })
+        .expect("streaming batches must not error on valid JSONL");
+
+        // (b) the returned total equals the number of non-blank lines.
+        assert_eq!(
+            total,
+            expected.len(),
+            "total must count non-blank rows only"
+        );
+
+        // (a) concatenation of all batches equals the full parsed row list, order preserved.
+        let flattened: Vec<Value> = batches.iter().flatten().cloned().collect();
+        assert_eq!(
+            flattened, expected,
+            "batches concatenated must equal the ordered non-blank rows (blanks skipped)"
+        );
+
+        // (c) every batch except possibly the last has exactly `batch_size` rows.
+        assert!(!batches.is_empty(), "expected at least one batch");
+        let (last, leading) = batches.split_last().expect("non-empty batches");
+        for batch in leading {
+            assert_eq!(
+                batch.len(),
+                BATCH,
+                "every non-final batch must be exactly the batch size (bounded)"
+            );
+        }
+        assert!(
+            last.len() <= BATCH && !last.is_empty(),
+            "final batch must be non-empty and within the bound"
+        );
     }
 }
