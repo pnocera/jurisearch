@@ -450,33 +450,8 @@ fn france_juris_artifact_matches_the_phase2_gate_contract() {
     assert!(!phase2_benchmark_artifact_errors(&few_citations).is_empty());
 }
 
-#[test]
-fn derive_zone_unit_rows_handles_multi_fragment_and_skips_empty() {
-    // T3.1: one row per non-empty fragment, contiguous per-zone fragment_index; empty zones/blank
-    // fragments produce no rows.
-    let zones = json!({
-        "motivations": [{ "text": "premier motif" }, { "text": "  " }, { "text": "second motif" }],
-        "moyens": [{ "text": "un moyen" }],
-        "dispositif": []
-    });
-    let rows = derive_zone_unit_rows("cass:X", "cass", "h", &zones);
-    // 2 motivations (the blank one skipped) + 1 moyens + 0 dispositif.
-    assert_eq!(rows.len(), 3);
-    let motivations: Vec<_> = rows.iter().filter(|r| r.zone == "motivations").collect();
-    assert_eq!(motivations.len(), 2);
-    assert_eq!(motivations[0].fragment_index, 0);
-    assert_eq!(motivations[0].body, "premier motif");
-    assert_eq!(motivations[1].fragment_index, 1); // contiguous despite the skipped blank
-    assert_eq!(motivations[1].body, "second motif");
-    assert!(
-        rows.iter()
-            .all(|r| r.builder_version == ZONE_UNIT_BUILDER_VERSION)
-    );
-    assert!(
-        rows.iter()
-            .all(|r| r.body == r.search_body && r.source == "cass" && r.text_hash == "h")
-    );
-}
+// `derive_zone_unit_rows_handles_multi_fragment_and_skips_empty` moved to `jurisearch-pipeline`
+// (`build_zone_units`) alongside the extracted `derive_zone_unit_rows` it exercises.
 
 // `worker_join_error_counts_whole_slice_as_errors` moved to `jurisearch-pipeline` (work/10 M1-C)
 // alongside the extracted `worker_outcomes_or_errors` / `ZoneEnrichOutcome` it exercises.

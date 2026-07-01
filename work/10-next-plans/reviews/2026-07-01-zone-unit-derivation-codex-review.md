@@ -1,0 +1,19 @@
+# Review - Producer Zone-Unit Derivation
+
+## Findings
+
+No BLOCKER/WARN/NIT findings.
+
+## Verification Notes
+
+- Load-bearing idempotency invariant: verified. `normalize_judilibre_zones` only sets `any_valid = true` after pushing a fragment whose trimmed text is non-empty (`crates/jurisearch-pipeline/src/enrichment/judilibre_zones.rs:318-348`), and the only reviewed production `ok` write sets `status = if valid_zones { "ok" } else { "invalid_offsets" }` while persisting that exact `zones_json` (`crates/jurisearch-pipeline/src/enrichment/judilibre_zones.rs:237-263`). The derivable selector only surfaces fresh `status='ok'`, non-null-hash, cass/inca decision rows (`crates/jurisearch-storage/src/zone_units.rs:276-333`), and `derive_zone_unit_rows` walks the same three zone arrays with the same non-empty trim rule (`crates/jurisearch-pipeline/src/build_zone_units.rs:40-72`). I did not find another production path in the reviewed scope that fabricates `status='ok'`; negative/non-derivable writes clear materialized units when status is not `ok` or the hash is missing (`crates/jurisearch-storage/src/decision_zones.rs:206-258`).
+
+- Outbox / package-window: verified. `build_zone_units` writes each document with `replace_zone_units_for_document_with_client` before returning (`crates/jurisearch-pipeline/src/build_zone_units.rs:136-179`), and that storage writer deletes/reinserts plus emits exactly one document-scoped `zone_units` `replace_set` in the same transaction (`crates/jurisearch-storage/src/zone_units.rs:159-244`). The producer calls derivation before both embedding passes and before package build (`crates/jurisearch-producer/src/update.rs:397-414`), so these committed outbox rows are present before `build_incremental` freezes `hi` (`crates/jurisearch-package-build/src/incremental.rs:178-191`). The incremental builder coalesces both `zone_units` and `zone_unit_embeddings` scopes into the same `zone_touched` set (`crates/jurisearch-package-build/src/incremental.rs:233-235`) and materializes one current replace-set for the document (`crates/jurisearch-package-build/src/incremental.rs:319-345`, `576-615`), so the derive row and the subsequent embedding outbox activity are not emitted as duplicate row-level zone-unit payloads.
+
+- Producer placement/gating/reporting: verified. Phase 4.5 is after enrichment and before `embed_pending(..., EmbedTarget::ZoneUnits, ...)` (`crates/jurisearch-producer/src/update.rs:384-414`). `derive_zone_units_if_applicable` runs for groups containing `Cass` or `Inca`, skips snapshot-only/from-db, and is intentionally independent of `--skip-enrich` (`crates/jurisearch-producer/src/update.rs:754-772`). `UpdateReport.zone_units` is threaded through dry-run, rebaseline, and ordinary update returns, and the producer CLI exposes the derived-decision/unit counts in update and rebaseline JSON (`crates/jurisearch-producer/src/bin/jurisearch_producer.rs:308-335`, `447-475`).
+
+- CLI delegation: verified. `ingest build-zone-units` still returns the same top-level JSON shape (`schema_version`, `command`, `index_dir`, `builder_version`, `rebuild`, `decisions_derived`, `zone_units_written`, `coverage`) while delegating to `jurisearch_pipeline::build_zone_units` (`crates/jurisearch-cli/src/ingest/pipeline.rs:51-72`). The moved constants/function are exported from `jurisearch-pipeline` and the removed CLI-local test moved alongside the extracted implementation.
+
+- New tests: the PG-gated integration test asserts the first pass derives one decision / three units, emits exactly one document-scoped `replace_set`, emits no deletes, and that a second pass derives zero units and leaves the replace-set count at one (`crates/jurisearch-pipeline/tests/build_zone_units.rs:45-112`). That would catch the timer-churn regression for a normal `ok` row with non-empty fragments; the normalizer-to-`ok` invariant itself is covered by source inspection above rather than by this integration test.
+
+VERDICT: GO

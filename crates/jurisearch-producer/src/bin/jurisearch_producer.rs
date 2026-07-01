@@ -320,6 +320,16 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                             "adopted_baselines": report.adopted_baselines,
                             "built_incremental": report.built_incremental,
                             "enrichment": format!("{:?}", report.enrichment),
+                            // Zone-unit derivation counts (Phase 4.5); null when derivation did not run
+                            // (no cass/inca source in the group).
+                            "zone_units_decisions_derived": report
+                                .zone_units
+                                .as_ref()
+                                .map(|z| z.decisions_derived),
+                            "zone_units_written": report
+                                .zone_units
+                                .as_ref()
+                                .map(|z| z.zone_units_written),
                             "fetch_cursors": report.fetch_cursors.len(),
                             "ingest_journals": report.ingest_journals.len(),
                         }),
@@ -451,6 +461,16 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                             "published_package": report.built_incremental,
                             "cursor_seeded": report.cursor_seeded,
                             "enrichment": format!("{:?}", report.enrichment),
+                            // Zone-unit derivation counts; null on a `--from-db` snapshot-only rebaseline
+                            // (which publishes the DB as-is and never derives) or a no-cass/inca group.
+                            "zone_units_decisions_derived": report
+                                .zone_units
+                                .as_ref()
+                                .map(|z| z.decisions_derived),
+                            "zone_units_written": report
+                                .zone_units
+                                .as_ref()
+                                .map(|z| z.zone_units_written),
                         }),
                     })
                 }

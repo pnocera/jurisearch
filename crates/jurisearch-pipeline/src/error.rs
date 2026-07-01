@@ -149,3 +149,7 @@ typed_error!(
     /// Failure of [`crate::embed_documents`] (embedding endpoint / DB / fingerprint error).
     EmbedError
 );
+typed_error!(
+    /// Failure of [`crate::build_zone_units`] (zone-unit derivation: storage / JSON parse error).
+    BuildZoneUnitsError
+);

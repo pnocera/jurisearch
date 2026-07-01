@@ -1,7 +1,8 @@
 //! Embedding + zone-unit pipeline — thin CLI consumers over `jurisearch-pipeline` (work/10 M1-C):
-//! `enrich-zones` (S5), `embed-chunks` / `embed-zone-units` (S6). The zone-unit DERIVATION
-//! (`build-zone-units`) stays here — it is a producer maintenance step, not a named library seam — and
-//! runs directly against the managed index via the storage helpers.
+//! `enrich-zones` (S5), `build-zone-units`, `embed-chunks` / `embed-zone-units` (S6). The zone-unit
+//! DERIVATION now lives in `jurisearch-pipeline` (so the producer `update` cycle can run it in-process);
+//! `build_zone_units_payload` opens the managed index and delegates to
+//! [`jurisearch_pipeline::build_zone_units`], preserving the historical CLI response JSON shape.
 
 use crate::*;
 
@@ -44,47 +45,9 @@ pub(crate) fn enrich_zones_payload(
     Ok(with_index_dir(outcome.body, index_dir.as_path()))
 }
 
-/// Derive a decision's `zone_units` rows from its cached `zones_json` object (motivations/moyens/
-/// dispositif fragment text). One row per non-empty fragment with a contiguous per-zone `fragment_index`.
-/// Borrows the fragment text from `zones`, so the returned rows must be used before `zones` is dropped.
-pub(crate) fn derive_zone_unit_rows<'a>(
-    document_id: &'a str,
-    source: &'a str,
-    text_hash: &'a str,
-    zones: &'a Value,
-) -> Vec<ZoneUnitRow<'a>> {
-    let mut rows = Vec::new();
-    for zone in ["motivations", "moyens", "dispositif"] {
-        let Some(fragments) = zones[zone].as_array() else {
-            continue;
-        };
-        let mut fragment_index = 0i32;
-        for fragment in fragments {
-            let Some(text) = fragment["text"].as_str() else {
-                continue;
-            };
-            if text.trim().is_empty() {
-                continue;
-            }
-            rows.push(ZoneUnitRow {
-                document_id,
-                zone,
-                fragment_index,
-                body: text,
-                search_body: text,
-                source,
-                text_hash,
-                builder_version: ZONE_UNIT_BUILDER_VERSION,
-            });
-            fragment_index += 1;
-        }
-    }
-    rows
-}
-
 /// `ingest build-zone-units`: derive `zone_units` from the cached official zones in `decision_zones`.
-/// Pages the derivable set (fresh `ok` Cassation rows with stale/absent units), deriving each decision's
-/// units in one idempotent `replace_zone_units_for_document` transaction.
+/// Opens the managed index and delegates to [`jurisearch_pipeline::build_zone_units`] (the shared
+/// derivation the producer also runs in-process), preserving the historical CLI response JSON shape.
 pub(crate) fn build_zone_units_payload(
     index_dir: Option<&Path>,
     limit: Option<u32>,
@@ -92,77 +55,20 @@ pub(crate) fn build_zone_units_payload(
 ) -> Result<Value, ErrorObject> {
     let index_dir = require_existing_index_dir(index_dir)?;
     let postgres = open_index(index_dir.as_path())?;
-    let run_id = crate::ingest::producer_run_id("build-zone-units");
-    let outbox = jurisearch_storage::outbox::OutboxContext::new(
-        &run_id,
-        jurisearch_storage::migrations::CURRENT_SCHEMA_VERSION,
-    );
-
-    let mut decisions: u64 = 0;
-    let mut units_written: u64 = 0;
-    let mut cursor: Option<String> = None;
-    loop {
-        let page_limit = match limit {
-            Some(limit) => {
-                let done = u32::try_from(decisions).unwrap_or(u32::MAX);
-                if done >= limit {
-                    break;
-                }
-                (limit - done).min(BUILD_ZONE_UNITS_PAGE_SIZE)
-            }
-            None => BUILD_ZONE_UNITS_PAGE_SIZE,
-        };
-        let page_json = load_derivable_decision_zones_json(
-            &postgres,
-            ZONE_UNIT_BUILDER_VERSION,
-            rebuild,
-            cursor.as_deref(),
-            page_limit,
-        )
-        .map_err(storage_error_object)?;
-        let page: Value = serde_json::from_str(&page_json)
-            .map_err(|error| dependency_unavailable(error.to_string()))?;
-        let candidates = page["candidates"].as_array().cloned().unwrap_or_default();
-        if candidates.is_empty() {
-            break;
-        }
-        for candidate in &candidates {
-            let document_id = candidate["document_id"].as_str().unwrap_or_default();
-            if document_id.is_empty() {
-                continue;
-            }
-            let source = candidate["source"].as_str().unwrap_or_default();
-            let text_hash = candidate["text_hash"].as_str().unwrap_or_default();
-            let rows = derive_zone_unit_rows(document_id, source, text_hash, &candidate["zones"]);
-            replace_zone_units_for_document(&postgres, document_id, &rows, Some(&outbox))
-                .map_err(storage_error_object)?;
-            decisions += 1;
-            units_written += rows.len() as u64;
-            if let Some(limit) = limit
-                && decisions >= u64::from(limit)
-            {
-                break;
-            }
-        }
-        cursor = page["next_cursor"].as_str().map(str::to_owned);
-        if cursor.is_none() {
-            break;
-        }
-    }
-
-    let coverage: Value = serde_json::from_str(
-        &zone_retrieval_coverage_json(&postgres).map_err(storage_error_object)?,
+    let outcome = jurisearch_pipeline::build_zone_units(
+        &postgres,
+        jurisearch_pipeline::BuildZoneUnitsRequest { limit, rebuild },
     )
-    .map_err(|error| dependency_unavailable(error.to_string()))?;
+    .map_err(jurisearch_pipeline::BuildZoneUnitsError::into_error_object)?;
     Ok(json!({
         "schema_version": SCHEMA_VERSION,
         "command": "ingest build-zone-units",
         "index_dir": index_dir.display().to_string(),
-        "builder_version": ZONE_UNIT_BUILDER_VERSION,
+        "builder_version": jurisearch_pipeline::ZONE_UNIT_BUILDER_VERSION,
         "rebuild": rebuild,
-        "decisions_derived": decisions,
-        "zone_units_written": units_written,
-        "coverage": coverage,
+        "decisions_derived": outcome.decisions_derived,
+        "zone_units_written": outcome.zone_units_written,
+        "coverage": outcome.coverage,
     }))
 }
 

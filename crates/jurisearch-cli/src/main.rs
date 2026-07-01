@@ -56,10 +56,7 @@ use jurisearch_storage::{
     },
     runtime::{ManagedPostgres, PgConfig, PostgresRuntimeProfile, StorageError},
     zone_retrieval::{ZoneCandidateQuery, zone_candidates_json},
-    zone_units::{
-        ZoneUnitRow, load_derivable_decision_zones_json, replace_zone_units_for_document,
-        zone_resolver_reachable_json, zone_retrieval_coverage_json,
-    },
+    zone_units::{zone_resolver_reachable_json, zone_retrieval_coverage_json},
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -119,10 +116,6 @@ pub(crate) const ENRICH_ZONES_DEFAULT_CONCURRENCY: usize = 6;
 const COLLECT_CITATIONS_PAGE_SIZE: u32 = 500;
 /// Page size for resolving deduped legislation citations against Legifrance (sequential, network).
 const ENRICH_CITATIONS_PAGE_SIZE: u32 = 100;
-/// Derivation-logic version stamped on `zone_units`; bump to force a full re-derive on a logic change.
-const ZONE_UNIT_BUILDER_VERSION: &str = "zone-units:v1";
-/// Candidate page size for the zone-unit derivation keyset scan.
-const BUILD_ZONE_UNITS_PAGE_SIZE: u32 = 500;
 const PHASE1_EXTERNAL_BENCHMARK_ENV: &str = "JURISEARCH_PHASE1_EXTERNAL_BENCHMARK";
 const PHASE1_EXTERNAL_MIN_BSARD_DOCUMENTS: u64 = 22_000;
 const PHASE1_EXTERNAL_MIN_BSARD_QUESTIONS: u64 = 200;

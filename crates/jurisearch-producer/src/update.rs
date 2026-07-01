@@ -22,8 +22,8 @@ use jurisearch_package_build::{
 };
 use jurisearch_pipeline::embedding::EmbeddingPoolEndpoint;
 use jurisearch_pipeline::{
-    ArchiveSyncFilter, EmbedRequest, EmbedTarget, EnrichRequest, IngestArchivesRequest,
-    embed_documents, enrich_zones, ingest_archives,
+    ArchiveSyncFilter, BuildZoneUnitsOutcome, EmbedRequest, EmbedTarget, EnrichRequest,
+    IngestArchivesRequest, embed_documents, enrich_zones, ingest_archives,
 };
 use jurisearch_storage::backend::{DbClientSource, WriterHandle};
 use jurisearch_storage::ingest_accounting::{
@@ -137,6 +137,10 @@ pub struct UpdateReport {
     pub fetch_cursors: Vec<FetchCursorCoordinate>,
     pub ingest_journals: Vec<IngestJournalCoordinate>,
     pub enrichment: EnrichmentMode,
+    /// The zone-unit derivation outcome for this cycle (Phase 4.5: derive `zone_units` from the freshly
+    /// enriched `decision_zones`), or `None` when derivation did not run (snapshot-only / `--from-db`, a
+    /// dry run, or a group with no cass/inca source). See [`derive_zone_units_if_applicable`].
+    pub zone_units: Option<BuildZoneUnitsOutcome>,
     /// The package id built this cycle, or `None` if the outbox window was empty (a no-op publish).
     pub built_incremental: Option<String>,
     pub package_high_water_mark: Option<PackageHighWaterMark>,
@@ -274,6 +278,7 @@ fn run_update_inner(
             fetch_cursors,
             ingest_journals: Vec::new(),
             enrichment: EnrichmentMode::Disabled,
+            zone_units: None,
             built_incremental: None,
             package_high_water_mark: None,
             rebaselined: options.force_rebaseline,
@@ -389,6 +394,14 @@ fn run_update_inner(
     checkpoint.phase = RunPhase::Enriched;
     checkpoint.save(state_dir)?;
 
+    // --- Phase 4.5: derive `zone_units` from the freshly enriched `decision_zones` (motivations/moyens/
+    //     dispositif fragments), BEFORE embedding so Phase 5 embeds the derived units and Phase 6 publishes
+    //     them in the same window. Runs iff the group has a Judilibre source (cass/inca) and the run is not
+    //     snapshot-only. NOT gated on `--skip-enrich`: derivation is deterministic and must reconcile
+    //     already-cached zones even when Judilibre is skipped. Keeps `RunPhase::Enriched` (idempotent, no
+    //     new checkpoint phase). ---
+    let zone_units = derive_zone_units_if_applicable(&db, sources, options.snapshot_only)?;
+
     // --- Phase 5: embed pending documents + zone units (document embedding over public text). SKIPPED
     //     for a snapshot-only run — the DB is published AS-IS, so the media coverage preflight (below,
     //     in `run_rebaseline_cycle`) is what guarantees the snapshot is fully embedded. ---
@@ -454,6 +467,7 @@ fn run_update_inner(
             fetch_cursors,
             ingest_journals,
             enrichment: report.enrichment,
+            zone_units,
             built_incremental: Some(report.package_id),
             package_high_water_mark: Some(hwm),
             rebaselined: true,
@@ -486,6 +500,7 @@ fn run_update_inner(
         fetch_cursors,
         ingest_journals,
         enrichment: cycle.enrichment,
+        zone_units,
         built_incremental: cycle.built_incremental,
         package_high_water_mark: Some(hwm),
         rebaselined: false,
@@ -725,6 +740,36 @@ fn enrich_group(
             zones_enriched: total_enriched,
         })
     }
+}
+
+/// Derive `zone_units` from the freshly enriched `decision_zones` (Phase 4.5), between enrichment and
+/// embedding. Runs iff the run is NOT snapshot-only AND the group contains a Judilibre source
+/// (`cass`/`inca`) — the only sources that can carry official zones, matching the derivable selector's
+/// `source IN ('cass','inca')` scope so legislation-only cycles skip a pointless scan.
+///
+/// Deliberately NOT gated on `--skip-enrich`: `--skip-enrich` means "do not call Judilibre", not "skip
+/// deterministic derivation". A prior interrupted or operator-run enrichment can leave `decision_zones`
+/// rows with absent/stale `zone_units`; derivation is idempotent and reconciles them. Because every `ok`
+/// row yields >= 1 unit, a derived decision drops out of the derivable set (no repeated outbox churn).
+fn derive_zone_units_if_applicable(
+    db: &impl DbClientSource,
+    sources: &[ArchiveSource],
+    snapshot_only: bool,
+) -> Result<Option<BuildZoneUnitsOutcome>, ProducerError> {
+    let has_judilibre_source = sources
+        .iter()
+        .any(|s| matches!(s, ArchiveSource::Cass | ArchiveSource::Inca));
+    if snapshot_only || !has_judilibre_source {
+        return Ok(None);
+    }
+    let outcome = jurisearch_pipeline::build_zone_units(
+        db,
+        jurisearch_pipeline::BuildZoneUnitsRequest {
+            limit: None,
+            rebuild: false,
+        },
+    )?;
+    Ok(Some(outcome))
 }
 
 /// Embed the pending set for a target. A "no rows pending" outcome is a NO-OP (an empty run is a

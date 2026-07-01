@@ -33,6 +33,8 @@ pub enum ProducerError {
     Ingest(#[from] jurisearch_pipeline::IngestError),
     #[error("enrichment failed: {0}")]
     Enrich(#[from] jurisearch_pipeline::EnrichError),
+    #[error("zone-unit derivation failed: {0}")]
+    ZoneUnits(#[from] jurisearch_pipeline::BuildZoneUnitsError),
     #[error("embedding failed: {0}")]
     Embed(#[from] jurisearch_pipeline::EmbedError),
     #[error("package build/publish failed: {0}")]
@@ -110,6 +112,7 @@ impl ProducerError {
             | ProducerError::IngestCursorStale { .. }
             | ProducerError::IngestRunNotCompleted { .. } => "ingest-failed",
             ProducerError::Enrich(_) => "enrich-degraded",
+            ProducerError::ZoneUnits(_) => "zone-units-failed",
             ProducerError::Embed(_) => "embed-failed",
             ProducerError::Build(_) => "publish-failed",
             ProducerError::Unprovisioned(_) => "producer-db-unprovisioned",

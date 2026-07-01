@@ -73,9 +73,10 @@ pub(crate) use jurisearch_storage::projection::{
 };
 pub(crate) use jurisearch_storage::runtime::{ManagedPostgres, StorageError};
 pub(crate) use jurisearch_storage::zone_units::{
-    EnrichZoneOrder, ZoneUnitEmbeddingInput, ZoneUnitEmbeddingInsert,
+    EnrichZoneOrder, ZoneUnitEmbeddingInput, ZoneUnitEmbeddingInsert, ZoneUnitRow,
     enrich_zone_candidates_json_with_client, finalize_zone_dense_rebuild_with_client,
-    insert_zone_unit_embeddings_with_client, load_zone_unit_embedding_inputs_with_client,
+    insert_zone_unit_embeddings_with_client, load_derivable_decision_zones_json_with_client,
+    load_zone_unit_embedding_inputs_with_client, replace_zone_units_for_document_with_client,
     zone_retrieval_coverage_with_client,
 };
 pub(crate) use serde_json::{Value, json};
@@ -83,6 +84,8 @@ pub(crate) use url::Url;
 
 mod error;
 pub(crate) use crate::error::*;
+
+pub mod build_zone_units;
 
 pub mod embedding;
 pub(crate) use crate::embedding::*;
@@ -98,9 +101,13 @@ pub(crate) use crate::ingest::*;
 
 // ---- Public API --------------------------------------------------------------------------------
 
+pub use crate::build_zone_units::{
+    BUILD_ZONE_UNITS_PAGE_SIZE, BuildZoneUnitsOutcome, BuildZoneUnitsRequest,
+    ZONE_UNIT_BUILDER_VERSION, build_zone_units, derive_zone_unit_rows,
+};
 pub use crate::embed::{EmbedReport, EmbedRequest, EmbedTarget, embed_documents};
 pub use crate::enrich::{EnrichOutcome, EnrichRequest, EnrichmentMode, enrich_zones};
-pub use crate::error::{EmbedError, EnrichError, IngestError};
+pub use crate::error::{BuildZoneUnitsError, EmbedError, EnrichError, IngestError};
 pub use crate::ingest::{ArchiveSyncFilter, IngestArchivesRequest, IngestReport, ingest_archives};
 
 // ---- Producer-pipeline constants (extracted verbatim from `jurisearch-cli`) --------------------
