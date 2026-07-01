@@ -570,6 +570,7 @@ fn enrich_candidates_reenrich_fresh_ok_rows_with_null_text_hash() -> Result<(), 
         "cass",
         None,
         None,
+        None,
         100,
         EnrichZoneOrder::Oldest,
     )?)
@@ -633,6 +634,7 @@ fn expired_ok_rows_are_refresh_candidates_not_derivable() -> Result<(), StorageE
         "cass",
         None,
         None,
+        None,
         100,
         EnrichZoneOrder::Oldest,
     )?)
@@ -676,6 +678,7 @@ fn enrich_candidate_order_recent_walks_newest_first() -> Result<(), StorageError
         "cass",
         None,
         None,
+        None,
         1,
         EnrichZoneOrder::Recent,
     )?)
@@ -687,6 +690,7 @@ fn enrich_candidate_order_recent_walks_newest_first() -> Result<(), StorageError
         &postgres,
         "cass",
         Some("cass:CCC"),
+        None,
         None,
         1,
         EnrichZoneOrder::Recent,
@@ -700,12 +704,97 @@ fn enrich_candidate_order_recent_walks_newest_first() -> Result<(), StorageError
         "cass",
         None,
         None,
+        None,
         1,
         EnrichZoneOrder::Oldest,
     )?)
     .expect("candidates JSON");
     assert_eq!(oldest["candidates"][0]["document_id"], "cass:AAA");
     assert_eq!(oldest["next_cursor"], "cass:AAA");
+    Ok(())
+}
+
+/// Seed a bare cass decision (parser-valid pourvoi, NO `decision_zones` row -> a status-NULL enrich
+/// candidate) with an explicit `valid_from` literal (`'YYYY-MM-DD'` or `NULL`), for the cutoff tests.
+fn seed_bare_decision_dated(
+    postgres: &ManagedPostgres,
+    document_id: &str,
+    pourvoi: &str,
+    valid_from_literal: &str,
+) -> Result<(), StorageError> {
+    postgres.execute_sql(&format!(
+        "INSERT INTO documents \
+           (document_id, source, kind, source_uid, citation, title, body, \
+            valid_from, source_payload_hash, canonical_json) \
+         VALUES \
+           ('{document_id}', 'cass', 'decision', '{document_id}', 'Cass. civ. {pourvoi}', \
+            'Arret', 'corps de la decision', {valid_from_literal}, 'sha256:{document_id}', \
+            '{{\"case_numbers\":[\"{pourvoi}\"]}}');",
+    ))?;
+    Ok(())
+}
+
+#[test]
+fn enrich_candidates_respect_min_decision_date_cutoff() -> Result<(), StorageError> {
+    // Decision-date cutoff: with a cutoff set, only decisions dated on/after it are candidates, and a
+    // NULL valid_from is EXCLUDED. With no cutoff (None), the historical behavior is unchanged (all in).
+    let Some(pg_config) = discover_pg_config("zone enrich cutoff")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-zone-cutoff.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // Three status-NULL cass candidates: pre-cutoff, exactly-cutoff, and NULL-dated.
+    seed_bare_decision_dated(&postgres, "cass:OLD", "11-11111", "'2015-12-31'")?;
+    seed_bare_decision_dated(&postgres, "cass:NEW", "22-22222", "'2016-01-01'")?;
+    seed_bare_decision_dated(&postgres, "cass:NODATE", "33-33333", "NULL")?;
+
+    let ids_for = |min_decision_date: Option<&str>| -> Result<Vec<String>, StorageError> {
+        let page: serde_json::Value = serde_json::from_str(&enrich_zone_candidates_json(
+            &postgres,
+            "cass",
+            None,
+            None,
+            min_decision_date,
+            100,
+            EnrichZoneOrder::Oldest,
+        )?)
+        .expect("candidates JSON");
+        Ok(page["candidates"]
+            .as_array()
+            .expect("candidates")
+            .iter()
+            .map(|c| c["document_id"].as_str().expect("id").to_owned())
+            .collect())
+    };
+
+    // Cutoff active: pre-cutoff and NULL-dated excluded; cutoff-or-newer included.
+    let cutoff = ids_for(Some("2016-01-01"))?;
+    assert!(
+        cutoff.contains(&"cass:NEW".to_owned()),
+        "cutoff-or-newer status-null decision must be a candidate: {cutoff:?}"
+    );
+    assert!(
+        !cutoff.contains(&"cass:OLD".to_owned()),
+        "pre-cutoff status-null decision must be excluded: {cutoff:?}"
+    );
+    assert!(
+        !cutoff.contains(&"cass:NODATE".to_owned()),
+        "NULL valid_from must be excluded when a cutoff is set: {cutoff:?}"
+    );
+
+    // No cutoff (None): historical behavior — all three are candidates (including the NULL-dated one).
+    let all = ids_for(None)?;
+    for id in ["cass:OLD", "cass:NEW", "cass:NODATE"] {
+        assert!(
+            all.contains(&id.to_owned()),
+            "no-cutoff (None) behavior must be unchanged; missing {id}: {all:?}"
+        );
+    }
+
     Ok(())
 }
 

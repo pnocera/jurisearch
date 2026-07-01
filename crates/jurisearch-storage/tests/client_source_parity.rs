@@ -250,13 +250,21 @@ fn with_client_read_helpers_match_managed_postgres_shims_on_seeded_data() -> Res
     let mut client = postgres.client()?;
 
     // --- enrich_zone_candidates_json: default, then the cursor + `since` + Recent-order branch ---------
-    let enrich_default =
-        enrich_zone_candidates_json(&postgres, "cass", None, None, 25, EnrichZoneOrder::Oldest)?;
+    let enrich_default = enrich_zone_candidates_json(
+        &postgres,
+        "cass",
+        None,
+        None,
+        None,
+        25,
+        EnrichZoneOrder::Oldest,
+    )?;
     assert_eq!(
         enrich_default,
         enrich_zone_candidates_json_with_client(
             &mut client,
             "cass",
+            None,
             None,
             None,
             25,
@@ -274,6 +282,7 @@ fn with_client_read_helpers_match_managed_postgres_shims_on_seeded_data() -> Res
             "cass",
             Some("cass:JURITEXT0099"),
             Some("2999-01-01T00:00:00Z"),
+            None,
             10,
             EnrichZoneOrder::Recent
         )?,
@@ -282,6 +291,7 @@ fn with_client_read_helpers_match_managed_postgres_shims_on_seeded_data() -> Res
             "cass",
             Some("cass:JURITEXT0099"),
             Some("2999-01-01T00:00:00Z"),
+            None,
             10,
             EnrichZoneOrder::Recent
         )?,
@@ -429,10 +439,19 @@ fn with_client_read_helpers_match_managed_postgres_shims_on_empty_db() -> Result
 
     let mut client = postgres.client()?;
     assert_eq!(
-        enrich_zone_candidates_json(&postgres, "cass", None, None, 25, EnrichZoneOrder::Oldest)?,
+        enrich_zone_candidates_json(
+            &postgres,
+            "cass",
+            None,
+            None,
+            None,
+            25,
+            EnrichZoneOrder::Oldest
+        )?,
         enrich_zone_candidates_json_with_client(
             &mut client,
             "cass",
+            None,
             None,
             None,
             25,
@@ -446,6 +465,7 @@ fn with_client_read_helpers_match_managed_postgres_shims_on_empty_db() -> Result
             "inca",
             Some("cass:JURITEXT0009"),
             Some("2020-01-01T00:00:00Z"),
+            None,
             10,
             EnrichZoneOrder::Recent
         )?,
@@ -454,6 +474,7 @@ fn with_client_read_helpers_match_managed_postgres_shims_on_empty_db() -> Result
             "inca",
             Some("cass:JURITEXT0009"),
             Some("2020-01-01T00:00:00Z"),
+            None,
             10,
             EnrichZoneOrder::Recent
         )?,

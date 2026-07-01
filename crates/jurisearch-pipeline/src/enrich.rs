@@ -25,6 +25,9 @@ pub struct EnrichRequest<'a> {
     pub source: &'a str,
     pub limit: Option<u32>,
     pub since: Option<&'a str>,
+    /// Optional decision-date cutoff (`YYYY-MM-DD`): only attempt decisions whose `valid_from`
+    /// (= decision_date) is on/after this date. `None` = attempt all (historical behavior).
+    pub min_decision_date: Option<&'a str>,
     pub concurrency: usize,
     pub order: EnrichZoneOrder,
 }
@@ -82,6 +85,7 @@ fn enrich_zones_inner(
         source,
         limit,
         since,
+        min_decision_date,
         concurrency,
         order,
     } = req;
@@ -98,6 +102,7 @@ fn enrich_zones_inner(
             "command": "ingest enrich-zones",
             "source": source,
             "since": since,
+            "min_decision_date": min_decision_date,
             "concurrency": concurrency,
             "order": order_label(order),
             "enrichment_mode": "skipped_no_credentials",
@@ -147,6 +152,7 @@ fn enrich_zones_inner(
             source,
             cursor.as_deref(),
             since,
+            min_decision_date,
             page_limit,
             order,
         )
@@ -190,6 +196,7 @@ fn enrich_zones_inner(
         "command": "ingest enrich-zones",
         "source": source,
         "since": since,
+        "min_decision_date": min_decision_date,
         "concurrency": concurrency,
         "order": order_label(order),
         "considered": considered,

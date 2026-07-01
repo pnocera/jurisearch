@@ -14,6 +14,7 @@ pub(crate) fn enrich_zones_payload(
     source: &str,
     limit: Option<u32>,
     since: Option<&str>,
+    min_decision_date: Option<&str>,
     concurrency: usize,
     order: CliEnrichZoneOrder,
 ) -> Result<Value, ErrorObject> {
@@ -37,6 +38,7 @@ pub(crate) fn enrich_zones_payload(
             source,
             limit,
             since,
+            min_decision_date,
             concurrency,
             order: order.into(),
         },

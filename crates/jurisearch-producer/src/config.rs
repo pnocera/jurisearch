@@ -257,6 +257,55 @@ fn default_max_retained() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct EnrichmentConfig {
     pub mode: EnrichmentModeConfig,
+    /// Decision-date cutoff (`YYYY-MM-DD`) for Judilibre zone enrichment: only decisions dated on/after
+    /// this date are enriched. Official zones exist only for recent (~2016+) decisions, so older ones
+    /// have no zone coverage and enriching them only burns API quota. Omitting the key uses the default
+    /// `2016-01-01`. TOML has no `null` literal, so the cutoff is always applied; to enrich older
+    /// decisions set an earlier date (e.g. `1900-01-01`) rather than disabling it.
+    #[serde(default = "default_judilibre_min_decision_date")]
+    pub min_decision_date: Option<String>,
+}
+
+/// Producer default Judilibre enrichment cutoff: attempt only decisions dated `2016-01-01` or later.
+fn default_judilibre_min_decision_date() -> Option<String> {
+    Some("2016-01-01".to_owned())
+}
+
+/// True iff `value` is exactly an ISO calendar date `YYYY-MM-DD` with a real month/day (so a malformed
+/// or nonexistent date like `2016-13-99` or `2016/01/01` is rejected here, not by a Postgres cast).
+fn is_iso_calendar_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    let (Some(year), Some(month), Some(day)) = (
+        value.get(0..4).and_then(|s| s.parse::<u32>().ok()),
+        value.get(5..7).and_then(|s| s.parse::<u32>().ok()),
+        value.get(8..10).and_then(|s| s.parse::<u32>().ok()),
+    ) else {
+        return false;
+    };
+    // `parse::<u32>` accepts a leading `+`/whitespace on some inputs; the fixed-width slices above are
+    // digits-only by construction (any non-digit fails the earlier length/separator check paths only for
+    // separators, so re-verify each field is pure ASCII digits).
+    if !value[0..4].bytes().all(|b| b.is_ascii_digit())
+        || !value[5..7].bytes().all(|b| b.is_ascii_digit())
+        || !value[8..10].bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    if year < 1 || !(1..=12).contains(&month) || day < 1 {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    day <= max_day
 }
 
 /// `auto` runs when PISTE creds are present (else honestly `SkippedNoCredentials`); `disabled` is off.
@@ -371,6 +420,16 @@ impl ProducerConfig {
             return Err(ProducerError::ConfigInvalid(
                 "[embedding].dimension must be > 0".to_owned(),
             ));
+        }
+        // Operator config must be validated up front — do NOT defer to a runtime PostgreSQL `::date`
+        // cast error mid-enrichment. Require an exact ISO calendar date (`YYYY-MM-DD`).
+        if let Some(cutoff) = self.enrichment.min_decision_date.as_deref() {
+            if !is_iso_calendar_date(cutoff) {
+                return Err(ProducerError::ConfigInvalid(format!(
+                    "[enrichment].min_decision_date = `{cutoff}` must be an ISO calendar date \
+                     (YYYY-MM-DD)"
+                )));
+            }
         }
         // Every path RENDERED INTO a systemd unit (and the producer data/state paths referenced by
         // `ExecStart`/`ReadWritePaths`) MUST be ABSOLUTE: systemd does not expand `$HOME`/env in unit
@@ -655,6 +714,12 @@ max_retained_incrementals = 200
 #   JURISEARCH_PISTE_ENV, JURISEARCH_PISTE_JUDILIBRE_KEY_ID,
 #   JURISEARCH_PISTE_LEGIFRANCE_CLIENT_ID / _SECRET
 mode = "auto"
+# min_decision_date = cutoff (YYYY-MM-DD): only decisions dated on/after this are enriched. Official
+# Judilibre zones exist only for recent (~2016+) decisions, so older ones have no zone coverage and
+# enriching them only burns API quota. Omit this key to use the default 2016-01-01 cutoff. TOML has no
+# null literal, so the cutoff is always applied; to enrich older decisions set an earlier date (e.g.
+# 1900-01-01) rather than disabling it.
+min_decision_date = "2016-01-01"
 
 [embedding]
 # Producer-side DOCUMENT embedding over PUBLIC legal text; v1 may use a fast external OpenAI-compatible

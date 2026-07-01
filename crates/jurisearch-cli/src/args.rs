@@ -794,6 +794,10 @@ pub(crate) enum IngestSubcommand {
         /// Refresh mode: also re-enrich decisions whose cache was fetched before this ISO timestamp.
         #[arg(long)]
         since: Option<String>,
+        /// Decision-date cutoff (YYYY-MM-DD): only attempt decisions dated on/after this. Official
+        /// Judilibre zones exist only for recent decisions; omit to attempt all (historical behavior).
+        #[arg(long)]
+        min_decision_date: Option<String>,
         /// Conservative bound on concurrent Judilibre requests (stay well under ~20 req/s).
         #[arg(long, default_value_t = ENRICH_ZONES_DEFAULT_CONCURRENCY)]
         concurrency: usize,

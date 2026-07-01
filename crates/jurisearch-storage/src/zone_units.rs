@@ -49,11 +49,20 @@ pub fn enrich_zone_candidates_json(
     source: &str,
     after_cursor: Option<&str>,
     since: Option<&str>,
+    min_decision_date: Option<&str>,
     limit: u32,
     order: EnrichZoneOrder,
 ) -> Result<String, StorageError> {
     let mut client = postgres.client()?;
-    enrich_zone_candidates_json_with_client(&mut client, source, after_cursor, since, limit, order)
+    enrich_zone_candidates_json_with_client(
+        &mut client,
+        source,
+        after_cursor,
+        since,
+        min_decision_date,
+        limit,
+        order,
+    )
 }
 
 /// Client-source variant of [`enrich_zone_candidates_json`] (work/10 M1-B S1). The original shells the
@@ -65,6 +74,7 @@ pub fn enrich_zone_candidates_json_with_client(
     source: &str,
     after_cursor: Option<&str>,
     since: Option<&str>,
+    min_decision_date: Option<&str>,
     limit: u32,
     order: EnrichZoneOrder,
 ) -> Result<String, StorageError> {
@@ -90,6 +100,21 @@ pub fn enrich_zone_candidates_json_with_client(
             )
         })
         .unwrap_or_default();
+    // Decision-date cutoff: official Judilibre zones exist only for recent (~2016+) decisions, so an
+    // enrichment attempt on an older decision just burns API quota for a guaranteed no-zone result.
+    // When a cutoff is set, restrict to decisions with a known `valid_from` (= decision_date) on/after
+    // it; NULL `valid_from` is EXCLUDED (a decision with no date is not a normal enrichable decision).
+    // When `None`, the predicate is absent and the historical behavior is unchanged.
+    let decision_date_predicate = min_decision_date
+        .map(|cutoff| {
+            // Leading newline + indentation is part of the predicate so that when `None` the
+            // formatted SQL is byte-identical to the pre-cutoff selector (no extra blank line).
+            format!(
+                "\n      AND d.valid_from IS NOT NULL AND d.valid_from >= {}::date",
+                sql_string_literal(cutoff)
+            )
+        })
+        .unwrap_or_default();
     let limit = limit.max(1);
     simple_query_text(
         client,
@@ -107,7 +132,7 @@ WITH page AS (
           OR z.expires_at <= now()
           OR (z.status IN ('ok','invalid_offsets') AND z.text_hash IS NULL)
           {since_predicate}
-      )
+      ){decision_date_predicate}
       {cursor_predicate}
     ORDER BY d.document_id {sort_dir}
     LIMIT {limit}

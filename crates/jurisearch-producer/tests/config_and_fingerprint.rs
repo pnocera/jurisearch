@@ -88,6 +88,97 @@ fn provision_config_loads_the_read_password_file_when_configured() {
 }
 
 #[test]
+fn example_config_defaults_the_judilibre_min_decision_date() {
+    // The example sets the cutoff explicitly; it must parse to Some("2016-01-01").
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_example(dir.path());
+    let config = ProducerConfig::load(&path).expect("example loads + validates");
+    assert_eq!(
+        config.enrichment.min_decision_date.as_deref(),
+        Some("2016-01-01")
+    );
+}
+
+#[test]
+fn old_enrichment_with_only_mode_still_parses_and_defaults_the_cutoff() {
+    // Backward-compat: an existing `[enrichment]` block that only sets `mode` (no min_decision_date)
+    // must still parse under `deny_unknown_fields` AND serde-default the cutoff to Some("2016-01-01").
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_example(dir.path());
+    let toml = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("min_decision_date = \"2016-01-01\"", "");
+    std::fs::write(&path, toml).unwrap();
+    let config = ProducerConfig::load(&path).expect("old [enrichment] mode-only still parses");
+    assert_eq!(
+        config.enrichment.min_decision_date.as_deref(),
+        Some("2016-01-01"),
+        "an [enrichment] block without min_decision_date must default to the 2016 cutoff"
+    );
+}
+
+#[test]
+fn an_earlier_min_decision_date_enriches_older_decisions() {
+    // The docs promise that "enrich older decisions" is done by setting an EARLIER cutoff (TOML has no
+    // null, so widening coverage is a date, not a disable). Prove the early-date path is real: an
+    // explicit 1900-01-01 must parse + validate and load to Some("1900-01-01").
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_example(dir.path());
+    let toml = std::fs::read_to_string(&path).unwrap().replace(
+        "min_decision_date = \"2016-01-01\"",
+        "min_decision_date = \"1900-01-01\"",
+    );
+    std::fs::write(&path, toml).unwrap();
+    let config =
+        ProducerConfig::load(&path).expect("an earlier min_decision_date loads + validates");
+    assert_eq!(
+        config.enrichment.min_decision_date.as_deref(),
+        Some("1900-01-01"),
+        "an earlier cutoff is the documented way to enrich older decisions"
+    );
+}
+
+#[test]
+fn malformed_min_decision_date_is_rejected_by_validate() {
+    for bad in [
+        "2016-13-99",
+        "2016/01/01",
+        "2016-1-1",
+        "not-a-date",
+        "2016-02-30", // February never has 30 days
+        "2019-02-29", // 2019 is not a leap year
+        "0000-00-00", // year zero + zero month/day
+        "2016-04-31", // April has only 30 days
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_example(dir.path());
+        let toml = std::fs::read_to_string(&path).unwrap().replace(
+            "min_decision_date = \"2016-01-01\"",
+            &format!("min_decision_date = \"{bad}\""),
+        );
+        std::fs::write(&path, toml).unwrap();
+        let err = ProducerConfig::load(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("min_decision_date"),
+            "malformed min_decision_date `{bad}` must be rejected by validate: {err}"
+        );
+    }
+
+    // Valid leap-day: 2020 IS a leap year, so Feb 29 must be accepted.
+    let good = "2020-02-29";
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_example(dir.path());
+    let toml = std::fs::read_to_string(&path).unwrap().replace(
+        "min_decision_date = \"2016-01-01\"",
+        &format!("min_decision_date = \"{good}\""),
+    );
+    std::fs::write(&path, toml).unwrap();
+    let config =
+        ProducerConfig::load(&path).expect("valid leap-day min_decision_date must be accepted");
+    assert_eq!(config.enrichment.min_decision_date.as_deref(), Some(good));
+}
+
+#[test]
 fn unknown_key_is_a_hard_parse_error() {
     let toml = format!("{PRODUCER_CONFIG_EXAMPLE}\n[unexpected]\nkey = 1\n");
     let err = ProducerConfig::parse_str(&toml, std::path::Path::new("x.toml")).unwrap_err();

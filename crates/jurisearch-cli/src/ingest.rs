@@ -222,6 +222,7 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
             source,
             limit,
             since,
+            min_decision_date,
             concurrency,
             order,
         }) => {
@@ -240,6 +241,7 @@ pub(crate) fn emit_ingest(ingest: IngestCommand, index_dir: Option<&Path>) -> an
                 &source,
                 limit,
                 since.as_deref(),
+                min_decision_date.as_deref(),
                 concurrency,
                 order,
             ) {

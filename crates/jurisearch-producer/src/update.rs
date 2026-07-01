@@ -720,6 +720,7 @@ fn enrich_group(
                 source: source.as_str(),
                 limit: None,
                 since: None,
+                min_decision_date: config.enrichment.min_decision_date.as_deref(),
                 concurrency: config.fetch.max_concurrency.max(1) as usize,
                 order: EnrichZoneOrder::Oldest,
             },
