@@ -81,6 +81,13 @@ pub struct UpdateOptions {
     /// AFTER a successful publish, seeds each source's completed-ingest cursor to "now" so the stale-cursor
     /// guard stops firing and normal delta-only timers resume from the operator-accepted gap anchor.
     pub snapshot_only: bool,
+    /// PRODUCER-ONLY one-shot override for the stale completed-ingest-cursor guard: when set, a cursor
+    /// older than [`STALE_CURSOR_MAX_DAYS`] no longer fails closed with [`ProducerError::IngestCursorStale`]
+    /// but resolves the SAME delta-only walk a fresh cursor would (ingest the already-present, contiguous
+    /// on-disk deltas from the operator-verified anchor). It overrides ONLY the AGE check — a MALFORMED /
+    /// unparseable cursor still fails closed. Set exclusively by the `update` CLI subcommand's
+    /// `--accept-stale-cursor`; every other construction path leaves it `false`.
+    pub accept_stale_cursor: bool,
 }
 
 impl UpdateOptions {
@@ -94,6 +101,7 @@ impl UpdateOptions {
             lock_wait: DEFAULT_LOCK_WAIT,
             force_rebaseline: false,
             snapshot_only: false,
+            accept_stale_cursor: false,
         }
     }
 
@@ -345,7 +353,14 @@ fn run_update_inner(
         let ingest_now_unix = now_unix();
         let mut journals = Vec::new();
         for &source in sources {
-            let journal = ingest_one(config, &db, source, &new_baselines, ingest_now_unix)?;
+            let journal = ingest_one(
+                config,
+                &db,
+                source,
+                &new_baselines,
+                ingest_now_unix,
+                options.accept_stale_cursor,
+            )?;
             journals.push(journal);
         }
         journals
@@ -523,14 +538,19 @@ struct ArchiveModeChoice {
 /// (cold DB / hand-loaded corpus), and failing closed with [`ProducerError::IngestCursorStale`] when the
 /// cursor is too old to trust the local delta chain.
 ///
+/// When `accept_stale_cursor` is set (the operator `--accept-stale-cursor` one-shot override) an
+/// age-stale cursor no longer fails closed — it resolves the SAME delta-only walk a fresh cursor would.
+/// The override bypasses ONLY the age check: an unparseable cursor still fails closed regardless.
+///
 /// # Errors
-/// [`ProducerError::IngestCursorStale`] if a present cursor is older than [`STALE_CURSOR_MAX_DAYS`] (or
-/// is unparseable, which is treated as fail-closed-stale).
+/// [`ProducerError::IngestCursorStale`] if a present cursor is older than [`STALE_CURSOR_MAX_DAYS`]
+/// (unless `accept_stale_cursor` overrides the age check) or is unparseable (always fail-closed-stale).
 fn choose_ingest_mode(
     source: ArchiveSource,
     new_baselines: &[(String, String)],
     cursor: Option<&str>,
     now_unix: u64,
+    accept_stale_cursor: bool,
 ) -> Result<ArchiveModeChoice, ProducerError> {
     let full_scan = new_baselines
         .iter()
@@ -549,10 +569,14 @@ fn choose_ingest_mode(
             since_compact: None,
         }),
         Some(compact) => {
-            // A cursor we cannot age is treated as stale (fail closed) rather than delta-skipped.
+            // A cursor we cannot age is treated as stale (fail closed) rather than delta-skipped. The
+            // `--accept-stale-cursor` override bypasses ONLY the AGE staleness (ingest the operator-
+            // verified, contiguous on-disk deltas from the anchor) — an unparseable cursor still fails
+            // closed regardless of the flag.
             let stale = match unix_from_compact_archive_timestamp(compact) {
                 Some(cursor_unix) => {
                     now_unix.saturating_sub(cursor_unix) > STALE_CURSOR_MAX_DAYS * 86_400
+                        && !accept_stale_cursor
                 }
                 None => true,
             };
@@ -586,6 +610,7 @@ fn ingest_one(
     source: ArchiveSource,
     new_baselines: &[(String, String)],
     now_unix: u64,
+    accept_stale_cursor: bool,
 ) -> Result<IngestJournalCoordinate, ProducerError> {
     let mirror_dir = config.producer.archives_dir.join(source.as_str());
     let quarantine_dir = config.producer.state_dir.join("ingest-quarantine");
@@ -604,7 +629,13 @@ fn ingest_one(
         let mut client = db.client()?;
         latest_completed_ingest_archive_compact_with_client(&mut client, source.as_str())?
     };
-    let mode = choose_ingest_mode(source, new_baselines, cursor.as_deref(), now_unix)?;
+    let mode = choose_ingest_mode(
+        source,
+        new_baselines,
+        cursor.as_deref(),
+        now_unix,
+        accept_stale_cursor,
+    )?;
 
     let req = IngestArchivesRequest {
         source,
@@ -1175,6 +1206,7 @@ mod tests {
             &new_baselines,
             Some("20260615120000"),
             NOW_UNIX,
+            false,
         )
         .expect("full scan");
         assert_eq!(
@@ -1190,7 +1222,7 @@ mod tests {
     fn choose_ingest_mode_full_scans_when_there_is_no_cursor() {
         // Cold DB / hand-loaded corpus with no completed ingest run: fall back to a full walk.
         let choice =
-            choose_ingest_mode(ArchiveSource::Legi, &[], None, NOW_UNIX).expect("full scan");
+            choose_ingest_mode(ArchiveSource::Legi, &[], None, NOW_UNIX, false).expect("full scan");
         assert_eq!(
             choice,
             ArchiveModeChoice {
@@ -1203,8 +1235,14 @@ mod tests {
     #[test]
     fn choose_ingest_mode_delta_only_from_a_fresh_cursor() {
         // No pending baseline + a cursor well inside the retention window: delta-only since the cursor.
-        let choice = choose_ingest_mode(ArchiveSource::Legi, &[], Some("20260615120000"), NOW_UNIX)
-            .expect("delta only");
+        let choice = choose_ingest_mode(
+            ArchiveSource::Legi,
+            &[],
+            Some("20260615120000"),
+            NOW_UNIX,
+            false,
+        )
+        .expect("delta only");
         assert_eq!(
             choice,
             ArchiveModeChoice {
@@ -1217,8 +1255,14 @@ mod tests {
     #[test]
     fn choose_ingest_mode_fails_closed_on_a_stale_cursor() {
         // A cursor older than STALE_CURSOR_MAX_DAYS (here ~89 days) must fail closed, never delta-skip.
-        let error = choose_ingest_mode(ArchiveSource::Legi, &[], Some("20260401120000"), NOW_UNIX)
-            .expect_err("stale cursor");
+        let error = choose_ingest_mode(
+            ArchiveSource::Legi,
+            &[],
+            Some("20260401120000"),
+            NOW_UNIX,
+            false,
+        )
+        .expect_err("stale cursor");
         match error {
             ProducerError::IngestCursorStale {
                 source_token,
@@ -1236,8 +1280,50 @@ mod tests {
     #[test]
     fn choose_ingest_mode_fails_closed_on_an_unparseable_cursor() {
         // A cursor we cannot age (malformed) is treated as stale (fail closed), not delta-skipped.
-        let error = choose_ingest_mode(ArchiveSource::Legi, &[], Some("not-a-compact"), NOW_UNIX)
-            .expect_err("unparseable cursor");
+        let error = choose_ingest_mode(
+            ArchiveSource::Legi,
+            &[],
+            Some("not-a-compact"),
+            NOW_UNIX,
+            false,
+        )
+        .expect_err("unparseable cursor");
+        assert!(matches!(error, ProducerError::IngestCursorStale { .. }));
+    }
+
+    #[test]
+    fn accept_stale_cursor_overrides_only_the_age_check() {
+        // The `--accept-stale-cursor` one-shot override turns the age-staleness HARD error into the SAME
+        // delta-only walk a fresh cursor resolves (ingest the operator-verified, contiguous on-disk deltas
+        // from the anchor). It must NOT bypass the parse/validity check: a MALFORMED cursor still fails
+        // closed even with the override on.
+        let stale = "20260401120000";
+
+        // Age-stale + flag off: still fails closed (unchanged behavior).
+        let error = choose_ingest_mode(ArchiveSource::Legi, &[], Some(stale), NOW_UNIX, false)
+            .expect_err("stale cursor still fails closed when the flag is off");
+        assert!(matches!(error, ProducerError::IngestCursorStale { .. }));
+
+        // Age-stale + flag on: the SAME delta-only choice a fresh cursor would resolve.
+        let choice = choose_ingest_mode(ArchiveSource::Legi, &[], Some(stale), NOW_UNIX, true)
+            .expect("override resolves delta-only from the accepted anchor");
+        assert_eq!(
+            choice,
+            ArchiveModeChoice {
+                incremental: true,
+                since_compact: Some(stale.to_owned()),
+            }
+        );
+
+        // Malformed cursor + flag on: the override bypasses ONLY the age check, so this STILL fails closed.
+        let error = choose_ingest_mode(
+            ArchiveSource::Legi,
+            &[],
+            Some("not-a-compact"),
+            NOW_UNIX,
+            true,
+        )
+        .expect_err("a malformed cursor fails closed even with the override on");
         assert!(matches!(error, ProducerError::IngestCursorStale { .. }));
     }
 
@@ -1252,6 +1338,7 @@ mod tests {
             &new_baselines,
             Some("20260615120000"),
             NOW_UNIX,
+            false,
         )
         .expect("cass full scan");
         assert_eq!(
@@ -1268,6 +1355,7 @@ mod tests {
             &new_baselines,
             Some("20260615120000"),
             NOW_UNIX,
+            false,
         )
         .expect("inca delta only");
         assert_eq!(
@@ -1288,7 +1376,7 @@ mod tests {
     fn ingest_refresh_policy_is_the_negation_of_incremental_for_every_mode() {
         // Full-scan: a pending new baseline for this source.
         let new_baselines = vec![baseline_name("legi", "20260101-000000")];
-        let full = choose_ingest_mode(ArchiveSource::Legi, &new_baselines, None, NOW_UNIX)
+        let full = choose_ingest_mode(ArchiveSource::Legi, &new_baselines, None, NOW_UNIX, false)
             .expect("full scan");
         assert!(
             !full.incremental,
@@ -1296,13 +1384,19 @@ mod tests {
         );
 
         // Full-scan: cold DB / hand-loaded corpus, no cursor.
-        let cold =
-            choose_ingest_mode(ArchiveSource::Legi, &[], None, NOW_UNIX).expect("cold full scan");
+        let cold = choose_ingest_mode(ArchiveSource::Legi, &[], None, NOW_UNIX, false)
+            .expect("cold full scan");
         assert!(!cold.incremental);
 
         // Delta-only: a fresh completed-run cursor, no pending baseline.
-        let delta = choose_ingest_mode(ArchiveSource::Legi, &[], Some("20260615120000"), NOW_UNIX)
-            .expect("delta only");
+        let delta = choose_ingest_mode(
+            ArchiveSource::Legi,
+            &[],
+            Some("20260615120000"),
+            NOW_UNIX,
+            false,
+        )
+        .expect("delta only");
         assert!(
             delta.incremental,
             "delta-only cycle skips: !incremental == false"
@@ -1417,8 +1511,14 @@ mod tests {
         // `IngestCursorStale`. This closes the loop between `compact_from_unix` (what the seed writes) and
         // `choose_ingest_mode` (what the next timer reads).
         let seed_compact = compact_from_unix(NOW_UNIX);
-        let choice = choose_ingest_mode(ArchiveSource::Cass, &[], Some(&seed_compact), NOW_UNIX)
-            .expect("delta-only from the freshly seeded anchor");
+        let choice = choose_ingest_mode(
+            ArchiveSource::Cass,
+            &[],
+            Some(&seed_compact),
+            NOW_UNIX,
+            false,
+        )
+        .expect("delta-only from the freshly seeded anchor");
         assert_eq!(
             choice,
             ArchiveModeChoice {

@@ -96,6 +96,12 @@ enum Command {
         skip_fetch: bool,
         #[arg(long)]
         skip_enrich: bool,
+        /// PRODUCER-ONLY one-shot override for the stale completed-ingest-cursor guard: permit a delta-only
+        /// ingest from an age-stale (but operator-verified) completed-ingest cursor when the contiguous
+        /// on-disk delta archives are already present. Overrides ONLY the >45-day age check — a malformed
+        /// cursor still fails closed.
+        #[arg(long)]
+        accept_stale_cursor: bool,
     },
     /// Report current/stale/broken state as JSON (no logs, no DB connection).
     Status {
@@ -278,12 +284,14 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
             dry_run,
             skip_fetch,
             skip_enrich,
+            accept_stale_cursor,
         } => {
             let cfg = ProducerConfig::load(&config)?;
             let mut options = UpdateOptions::new(group.clone());
             options.dry_run = dry_run;
             options.skip_fetch = skip_fetch;
             options.skip_enrich = skip_enrich;
+            options.accept_stale_cursor = accept_stale_cursor;
             match run_update(&cfg, &options) {
                 Ok(report) => {
                     // Fire the alert hook if this (success) class is a trigger — by default it is NOT, so
@@ -308,6 +316,7 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                             "dry_run": report.dry_run,
                             "exit_class": report.exit_class,
                             "rebaselined": report.rebaselined,
+                            "accepted_stale_cursor": options.accept_stale_cursor,
                             "adopted_baselines": report.adopted_baselines,
                             "built_incremental": report.built_incremental,
                             "enrichment": format!("{:?}", report.enrichment),
