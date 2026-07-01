@@ -694,6 +694,30 @@ fn build_provision_sql(spec: &RoleSpec, dbname: &str, profile: RoleProfile) -> S
                 "ALTER DEFAULT PRIVILEGES FOR ROLE {owner} IN SCHEMA public \
                  GRANT USAGE, SELECT ON SEQUENCES TO {writer};\n"
             ));
+            // PRODUCER-ONLY: grant CREATE on schema `public` to the OWNER. The producer's dense-embedding
+            // finalize runs `DROP INDEX …; CREATE INDEX … ON chunk_embeddings USING ivfflat …` (and other
+            // rebaseline DDL) in `public` as the WRITER, which inherits the owner via the `GRANT {owner} TO
+            // {writer}` membership (step 1). PG15+ maps the `public` ACL's default CREATE to
+            // `pg_database_owner` (= the DB-creating admin, NOT a jurisearch role), so without an EXPLICIT
+            // owner grant the ivfflat rebuild fails `permission denied for schema public`. This is the SITE
+            // profile's deliberate omission — the client applier writes into per-generation schemas and must
+            // NOT be able to create objects in `public` (least privilege). Idempotent + convergence-safe:
+            // the only CREATE-on-public revoke above is `… FROM PUBLIC` (the role group), which never strips
+            // an explicit grant to `{owner}`, so a re-run just re-grants.
+            //
+            // SCOPE — this grants only the SCHEMA-`CREATE` HALF (so the producer/owner can create objects
+            // in `public`). `CREATE INDEX` ALSO requires ownership (or owner-membership) of the TARGET
+            // table, and that half is NOT handled here. `provision_external_db` migrates AS THE ADMIN before
+            // provisioning roles, so the dense-target tables (`public.chunk_embeddings`,
+            // `public.zone_unit_embeddings`) and the other migrated corpus tables are created ADMIN-owned;
+            // step 4 reassigns only `index_manifest`/`schema_migrations`/`package_change_log`/
+            // `package_catalog` to `{owner}` — NOT the dense targets. Therefore EVERY externally-provisioned
+            // producer DB (not just hand-loaded corpora) currently ALSO needs the dense-target / corpus
+            // tables reassigned to `{owner}` before dense finalize's `CREATE INDEX … USING ivfflat …`
+            // succeeds — otherwise it fails "must be owner of table chunk_embeddings". That table-ownership
+            // reassignment is a SEPARATE, still-open provisioning gap (performed manually in prod);
+            // codifying it is deliberately out of scope for THIS patch.
+            sql.push_str(&format!("GRANT CREATE ON SCHEMA public TO {owner};\n"));
         }
     }
 
@@ -860,6 +884,13 @@ mod tests {
             ),
             "site profile must leave NO public default privileges for the writer: {sql}"
         );
+        // The SITE profile must NOT grant CREATE on schema `public` to anyone: the client applier writes
+        // into per-generation schemas and must never be able to create objects in `public` (least
+        // privilege). Only the PRODUCER (build principal) gets it.
+        assert!(
+            !sql.contains("GRANT CREATE ON SCHEMA public"),
+            "site profile must not grant CREATE on schema public: {sql}"
+        );
     }
 
     #[test]
@@ -939,6 +970,15 @@ mod tests {
         assert!(
             !sql.contains("ON ALL TABLES IN SCHEMA public TO \"jurisearch_read\""),
             "read role must never get public DML: {sql}"
+        );
+        // PRODUCER-ONLY: assert the schema-`CREATE` grant is rendered for the producer profile — the
+        // owner (inherited by the writer via owner membership) gets CREATE on schema `public`, clearing
+        // the `permission denied for schema public` half of the dense-finalize DDL. (This is only the
+        // schema half; `CREATE INDEX` also needs ownership of the target table — see the grant's comment
+        // in `build_provision_sql` — so this grant alone does not fully unblock dense finalize.)
+        assert!(
+            sql.contains("GRANT CREATE ON SCHEMA public TO \"jurisearch_owner\";"),
+            "producer profile must grant the owner CREATE on schema public: {sql}"
         );
     }
 
