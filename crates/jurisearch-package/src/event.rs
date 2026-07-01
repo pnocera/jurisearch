@@ -238,6 +238,44 @@ mod tests {
     }
 
     #[test]
+    fn to_writer_is_byte_equivalent_to_to_string_for_a_replace_set() {
+        // The incremental streaming rewrite serialises each replace-set envelope with
+        // `serde_json::to_writer`; prove it is byte-identical to the `serde_json::to_string` the
+        // buffered path used, over a representative `ReplaceSet` (nested `rows` map + arrays).
+        let payload = ReplaceSet {
+            op: ReplaceSetOp::ReplaceSet,
+            table_group: ReplaceSetGroup::ChunksWithEmbeddings,
+            scope: ReplaceSetScope {
+                document_id: "cass:D1".to_owned(),
+                corpus: Some(crate::corpus::Corpus::new("core".to_owned()).unwrap()),
+            },
+            rows: std::collections::BTreeMap::from([
+                (
+                    "chunks".to_owned(),
+                    vec![serde_json::json!({"chunk_id": "cass:D1#0", "body": "premier moyen"})],
+                ),
+                (
+                    "chunk_embeddings".to_owned(),
+                    vec![
+                        serde_json::json!({"chunk_id": "cass:D1#0", "embedding": [0.1, 0.2, 0.3]}),
+                    ],
+                ),
+            ]),
+            row_pks: vec!["cass:D1#0".to_owned()],
+            builder_version: "c1".to_owned(),
+            source_text_hash: None,
+            embedding_fingerprint: "fp".to_owned(),
+            set_digest: "sha256:deadbeef".to_owned(),
+        };
+        let mut to_writer_bytes = Vec::new();
+        serde_json::to_writer(&mut to_writer_bytes, &payload).unwrap();
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            String::from_utf8(to_writer_bytes).unwrap()
+        );
+    }
+
+    #[test]
     fn replace_set_scope_corpus_is_validated() {
         let json = serde_json::json!({
             "op": "replace_set",

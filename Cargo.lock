@@ -1133,6 +1133,7 @@ dependencies = [
  "jurisearch-storage",
  "jurisearch-syncd",
  "postgres",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

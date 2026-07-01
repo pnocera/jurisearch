@@ -96,6 +96,59 @@ pub fn tee_digest<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> std::io:
     Ok(format_sha256(&hasher.finalize()))
 }
 
+/// A [`Write`] adapter that streams bytes to an inner writer while accumulating their SHA-256 digest,
+/// so a payload can be written to disk and hashed in a single pass without ever materialising it in
+/// memory. The returned digest is byte-identical (value and format) to [`digest_bytes`] over the same
+/// byte sequence — both go through the private `format_sha256`.
+///
+/// The hasher is updated ONLY with the bytes the inner writer actually accepted on each call
+/// (`Ok(n)` ⇒ `&buf[..n]`), so a partial or failed write can never desynchronise the digest from the
+/// bytes that reached the writer.
+///
+/// As with [`tee_digest`], the caller is responsible for flushing the inner writer (e.g. a
+/// `BufWriter`) and checking that flush's error before trusting the digest — call
+/// `writer.flush()?` (which delegates to the inner writer) before [`HashingWriter::finalize`].
+pub struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> HashingWriter<W> {
+    /// Wrap `inner`, starting an empty digest.
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+        }
+    }
+
+    /// Consume the writer and return the `sha256:<lowercase-hex>` digest of every byte accepted by the
+    /// inner writer — identical in value and format to [`digest_bytes`] over that same byte sequence.
+    #[must_use]
+    pub fn finalize(self) -> String {
+        format_sha256(&self.hasher.finalize())
+    }
+
+    /// Mutable access to the inner writer (e.g. to inspect or flush a wrapped writer before finalizing).
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.inner
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Write FIRST; only hash the bytes the inner writer actually accepted so a failed/partial write
+        // cannot corrupt the digest.
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Recursively rebuild a [`serde_json::Value`] with object keys sorted, rejecting non-finite floats.
 fn canonicalize(value: &serde_json::Value) -> Result<serde_json::Value, CanonicalError> {
     use serde_json::Value;
@@ -204,6 +257,134 @@ mod tests {
         let streamed = tee_digest(&mut reader, &mut sink).unwrap();
         assert_eq!(streamed, digest_bytes(b""));
         assert!(sink.is_empty());
+    }
+
+    #[test]
+    fn hashing_writer_matches_digest_bytes_and_writes_verbatim() {
+        // A payload larger than 1 MiB, fed in SEVERAL write calls (odd chunk size crosses no internal
+        // buffer boundary the hasher cares about, but exercises multiple `write` invocations).
+        let payload: Vec<u8> = (0..(2 * (1 << 20) + 7777))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let mut writer = HashingWriter::new(Vec::<u8>::new());
+        for chunk in payload.chunks(97_003) {
+            writer.write_all(chunk).unwrap();
+        }
+        // Capture the inner buffer (verbatim passthrough) before consuming `writer` in `finalize`.
+        let inner_copy = writer.get_mut().clone();
+        let streamed = writer.finalize();
+
+        assert_eq!(streamed, digest_bytes(&payload));
+        assert_eq!(inner_copy, payload);
+        assert!(streamed.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn hashing_writer_empty_matches_digest_bytes() {
+        // A fresh writer with no writes finalizes to the empty-input digest.
+        let writer = HashingWriter::new(Vec::<u8>::new());
+        assert_eq!(writer.finalize(), digest_bytes(b""));
+    }
+
+    /// A fake `Write` that accepts at most `max_per_write` bytes per `write` call (`Ok(n)` with
+    /// `n < buf.len()`), accumulating every accepted byte — exercises the partial-write path.
+    struct ShortWriter {
+        accepted: Vec<u8>,
+        max_per_write: usize,
+    }
+    impl Write for ShortWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.max_per_write);
+            self.accepted.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A fake `Write` that accepts up to `budget` bytes total, then returns `Err` on the next `write`
+    /// — exercises the error-after-prefix path (the failed write must NOT advance the digest).
+    struct ErrorAfterPrefixWriter {
+        accepted: Vec<u8>,
+        budget: usize,
+    }
+    impl Write for ErrorAfterPrefixWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.budget == 0 {
+                return Err(std::io::Error::other("write budget exhausted"));
+            }
+            let n = buf.len().min(self.budget);
+            self.accepted.extend_from_slice(&buf[..n]);
+            self.budget -= n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hashing_writer_hashes_only_accepted_bytes_under_short_writes() {
+        // A short-write inner accepts only a 7-byte prefix per `write`, so `write_all` must loop; the
+        // hasher advances only over accepted bytes, which (with a correct `write_all` caller) is all of
+        // them. Proves the digest tracks accepted bytes, not the slice originally handed to `write`.
+        let payload: Vec<u8> = (0..5000).map(|i| (i % 251) as u8).collect();
+        let mut writer = HashingWriter::new(ShortWriter {
+            accepted: Vec::new(),
+            max_per_write: 7,
+        });
+        for chunk in payload.chunks(1000) {
+            writer.write_all(chunk).unwrap();
+        }
+        let accepted = writer.get_mut().accepted.clone();
+        let streamed = writer.finalize();
+        // `write_all` drove the short writer to accept every byte, in order.
+        assert_eq!(accepted, payload);
+        // The digest equals digest_bytes over EXACTLY the bytes the inner writer accumulated.
+        assert_eq!(streamed, digest_bytes(&accepted));
+        assert_eq!(streamed, digest_bytes(&payload));
+    }
+
+    #[test]
+    fn hashing_writer_digest_excludes_bytes_a_failed_write_rejected() {
+        // The inner writer accepts `accept_n` bytes then errors. The digest must reflect ONLY the
+        // accepted-and-written prefix — a failed write cannot advance the digest past what reached disk.
+        let payload: Vec<u8> = (0..5000).map(|i| (i % 251) as u8).collect();
+        let accept_n = 1234usize;
+        let mut writer = HashingWriter::new(ErrorAfterPrefixWriter {
+            accepted: Vec::new(),
+            budget: accept_n,
+        });
+        let err = writer.write_all(&payload).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        let accepted = writer.get_mut().accepted.clone();
+        assert_eq!(accepted, payload[..accept_n]);
+        let streamed = writer.finalize();
+        // Digest == digest_bytes over the accepted prefix only, NOT over the full payload.
+        assert_eq!(streamed, digest_bytes(&accepted));
+        assert_eq!(streamed, digest_bytes(&payload[..accept_n]));
+        assert_ne!(streamed, digest_bytes(&payload));
+    }
+
+    #[test]
+    fn to_writer_is_byte_equivalent_to_to_string_for_a_value() {
+        // The streaming rewrite serialises each JSONL row with `serde_json::to_writer`; lock in that it
+        // is byte-identical to the `serde_json::to_string` the buffered path used (serde's compact
+        // formatter is the same in both).
+        let value = serde_json::json!({
+            "b": 1,
+            "a": {"y": [1, 2, {"deep": true}], "x": "text with \"quotes\" and /slash"},
+            "arr": [3, 2, 1],
+            "n": 1.5,
+            "nil": serde_json::Value::Null,
+        });
+        let mut to_writer_bytes = Vec::new();
+        serde_json::to_writer(&mut to_writer_bytes, &value).unwrap();
+        assert_eq!(
+            serde_json::to_string(&value).unwrap(),
+            String::from_utf8(to_writer_bytes).unwrap()
+        );
     }
 
     #[test]

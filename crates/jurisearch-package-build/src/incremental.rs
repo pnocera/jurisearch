@@ -12,10 +12,14 @@
 //! document-scoped replace-set group.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use jurisearch_package::artifact;
-use jurisearch_package::canonical::{canonical_digest, digest_bytes};
+use jurisearch_package::canonical::{HashingWriter, canonical_digest, digest_bytes};
 use jurisearch_package::compat::Version;
 use jurisearch_package::corpus::Corpus;
 use jurisearch_package::event::{
@@ -191,6 +195,11 @@ fn build_incremental_inner(
     }
 
     // --- Coalesce scopes into final per-scope actions (widest-op-wins) ---
+    // NOTE (memory bound): these BTreeSets hold only the UNIQUE changed scope KEYS (strings), so the
+    // coalescing memory is O(unique changed scopes) — the row bodies are never held here (they are
+    // (re)fetched and STREAMED one scope at a time in the payload sections below). Replacing this with
+    // a cursor-based, streaming coalescing pass (so even the key set is not fully materialised) is a
+    // deferred follow-up.
     let mut base_keys: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     let mut documents_scoped: BTreeSet<String> = BTreeSet::new();
     let mut chunks_touched: BTreeSet<String> = BTreeSet::new();
@@ -249,11 +258,15 @@ fn build_incremental_inner(
     let mut scope_count = 0usize;
 
     // --- Base-table upserts/deletes ---
+    // Each op is STREAMED one row at a time to a lazily-opened `HashingWriter<BufWriter<File>>`, so peak
+    // memory is bounded by ONE scope's rows (already per-scope-fetched) plus a fixed buffer — never the
+    // whole delta. Ordering (BTreeMap over tables, upsert then delete per table) is load-bearing.
     for (&table, keys) in &base_keys {
         let columns = replicated_table_columns(&mut tx, table)?;
         let pk = primary_key_columns(&mut tx, table)?;
-        let mut upserts: Vec<Value> = Vec::new();
-        let mut deletes: Vec<Value> = Vec::new();
+        let mut upserts =
+            JsonlOpWriter::new(artifact_dir, table, EventKind::Upsert, columns.clone());
+        let mut deletes = JsonlOpWriter::new(artifact_dir, table, EventKind::Delete, pk.clone());
         for key in keys {
             scope_count += 1;
             let rows = read_scope_rows(&mut tx, table, &columns, corpus, key)?;
@@ -261,133 +274,75 @@ fn build_incremental_inner(
                 // A base row that vanished is a delete (except additive decision_legislation_citations,
                 // whose deletes are deferred — emit nothing).
                 if table != "decision_legislation_citations" {
-                    deletes.push(delete_key_object(table, &pk, corpus, key));
+                    let delete = delete_key_object(table, &pk, corpus, key);
+                    deletes.write_row(&delete)?;
                 }
             } else {
-                upserts.extend(rows);
+                for row in &rows {
+                    upserts.write_row(row)?;
+                }
             }
+            // `rows` dropped here — only one scope's bodies are ever resident.
         }
-        write_jsonl_op(
-            artifact_dir,
-            table,
-            EventKind::Upsert,
-            &columns,
-            &upserts,
-            &mut files,
-            &mut per_file_digests,
-            &mut operations,
-        )?;
-        write_jsonl_op(
-            artifact_dir,
-            table,
-            EventKind::Delete,
-            &pk,
-            &deletes,
-            &mut files,
-            &mut per_file_digests,
-            &mut operations,
-        )?;
+        upserts.finish(&mut files, &mut per_file_digests, &mut operations)?;
+        deletes.finish(&mut files, &mut per_file_digests, &mut operations)?;
     }
 
     // --- graph_edges: a documents scope re-upserts the document's current edges (no shrinkage) ---
     if !documents_scoped.is_empty() {
         let columns = replicated_table_columns(&mut tx, "graph_edges")?;
-        let mut edges: Vec<Value> = Vec::new();
+        let mut writer = JsonlOpWriter::new(
+            artifact_dir,
+            "graph_edges",
+            EventKind::Upsert,
+            columns.clone(),
+        );
         for doc in &documents_scoped {
             let select = format!(
                 "SELECT {obj} FROM public.graph_edges t WHERE from_document_id = {key} ORDER BY edge_id;",
                 obj = row_object_select(&columns),
                 key = sql_string_literal(doc),
             );
-            edges.extend(query_json_rows(&mut tx, &select)?);
+            let edges = query_json_rows(&mut tx, &select)?;
+            for edge in &edges {
+                writer.write_row(edge)?;
+            }
         }
-        write_jsonl_op(
-            artifact_dir,
-            "graph_edges",
-            EventKind::Upsert,
-            &columns,
-            &edges,
-            &mut files,
-            &mut per_file_digests,
-            &mut operations,
-        )?;
+        writer.finish(&mut files, &mut per_file_digests, &mut operations)?;
     }
 
     // --- Replace-sets (coalesced, widest-op-wins) ---
-    let mut replace_sets: Vec<ReplaceSet> = Vec::new();
-    for doc in &chunks_wide {
-        // A deleted document's children are cleared by the documents delete cascade — skip its set.
-        if documents_scoped.contains(doc) && !document_exists(&mut tx, corpus, doc)? {
-            continue;
-        }
-        scope_count += 1;
-        replace_sets.push(materialize_replace_set(
-            &mut tx,
-            ReplaceSetGroup::ChunksWithEmbeddings,
-            corpus,
-            doc,
-            params,
-        )?);
-    }
-    for doc in &chunk_emb_only {
-        scope_count += 1;
-        replace_sets.push(materialize_replace_set(
-            &mut tx,
-            ReplaceSetGroup::ChunkEmbeddings,
-            corpus,
-            doc,
-            params,
-        )?);
-    }
-    for doc in &zone_touched {
-        scope_count += 1;
-        replace_sets.push(materialize_replace_set(
-            &mut tx,
-            ReplaceSetGroup::ZoneUnits,
-            corpus,
-            doc,
-            params,
-        )?);
-    }
-    for doc in &decision_zones_touched {
-        scope_count += 1;
-        replace_sets.push(materialize_replace_set(
-            &mut tx,
-            ReplaceSetGroup::DecisionZones,
-            corpus,
-            doc,
-            params,
-        )?);
-    }
-    for group in [
-        ReplaceSetGroup::ChunksWithEmbeddings,
-        ReplaceSetGroup::ChunkEmbeddings,
-        ReplaceSetGroup::ZoneUnits,
-        ReplaceSetGroup::DecisionZones,
+    // FIXED group order (load-bearing for the signature). Each group iterates its OWN sorted set and
+    // materialises ONE `ReplaceSet` at a time, streaming it as a single line then dropping it — never
+    // holding more than one set (or all groups' sets) in memory. `scope_count` increments stay exactly
+    // where they were: per doc processed, and NOT for a ChunksWithEmbeddings doc skipped below.
+    for (group, docs) in [
+        (ReplaceSetGroup::ChunksWithEmbeddings, &chunks_wide),
+        (ReplaceSetGroup::ChunkEmbeddings, &chunk_emb_only),
+        (ReplaceSetGroup::ZoneUnits, &zone_touched),
+        (ReplaceSetGroup::DecisionZones, &decision_zones_touched),
     ] {
-        let group_sets: Vec<&ReplaceSet> = replace_sets
-            .iter()
-            .filter(|rs| rs.table_group == group)
-            .collect();
-        if group_sets.is_empty() {
-            continue;
-        }
-        let lines = group_sets
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        write_jsonl_bytes(
+        let mut writer = JsonlOpWriter::new(
             artifact_dir,
             group.as_str(),
             EventKind::ReplaceSet,
             Vec::new(),
-            group_sets.len() as u64,
-            (lines + "\n").into_bytes(),
-            &mut files,
-            &mut per_file_digests,
-            &mut operations,
-        )?;
+        );
+        for doc in docs {
+            // A deleted document's children are cleared by the documents delete cascade — skip its set
+            // (only the ChunksWithEmbeddings group can contain a documents-scoped, now-deleted doc).
+            if group == ReplaceSetGroup::ChunksWithEmbeddings
+                && documents_scoped.contains(doc)
+                && !document_exists(&mut tx, corpus, doc)?
+            {
+                continue;
+            }
+            scope_count += 1;
+            let set = materialize_replace_set(&mut tx, group, corpus, doc, params)?;
+            writer.write_row(&set)?;
+            // `set` dropped at the end of this iteration — never more than one ReplaceSet resident.
+        }
+        writer.finish(&mut files, &mut per_file_digests, &mut operations)?;
     }
 
     // Postconditions over the producer's current corpus (the convergence proof).
@@ -682,72 +637,212 @@ fn query_json_rows<C: GenericClient>(tx: &mut C, sql: &str) -> Result<Vec<Value>
     Ok(rows.iter().map(|row| row.get::<_, Value>(0)).collect())
 }
 
-/// Write a JSONL file of `rows` for `(table, op)` and record its `PayloadFile` + digest + op count.
-#[allow(clippy::too_many_arguments)]
-fn write_jsonl_op(
-    artifact_dir: &Path,
-    table: &str,
+/// Streams ONE JSONL payload op — the file for a single `(table_or_group, op)` — row by row to disk
+/// while hashing, so peak memory is bounded by one row plus a fixed `BufWriter` buffer rather than the
+/// whole op's rows. It is byte-for-byte equivalent to the previous buffered `rows.map(to_string).join`
+/// path: each row is `serde_json::to_writer` (serde's compact formatter, identical to `to_string`)
+/// followed by a `\n`, giving the exact `l1\n…lN\n` layout the signed manifest is computed over.
+///
+/// LAZY OPEN: the file (and therefore the `PayloadFile`, per-file digest, and `OperationCount`) is
+/// created only on the FIRST row. An op with zero rows produces NO file and NO metadata — matching the
+/// old `write_jsonl_op`'s `if rows.is_empty() { return }`, so no 0-byte artifacts appear.
+struct JsonlOpWriter<'a> {
+    artifact_dir: &'a Path,
+    table_or_group: String,
     op: EventKind,
-    columns: &[String],
-    rows: &[Value],
-    files: &mut Vec<PayloadFile>,
-    per_file_digests: &mut BTreeMap<String, String>,
-    operations: &mut Vec<OperationCount>,
-) -> Result<(), BuildError> {
-    if rows.is_empty() {
-        return Ok(());
-    }
-    let lines = rows
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n");
-    write_jsonl_bytes(
-        artifact_dir,
-        table,
-        op,
-        columns.to_vec(),
-        rows.len() as u64,
-        (lines + "\n").into_bytes(),
-        files,
-        per_file_digests,
-        operations,
-    )
+    /// `PayloadFile.columns` for this op (the table's columns for base/edge ops, empty for replace-set
+    /// groups) — recorded verbatim at finalize time.
+    columns: Vec<String>,
+    /// Set together with `writer` on first row (their `Some`/`None` state is kept in lock-step).
+    file_name: Option<String>,
+    writer: Option<HashingWriter<BufWriter<File>>>,
+    row_count: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_jsonl_bytes(
-    artifact_dir: &Path,
-    table_or_group: &str,
-    op: EventKind,
-    columns: Vec<String>,
-    row_count: u64,
-    bytes: Vec<u8>,
-    files: &mut Vec<PayloadFile>,
-    per_file_digests: &mut BTreeMap<String, String>,
-    operations: &mut Vec<OperationCount>,
-) -> Result<(), BuildError> {
-    let file_name = artifact::incremental_file_name(table_or_group, op);
-    std::fs::write(
-        artifact::payload_file_path(artifact_dir, &file_name),
-        &bytes,
-    )?;
-    let digest = digest_bytes(&bytes);
-    per_file_digests.insert(file_name.clone(), digest.clone());
-    operations.push(OperationCount {
-        table: table_or_group.to_owned(),
-        op,
-        count: row_count,
-    });
-    files.push(PayloadFile {
-        file_name,
-        table: table_or_group.to_owned(),
-        columns,
-        op,
-        format: PayloadFormat::Jsonl,
-        compression: Compression::None,
-        row_count,
-        digest,
-    });
-    Ok(())
+impl<'a> JsonlOpWriter<'a> {
+    fn new(
+        artifact_dir: &'a Path,
+        table_or_group: &str,
+        op: EventKind,
+        columns: Vec<String>,
+    ) -> Self {
+        Self {
+            artifact_dir,
+            table_or_group: table_or_group.to_owned(),
+            op,
+            columns,
+            file_name: None,
+            writer: None,
+            row_count: 0,
+        }
+    }
+
+    /// Open the payload file on first use (idempotent), returning the streaming writer. Uses the same
+    /// `incremental_file_name` / `payload_file_path` naming the buffered path used.
+    fn writer_mut(&mut self) -> Result<&mut HashingWriter<BufWriter<File>>, BuildError> {
+        if self.writer.is_none() {
+            let file_name = artifact::incremental_file_name(&self.table_or_group, self.op);
+            let path = artifact::payload_file_path(self.artifact_dir, &file_name);
+            let file = File::create(&path)?;
+            self.writer = Some(HashingWriter::new(BufWriter::new(file)));
+            self.file_name = Some(file_name);
+        }
+        Ok(self.writer.as_mut().expect("writer just set"))
+    }
+
+    /// Stream one row as a compact JSON line + `\n`, opening the file on the first call and counting it.
+    fn write_row<T: Serialize>(&mut self, row: &T) -> Result<(), BuildError> {
+        let writer = self.writer_mut()?;
+        serde_json::to_writer(&mut *writer, row)?;
+        writer.write_all(b"\n")?;
+        self.row_count += 1;
+        Ok(())
+    }
+
+    /// Finalize: if the op never opened (zero rows), emit NOTHING. Otherwise flush the `BufWriter`
+    /// (surfacing any deferred write error) BEFORE trusting the digest — mirroring baseline.rs — then
+    /// record the `PayloadFile` + per-file digest + `OperationCount` in the same sequence the old
+    /// `write_jsonl_bytes` did (digest insert, op push, file push).
+    fn finish(
+        self,
+        files: &mut Vec<PayloadFile>,
+        per_file_digests: &mut BTreeMap<String, String>,
+        operations: &mut Vec<OperationCount>,
+    ) -> Result<(), BuildError> {
+        let Some(mut writer) = self.writer else {
+            return Ok(());
+        };
+        let file_name = self
+            .file_name
+            .expect("file_name is set whenever writer is set");
+        // Surface any deferred BufWriter error before relying on the digest/file (Drop would swallow it).
+        writer.flush()?;
+        let digest = writer.finalize();
+        per_file_digests.insert(file_name.clone(), digest.clone());
+        operations.push(OperationCount {
+            table: self.table_or_group.clone(),
+            op: self.op,
+            count: self.row_count,
+        });
+        files.push(PayloadFile {
+            file_name,
+            table: self.table_or_group,
+            columns: self.columns,
+            op: self.op,
+            format: PayloadFormat::Jsonl,
+            compression: Compression::None,
+            row_count: self.row_count,
+            digest,
+        });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    use jurisearch_package::canonical::{HashingWriter, digest_bytes};
+    use jurisearch_package::event::{ReplaceSet, ReplaceSetGroup, ReplaceSetOp, ReplaceSetScope};
+
+    /// Prove that streaming each row with the exact two lines `JsonlOpWriter::write_row` runs
+    /// (`serde_json::to_writer` + a trailing `\n`) over a `HashingWriter` is BYTE-identical AND
+    /// DIGEST-identical to the pre-refactor buffered algorithm `map(to_string).join("\n") + "\n"`.
+    fn assert_old_eq_new<T: serde::Serialize>(set: &[T]) {
+        // OLD (pre-refactor buffered path):
+        let old = set
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n")
+            + "\n";
+        let old_digest = digest_bytes(old.as_bytes());
+
+        // NEW (streaming path — the exact two lines JsonlOpWriter::write_row runs):
+        let mut hw = HashingWriter::new(Vec::<u8>::new());
+        for row in set {
+            serde_json::to_writer(&mut hw, row).unwrap();
+            hw.write_all(b"\n").unwrap();
+        }
+        let new_bytes = hw.get_mut().clone();
+        let new_digest = hw.finalize();
+
+        assert_eq!(new_bytes, old.as_bytes());
+        assert_eq!(new_digest, old_digest);
+    }
+
+    #[test]
+    fn streaming_jsonl_writer_is_byte_and_digest_identical_to_old_join_algorithm() {
+        // 1. A MULTI-row set of nested objects + arrays with varied, tricky content (quotes,
+        //    slashes, unicode, numbers, nulls, bools) — exercises the `\n` BETWEEN lines.
+        let multi: Vec<serde_json::Value> = vec![
+            serde_json::json!({
+                "nested": {"a": 1, "b": [true, false, null]},
+                "text": "quote\" and /slash\\ and é/ü unicode ☃",
+                "num": -3.5,
+                "arr": [1, 2, {"deep": [null, "x"]}],
+            }),
+            serde_json::json!({
+                "s": "line two",
+                "empty_obj": {},
+                "empty_arr": [],
+                "flag": false,
+                "n": null,
+            }),
+            serde_json::json!([{"k": "v"}, 42, "trailing"]),
+        ];
+        assert_old_eq_new(&multi);
+
+        // 2. A SINGLE-row set.
+        let single: Vec<serde_json::Value> = vec![serde_json::json!({"only": "row", "x": [1, 2]})];
+        assert_old_eq_new(&single);
+
+        // 3. A set of `ReplaceSet` envelopes: one with a NON-empty nested `rows` map, and one with
+        //    an EMPTY nested `rows` map (+ empty `row_pks`) — the "empty envelope is still ONE line"
+        //    case (both `rows` and `row_pks` have `skip_serializing_if`, so they are omitted).
+        let replace_sets: Vec<ReplaceSet> = vec![
+            ReplaceSet {
+                op: ReplaceSetOp::ReplaceSet,
+                table_group: ReplaceSetGroup::ChunksWithEmbeddings,
+                scope: ReplaceSetScope {
+                    document_id: "cass:D1".to_owned(),
+                    corpus: None,
+                },
+                rows: BTreeMap::from([
+                    (
+                        "chunks".to_owned(),
+                        vec![serde_json::json!({"chunk_id": "cass:D1#0", "body": "premier moyen"})],
+                    ),
+                    (
+                        "chunk_embeddings".to_owned(),
+                        vec![
+                            serde_json::json!({"chunk_id": "cass:D1#0", "embedding": [0.1, 0.2, 0.3]}),
+                        ],
+                    ),
+                ]),
+                row_pks: vec!["cass:D1#0".to_owned()],
+                builder_version: "c1".to_owned(),
+                source_text_hash: None,
+                embedding_fingerprint: "fp".to_owned(),
+                set_digest: "sha256:deadbeef".to_owned(),
+            },
+            ReplaceSet {
+                op: ReplaceSetOp::ReplaceSet,
+                table_group: ReplaceSetGroup::ChunkEmbeddings,
+                scope: ReplaceSetScope {
+                    document_id: "cass:D2".to_owned(),
+                    corpus: None,
+                },
+                rows: BTreeMap::new(),
+                row_pks: vec![],
+                builder_version: "c1".to_owned(),
+                source_text_hash: Some("sha256:abc".to_owned()),
+                embedding_fingerprint: "fp".to_owned(),
+                set_digest: "sha256:cafef00d".to_owned(),
+            },
+        ];
+        assert_old_eq_new(&replace_sets);
+    }
 }
