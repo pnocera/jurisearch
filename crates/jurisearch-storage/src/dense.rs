@@ -89,7 +89,8 @@ pub fn load_chunk_embedding_inputs_with_client(
                 "SELECT c.chunk_id, c.body, c.contextualized_body \
                  FROM chunks c \
                  LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id \
-                 WHERE ce.chunk_id IS NULL \
+                 WHERE c.embedding_fingerprint IS NULL \
+                    OR ce.chunk_id IS NULL \
                     OR ce.embedding_fingerprint <> $1 \
                     OR ce.model <> $2 \
                     OR ce.dimension <> $3 \
@@ -104,7 +105,8 @@ pub fn load_chunk_embedding_inputs_with_client(
                 "SELECT c.chunk_id, c.body, c.contextualized_body \
                  FROM chunks c \
                  LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id \
-                 WHERE ce.chunk_id IS NULL \
+                 WHERE c.embedding_fingerprint IS NULL \
+                    OR ce.chunk_id IS NULL \
                     OR ce.embedding_fingerprint <> $1 \
                     OR ce.model <> $2 \
                     OR ce.dimension <> $3 \

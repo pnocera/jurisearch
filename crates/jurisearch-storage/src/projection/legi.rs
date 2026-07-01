@@ -95,7 +95,14 @@ pub fn prepare_legi_projection_statements<C: GenericClient>(
                 source_payload_hash = EXCLUDED.source_payload_hash, \
                 chunk_builder_version = EXCLUDED.chunk_builder_version, \
                 hierarchy_path = EXCLUDED.hierarchy_path, \
-                embedding_fingerprint = EXCLUDED.embedding_fingerprint;",
+                embedding_fingerprint = CASE \
+                    WHEN chunks.body IS DISTINCT FROM EXCLUDED.body \
+                      OR chunks.contextualized_body IS DISTINCT FROM EXCLUDED.contextualized_body \
+                    THEN NULL \
+                    WHEN EXCLUDED.embedding_fingerprint IS NOT NULL \
+                    THEN EXCLUDED.embedding_fingerprint \
+                    ELSE chunks.embedding_fingerprint \
+                  END;",
         )
         .map_err(StorageError::PostgresClient)?;
     let edge = client
