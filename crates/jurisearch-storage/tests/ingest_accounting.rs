@@ -5,7 +5,8 @@ use jurisearch_storage::{
     ingest_accounting::{
         IngestCompatibility, IngestErrorInput, IngestMemberInput, IngestMemberStatus,
         IngestResumeAction, IngestRunInput, IngestRunStatus, ReplaySnapshotMode, finish_ingest_run,
-        ingest_resume_decision, invalidate_cached_query_readiness, load_cached_query_readiness,
+        ingest_resume_decision, invalidate_cached_query_readiness,
+        latest_completed_ingest_archive_compact_with_client, load_cached_query_readiness,
         load_ingest_embedding_coverage, load_ingest_health,
         load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness,
         load_or_compute_query_readiness, record_ingest_error, record_ingest_member,
@@ -418,6 +419,137 @@ fn query_readiness_cache_is_trusted_until_invalidated() -> Result<(), StorageErr
     assert!(!from_cache);
     assert_eq!(recomputed.embedding_coverage.covered, 0);
     assert_eq!(recomputed.embedding_coverage.total, 1);
+
+    Ok(())
+}
+
+#[test]
+fn completed_run_cursor_does_not_advance_past_a_failed_run() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("completed run cursor")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-completed-cursor.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // A COMPLETED run whose manifest freshness records archive compact 20250714000000.
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "completed-run",
+            source: "legi",
+            parser_version: "legi-parser:v1",
+            schema_version: "canonical:v1",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: Some(
+                r#"{"freshness":{"latest_archive_timestamp_compact":"20250714000000"}}"#,
+            ),
+        },
+    )?;
+    finish_ingest_run(&postgres, "completed-run", IngestRunStatus::Completed, None)?;
+
+    // A later, FAILED run whose manifest freshness records a NEWER archive compact 20250715000000.
+    // The completed-run cursor must NOT advance to it (a failed archive could still need retry).
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "failed-run",
+            source: "legi",
+            parser_version: "legi-parser:v1",
+            schema_version: "canonical:v1",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: Some(
+                r#"{"freshness":{"latest_archive_timestamp_compact":"20250715000000"}}"#,
+            ),
+        },
+    )?;
+    finish_ingest_run(
+        &postgres,
+        "failed-run",
+        IngestRunStatus::Failed,
+        Some("member parse failure"),
+    )?;
+
+    let mut client = postgres.client()?;
+    let cursor = latest_completed_ingest_archive_compact_with_client(&mut client, "legi")?;
+    assert_eq!(
+        cursor.as_deref(),
+        Some("20250714000000"),
+        "the cursor must stay at the last COMPLETED run and never advance past the failed run"
+    );
+
+    // A different source with no completed run has no cursor.
+    let other = latest_completed_ingest_archive_compact_with_client(&mut client, "cass")?;
+    assert_eq!(
+        other, None,
+        "a source with no completed ingest run has no cursor"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn completed_run_cursor_excludes_member_limited_runs() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("member-limited cursor")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-limited-cursor.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // A full COMPLETED run (member_limited = false) at archive compact 20250714000000.
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "full-run",
+            source: "legi",
+            parser_version: "legi-parser:v1",
+            schema_version: "canonical:v1",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: Some(
+                r#"{"freshness":{"latest_archive_timestamp_compact":"20250714000000","member_limited":false}}"#,
+            ),
+        },
+    )?;
+    finish_ingest_run(&postgres, "full-run", IngestRunStatus::Completed, None)?;
+
+    // A later COMPLETED run that ran under `--limit-members` (member_limited = true): its freshness
+    // compact 20250715000000 is the PLANNED last archive, ahead of what was actually ingested. It must
+    // NOT advance the producer's delta-only cursor.
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "limited-run",
+            source: "legi",
+            parser_version: "legi-parser:v1",
+            schema_version: "canonical:v1",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: Some(
+                r#"{"freshness":{"latest_archive_timestamp_compact":"20250715000000","member_limited":true}}"#,
+            ),
+        },
+    )?;
+    finish_ingest_run(&postgres, "limited-run", IngestRunStatus::Completed, None)?;
+
+    let mut client = postgres.client()?;
+    let cursor = latest_completed_ingest_archive_compact_with_client(&mut client, "legi")?;
+    assert_eq!(
+        cursor.as_deref(),
+        Some("20250714000000"),
+        "a member-limited completed run must NOT advance the cursor past the prior full run"
+    );
 
     Ok(())
 }

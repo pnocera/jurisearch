@@ -26,6 +26,9 @@ use jurisearch_pipeline::{
     embed_documents, enrich_zones, ingest_archives,
 };
 use jurisearch_storage::backend::{DbClientSource, WriterHandle};
+use jurisearch_storage::ingest_accounting::{
+    IngestRunStatus, latest_completed_ingest_archive_compact_with_client,
+};
 use jurisearch_storage::zone_units::EnrichZoneOrder;
 
 use crate::baseline::{AdoptedBaseline, RunKind, ensure_incremental_may_proceed, group_run_kind};
@@ -37,7 +40,7 @@ use crate::error::ProducerError;
 use crate::fetch::{fetch_source, read_fetch_cursor};
 use crate::lock::acquire_update_lock;
 use crate::runrecord::{RunKindTag, RunRecord};
-use crate::timestamp::now_rfc3339;
+use crate::timestamp::{now_rfc3339, now_unix, unix_from_compact_archive_timestamp};
 
 /// The config value selecting automatic vs manual baseline adoption.
 const AUTO_REBASELINE_MODE: &str = "auto-on-new-baseline";
@@ -297,9 +300,10 @@ fn run_update_inner(
 
     // --- Phase 2/3: ingest each source's newly-mirrored archives (baseline precedence is in the
     //     planner; a rebaseline run re-ingests the new global baseline). ---
+    let ingest_now_unix = now_unix();
     let mut ingest_journals = Vec::new();
     for &source in sources {
-        let journal = ingest_one(config, &db, source)?;
+        let journal = ingest_one(config, &db, source, &new_baselines, ingest_now_unix)?;
         ingest_journals.push(journal);
     }
     checkpoint.phase = RunPhase::Ingested;
@@ -410,15 +414,111 @@ pub(crate) fn ensure_provisioned(db: &WriterHandle) -> Result<(), ProducerError>
     }
 }
 
+/// The maximum age (days) of a completed-run ingest cursor before a delta-only run REFUSES to
+/// delta-skip. DILA keeps deltas server-side for ~62 days; 45d is a conservative margin below that, so a
+/// cursor still inside this window means the local delta chain has not aged off the server. Beyond it,
+/// fetching may have stopped long enough that intervening deltas are gone — fail closed instead of
+/// silently skipping a possible gap.
+const STALE_CURSOR_MAX_DAYS: u64 = 45;
+
+/// The archive-selection mode `choose_ingest_mode` resolves for one source: a full baseline+delta walk
+/// (`incremental = false`) or a delta-only walk at/after `since_compact` (`incremental = true`). Owned
+/// `since_compact` so it outlives the borrowed [`ArchiveSyncFilter`] built from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArchiveModeChoice {
+    incremental: bool,
+    since_compact: Option<String>,
+}
+
+/// PURE, per-source ingest-mode decision (extracted so it is unit-testable without a DB). A source with
+/// a pending NEW baseline in `new_baselines` full-scans (re-anchor to the new baseline); otherwise the
+/// completed-run cursor drives a delta-only walk — falling back to a full walk when there is no cursor
+/// (cold DB / hand-loaded corpus), and failing closed with [`ProducerError::IngestCursorStale`] when the
+/// cursor is too old to trust the local delta chain.
+///
+/// # Errors
+/// [`ProducerError::IngestCursorStale`] if a present cursor is older than [`STALE_CURSOR_MAX_DAYS`] (or
+/// is unparseable, which is treated as fail-closed-stale).
+fn choose_ingest_mode(
+    source: ArchiveSource,
+    new_baselines: &[(String, String)],
+    cursor: Option<&str>,
+    now_unix: u64,
+) -> Result<ArchiveModeChoice, ProducerError> {
+    let full_scan = new_baselines
+        .iter()
+        .any(|(token, _)| token == source.as_str());
+    if full_scan {
+        // A pending new baseline: re-walk baseline + all deltas (as before this change).
+        return Ok(ArchiveModeChoice {
+            incremental: false,
+            since_compact: None,
+        });
+    }
+    match cursor {
+        // Cold DB / hand-loaded corpus with no completed ingest run: fall back to a full walk.
+        None => Ok(ArchiveModeChoice {
+            incremental: false,
+            since_compact: None,
+        }),
+        Some(compact) => {
+            // A cursor we cannot age is treated as stale (fail closed) rather than delta-skipped.
+            let stale = match unix_from_compact_archive_timestamp(compact) {
+                Some(cursor_unix) => {
+                    now_unix.saturating_sub(cursor_unix) > STALE_CURSOR_MAX_DAYS * 86_400
+                }
+                None => true,
+            };
+            if stale {
+                Err(ProducerError::IngestCursorStale {
+                    source_token: source.as_str().to_owned(),
+                    cursor: compact.to_owned(),
+                    max_age_days: STALE_CURSOR_MAX_DAYS,
+                })
+            } else {
+                Ok(ArchiveModeChoice {
+                    incremental: true,
+                    since_compact: Some(compact.to_owned()),
+                })
+            }
+        }
+    }
+}
+
 /// Ingest one source's mirrored archives. Selection/idempotency is by DILA archive name/timestamp + the
 /// per-archive ingest journal — NEVER by package `change_seq`.
+///
+/// Steady-state runs ingest ONLY new deltas: `choose_ingest_mode` resolves a delta-only walk from the
+/// source's completed-run cursor unless a NEW baseline is pending for this source (in `new_baselines`),
+/// in which case it full-scans the baseline + all deltas. After ingest, a run that did not reach
+/// `Completed` is a HARD FAILURE — the pipeline must NOT advance (enrich/embed/publish) on a partial
+/// ingest, and the completed-run cursor must not be corrupted by treating a failed run as progress.
 fn ingest_one(
     config: &ProducerConfig,
     db: &impl DbClientSource,
     source: ArchiveSource,
+    new_baselines: &[(String, String)],
+    now_unix: u64,
 ) -> Result<IngestJournalCoordinate, ProducerError> {
     let mirror_dir = config.producer.archives_dir.join(source.as_str());
     let quarantine_dir = config.producer.state_dir.join("ingest-quarantine");
+
+    // Resolve the archive-selection mode. A source with a pending NEW baseline full-scans and needs no
+    // cursor, so read the DB-authoritative completed-run cursor ONLY for a non-full-scan source: a
+    // malformed stored cursor (a `StorageError` from the helper) must never block a full-scan
+    // re-anchor/repair that does not depend on it. `choose_ingest_mode` stays pure and re-derives
+    // `full_scan` itself, so passing `None` for a full-scan source is correct (it returns full anyway).
+    let full_scan = new_baselines
+        .iter()
+        .any(|(token, _)| token == source.as_str());
+    let cursor = if full_scan {
+        None
+    } else {
+        let mut client = db.client()?;
+        latest_completed_ingest_archive_compact_with_client(&mut client, source.as_str())?
+    };
+    let mode = choose_ingest_mode(source, new_baselines, cursor.as_deref(), now_unix)?;
+
     let req = IngestArchivesRequest {
         source,
         archives_dir: &mirror_dir,
@@ -428,13 +528,25 @@ fn ingest_one(
         quarantine_dir: Some(&quarantine_dir),
         safe_mode: false,
         // Selection keys on the DILA archive timestamp via the planner + the journal's de-dup of
-        // already-processed file names; it does not consult `change_seq`.
+        // already-processed file names; it does not consult `change_seq`. `incremental = true` skips the
+        // baseline tar entirely and selects only deltas with `compact >= since_compact`.
         filter: ArchiveSyncFilter {
-            incremental: false,
-            since_compact: None,
+            incremental: mode.incremental,
+            since_compact: mode.since_compact.as_deref(),
         },
     };
     let report = ingest_archives(db, req)?;
+    // Fail closed on a member-failed (or otherwise non-completed) ingest run: the producer must not
+    // publish after a partial ingest, and the next run's delta-only cursor must not advance past an
+    // archive whose members did not all reach inserted/skipped.
+    if report.run_status != IngestRunStatus::Completed {
+        return Err(ProducerError::IngestRunNotCompleted {
+            source_token: source.as_str().to_owned(),
+            run_id: report.run_id,
+            run_status: report.run_status.as_str().to_owned(),
+            failed_members: report.failed_members,
+        });
+    }
     Ok(IngestJournalCoordinate {
         source: source.as_str().to_owned(),
         run_id: Some(report.run_id),
@@ -771,8 +883,15 @@ pub fn is_under(root: &Path, candidate: &Path) -> bool {
 mod tests {
     use jurisearch_fetch::ArchiveSource;
 
-    use super::{adopt_new_baselines, make_run_id, rebaseline_baseline_id_for};
+    use super::{
+        ArchiveModeChoice, STALE_CURSOR_MAX_DAYS, adopt_new_baselines, choose_ingest_mode,
+        make_run_id, rebaseline_baseline_id_for,
+    };
     use crate::baseline::AdoptedBaseline;
+    use crate::error::ProducerError;
+
+    // A fixed "now" for cursor-age tests: 2026-06-29T12:00:00Z.
+    const NOW_UNIX: u64 = 1_782_734_400;
 
     fn baseline_name(src: &str, compact: &str) -> (String, String) {
         (
@@ -822,6 +941,121 @@ mod tests {
             inca.baseline_file_name.as_deref(),
             Some("Freemium_inca_global_20250712-140000.tar.gz"),
             "inca adopted its own (distinct) baseline — not collapsed to cass's"
+        );
+    }
+
+    #[test]
+    fn choose_ingest_mode_full_scans_a_source_with_a_pending_new_baseline() {
+        // A pending NEW baseline for this source re-anchors the whole corpus: full baseline + deltas,
+        // regardless of any cursor.
+        let new_baselines = vec![baseline_name("legi", "20260101-000000")];
+        let choice = choose_ingest_mode(
+            ArchiveSource::Legi,
+            &new_baselines,
+            Some("20260615120000"),
+            NOW_UNIX,
+        )
+        .expect("full scan");
+        assert_eq!(
+            choice,
+            ArchiveModeChoice {
+                incremental: false,
+                since_compact: None,
+            }
+        );
+    }
+
+    #[test]
+    fn choose_ingest_mode_full_scans_when_there_is_no_cursor() {
+        // Cold DB / hand-loaded corpus with no completed ingest run: fall back to a full walk.
+        let choice =
+            choose_ingest_mode(ArchiveSource::Legi, &[], None, NOW_UNIX).expect("full scan");
+        assert_eq!(
+            choice,
+            ArchiveModeChoice {
+                incremental: false,
+                since_compact: None,
+            }
+        );
+    }
+
+    #[test]
+    fn choose_ingest_mode_delta_only_from_a_fresh_cursor() {
+        // No pending baseline + a cursor well inside the retention window: delta-only since the cursor.
+        let choice = choose_ingest_mode(ArchiveSource::Legi, &[], Some("20260615120000"), NOW_UNIX)
+            .expect("delta only");
+        assert_eq!(
+            choice,
+            ArchiveModeChoice {
+                incremental: true,
+                since_compact: Some("20260615120000".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn choose_ingest_mode_fails_closed_on_a_stale_cursor() {
+        // A cursor older than STALE_CURSOR_MAX_DAYS (here ~89 days) must fail closed, never delta-skip.
+        let error = choose_ingest_mode(ArchiveSource::Legi, &[], Some("20260401120000"), NOW_UNIX)
+            .expect_err("stale cursor");
+        match error {
+            ProducerError::IngestCursorStale {
+                source_token,
+                cursor,
+                max_age_days,
+            } => {
+                assert_eq!(source_token, "legi");
+                assert_eq!(cursor, "20260401120000");
+                assert_eq!(max_age_days, STALE_CURSOR_MAX_DAYS);
+            }
+            other => panic!("expected IngestCursorStale, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_ingest_mode_fails_closed_on_an_unparseable_cursor() {
+        // A cursor we cannot age (malformed) is treated as stale (fail closed), not delta-skipped.
+        let error = choose_ingest_mode(ArchiveSource::Legi, &[], Some("not-a-compact"), NOW_UNIX)
+            .expect_err("unparseable cursor");
+        assert!(matches!(error, ProducerError::IngestCursorStale { .. }));
+    }
+
+    #[test]
+    fn choose_ingest_mode_is_per_source_in_a_multi_source_group() {
+        // Only the source(s) present in `new_baselines` full-scan; the other source with a fresh cursor
+        // still resolves to delta-only.
+        let new_baselines = vec![baseline_name("cass", "20260101-000000")];
+
+        let cass = choose_ingest_mode(
+            ArchiveSource::Cass,
+            &new_baselines,
+            Some("20260615120000"),
+            NOW_UNIX,
+        )
+        .expect("cass full scan");
+        assert_eq!(
+            cass,
+            ArchiveModeChoice {
+                incremental: false,
+                since_compact: None,
+            },
+            "cass has a pending baseline -> full scan"
+        );
+
+        let inca = choose_ingest_mode(
+            ArchiveSource::Inca,
+            &new_baselines,
+            Some("20260615120000"),
+            NOW_UNIX,
+        )
+        .expect("inca delta only");
+        assert_eq!(
+            inca,
+            ArchiveModeChoice {
+                incremental: true,
+                since_compact: Some("20260615120000".to_owned()),
+            },
+            "inca has no pending baseline -> delta-only from its cursor"
         );
     }
 

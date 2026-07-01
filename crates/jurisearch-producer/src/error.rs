@@ -62,6 +62,26 @@ pub enum ProducerError {
          (run `jurisearch-producer fetch`/`update` first)"
     )]
     NothingToRebaseline { group: String },
+    #[error(
+        "source `{source_token}` delta-only ingest cursor `{cursor}` is older than {max_age_days} \
+         days; refusing to delta-skip (DILA keeps deltas only ~62 days, so a chain gap is possible) \
+         — a full re-fetch/rebaseline is required"
+    )]
+    IngestCursorStale {
+        source_token: String,
+        cursor: String,
+        max_age_days: u64,
+    },
+    #[error(
+        "source `{source_token}` ingest run `{run_id}` did not complete (status `{run_status}`, \
+         {failed_members} failed member(s)); refusing to advance the pipeline after a partial ingest"
+    )]
+    IngestRunNotCompleted {
+        source_token: String,
+        run_id: String,
+        run_status: String,
+        failed_members: u64,
+    },
     #[error("alert hook `{command}` failed: {message}")]
     AlertHook { command: String, message: String },
     #[error("io error at `{path}`: {source}")]
@@ -86,7 +106,9 @@ impl ProducerError {
             | ProducerError::UnknownSource(_)
             | ProducerError::NothingToRebaseline { .. } => "config-invalid",
             ProducerError::Fetch(_) => "fetch-failed",
-            ProducerError::Ingest(_) => "ingest-failed",
+            ProducerError::Ingest(_)
+            | ProducerError::IngestCursorStale { .. }
+            | ProducerError::IngestRunNotCompleted { .. } => "ingest-failed",
             ProducerError::Enrich(_) => "enrich-degraded",
             ProducerError::Embed(_) => "embed-failed",
             ProducerError::Build(_) => "publish-failed",

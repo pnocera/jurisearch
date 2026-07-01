@@ -85,6 +85,43 @@ pub fn unix_from_rfc3339(ts: &str) -> Option<u64> {
     u64::try_from(secs).ok()
 }
 
+/// Parse a DILA archive compact timestamp (`YYYYMMDDHHMMSS`, exactly 14 digits, UTC) to whole UNIX
+/// seconds, or `None` if it is not that shape. This is the compact analogue of [`unix_from_rfc3339`]
+/// for the archive "cursor" (a `ArchiveTimestamp::compact()` value), used to age a delta-only ingest
+/// cursor against DILA's server-side delta retention. It does NOT route through [`unix_from_rfc3339`];
+/// the compact form carries no separators, so it is parsed directly (Howard Hinnant days-from-civil).
+#[must_use]
+pub fn unix_from_compact_archive_timestamp(compact: &str) -> Option<u64> {
+    if compact.len() != 14 || !compact.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let year: i64 = compact[0..4].parse().ok()?;
+    let month: i64 = compact[4..6].parse().ok()?;
+    let day: i64 = compact[6..8].parse().ok()?;
+    let hour: i64 = compact[8..10].parse().ok()?;
+    let minute: i64 = compact[10..12].parse().ok()?;
+    let second: i64 = compact[12..14].parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    // days_from_civil: (year, month, day) -> days since 1970-01-01.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 }; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3_600 + minute * 60 + second;
+    u64::try_from(secs).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +140,34 @@ mod tests {
         }
         assert_eq!(unix_from_rfc3339("not-a-timestamp"), None);
         assert_eq!(unix_from_rfc3339("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn compact_archive_timestamp_parses_to_unix() {
+        // A known DILA delta timestamp: 2026-06-29T12:00:00Z == 1_782_734_400.
+        assert_eq!(
+            unix_from_compact_archive_timestamp("20260629120000"),
+            Some(1_782_734_400)
+        );
+        assert_eq!(
+            unix_from_compact_archive_timestamp("19700101000000"),
+            Some(0)
+        );
+        // Agrees with the RFC3339 helper for the same instant (both UTC).
+        assert_eq!(
+            unix_from_compact_archive_timestamp("20000101000000"),
+            unix_from_rfc3339("2000-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn compact_archive_timestamp_rejects_malformed() {
+        assert_eq!(unix_from_compact_archive_timestamp(""), None);
+        assert_eq!(unix_from_compact_archive_timestamp("2026062912000"), None); // 13 digits
+        assert_eq!(unix_from_compact_archive_timestamp("202606291200000"), None); // 15 digits
+        assert_eq!(unix_from_compact_archive_timestamp("2026-06-29T120"), None); // separators
+        assert_eq!(unix_from_compact_archive_timestamp("20261329120000"), None); // month 13
+        assert_eq!(unix_from_compact_archive_timestamp("20260600120000"), None); // day 00
+        assert_eq!(unix_from_compact_archive_timestamp("20260629250000"), None); // hour 25
     }
 }

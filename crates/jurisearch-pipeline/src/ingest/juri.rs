@@ -44,16 +44,25 @@ pub(crate) fn juri_archive_manifest(
     latest_processed: Option<&PlannedArchive>,
     counters: &JuriArchiveIngestCounters,
     run_status: &str,
+    member_limited: bool,
 ) -> Value {
     // Freshness/source_version reflect the latest archive ACTUALLY processed by this run, not the
     // newest archive in the directory — so an incremental/`--since`-filtered or no-op sync never
     // advances reported corpus freshness for archives it did not read.
+    //
+    // `member_limited` records that this run ran under `--limit-members`: `latest_archive_*` is the
+    // PLANNED last archive, but an early member-limit stop means members of `latest_archive` (and any
+    // earlier archives after the stop) were NEVER processed even though `run_status` can still be
+    // `completed`. A delta-only producer cursor MUST NOT trust the freshness of a member-limited run
+    // (see `latest_completed_ingest_archive_compact_with_client`); the producer always passes
+    // `limit_members = None`, so its own runs are never flagged.
     let freshness = latest_processed.map_or(Value::Null, |archive| {
         json!({
             "latest_archive": archive.file_name.as_str(),
             "latest_archive_kind": archive.kind,
             "latest_archive_timestamp": archive.timestamp.to_string(),
-            "latest_archive_timestamp_compact": archive.timestamp.compact()
+            "latest_archive_timestamp_compact": archive.timestamp.compact(),
+            "member_limited": member_limited
         })
     });
     json!({
@@ -127,12 +136,18 @@ pub(crate) fn ingest_juri_archives(
         serde_json::to_string(&plan).map_err(|error| dependency_unavailable(error.to_string()))?;
     let archives = select_archives_to_process(&plan, archive_filter);
     let latest_processed = archives.last().copied();
+    // A `--limit-members` run can stop early yet still finish `completed`, leaving `latest_processed`
+    // (the PLANNED last archive) ahead of what was actually ingested. Record that so the producer's
+    // completed-run cursor excludes it. `stopped_by_limit` implies `limit_members.is_some()`, so the
+    // presence of a limit is the exact, conservative flag.
+    let member_limited = limit_members.is_some();
     let initial_manifest = juri_archive_manifest(
         source,
         &plan,
         latest_processed,
         &JuriArchiveIngestCounters::default(),
         IngestRunStatus::Running.as_str(),
+        member_limited,
     );
     let initial_manifest_json = initial_manifest.to_string();
 
@@ -223,6 +238,7 @@ pub(crate) fn ingest_juri_archives(
         latest_processed,
         &counters,
         manifest_run_status.as_str(),
+        member_limited,
     );
     let final_manifest_json = final_manifest.to_string();
     if let Err(error) = update_ingest_run_manifest_with_client(

@@ -216,3 +216,103 @@ pub(crate) fn replay_snapshot_cache_json(source: &str, snapshot: &ReplaySnapshot
         "manifests": snapshot.manifests.count
     })
 }
+
+#[cfg(test)]
+mod select_tests {
+    use jurisearch_ingest::archive::{ArchivePlan, ArchiveSource, ParsedArchive, PlannedArchive};
+
+    use super::{ArchiveSyncFilter, select_archives_to_process};
+
+    fn planned(name: &str) -> PlannedArchive {
+        let parsed = ParsedArchive::parse_file_name(ArchiveSource::Legi, name).expect("parse name");
+        PlannedArchive {
+            source: parsed.source,
+            kind: parsed.kind,
+            timestamp: parsed.timestamp,
+            path: std::path::PathBuf::from(&parsed.file_name),
+            file_name: parsed.file_name,
+        }
+    }
+
+    // baseline compact 20250713140000; deltas 20250714/15/16 000000.
+    fn legi_plan() -> ArchivePlan {
+        ArchivePlan {
+            source: ArchiveSource::Legi,
+            baseline: planned("Freemium_legi_global_20250713-140000.tar.gz"),
+            deltas: vec![
+                planned("LEGI_20250714-000000.tar.gz"),
+                planned("LEGI_20250715-000000.tar.gz"),
+                planned("LEGI_20250716-000000.tar.gz"),
+            ],
+            skipped: Vec::new(),
+        }
+    }
+
+    fn names(archives: &[&PlannedArchive]) -> Vec<String> {
+        archives.iter().map(|a| a.file_name.clone()).collect()
+    }
+
+    #[test]
+    fn full_scan_selects_baseline_first_then_all_deltas_in_order() {
+        let plan = legi_plan();
+        let selected = select_archives_to_process(
+            &plan,
+            ArchiveSyncFilter {
+                incremental: false,
+                since_compact: None,
+            },
+        );
+        assert_eq!(
+            names(&selected),
+            vec![
+                "Freemium_legi_global_20250713-140000.tar.gz".to_owned(),
+                "LEGI_20250714-000000.tar.gz".to_owned(),
+                "LEGI_20250715-000000.tar.gz".to_owned(),
+                "LEGI_20250716-000000.tar.gz".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn incremental_without_since_skips_baseline_and_takes_all_deltas() {
+        let plan = legi_plan();
+        let selected = select_archives_to_process(
+            &plan,
+            ArchiveSyncFilter {
+                incremental: true,
+                since_compact: None,
+            },
+        );
+        assert_eq!(
+            names(&selected),
+            vec![
+                "LEGI_20250714-000000.tar.gz".to_owned(),
+                "LEGI_20250715-000000.tar.gz".to_owned(),
+                "LEGI_20250716-000000.tar.gz".to_owned(),
+            ],
+            "incremental never opens the baseline tar"
+        );
+    }
+
+    #[test]
+    fn incremental_since_is_inclusive_and_drops_earlier_deltas() {
+        let plan = legi_plan();
+        // Cursor == the middle delta's compact: baseline absent, the == boundary INCLUDED, the earlier
+        // (< cursor) delta EXCLUDED, later deltas kept.
+        let selected = select_archives_to_process(
+            &plan,
+            ArchiveSyncFilter {
+                incremental: true,
+                since_compact: Some("20250715000000"),
+            },
+        );
+        assert_eq!(
+            names(&selected),
+            vec![
+                "LEGI_20250715-000000.tar.gz".to_owned(),
+                "LEGI_20250716-000000.tar.gz".to_owned(),
+            ],
+            ">= cursor is inclusive (re-reads the cursor archive); < cursor is dropped"
+        );
+    }
+}
