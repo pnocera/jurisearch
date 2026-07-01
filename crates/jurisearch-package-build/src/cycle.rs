@@ -807,11 +807,32 @@ fn resume_first_baseline(
     })
 }
 
+/// Fail-closed media coverage/schema preflight for a REBASELINE (`--from-db` snapshot-only) publish —
+/// the same real-DB embedding/schema preconditions [`bootstrap_first_baseline`] runs before a first
+/// baseline, exposed under a rebaseline-neutral name (Codex adjustment 4). It asserts, against the
+/// producer's `public` tables under `params`' embedding contract, that: `schema_migrations` is current;
+/// every `chunks` row has a matching `chunk_embeddings` row under the configured fingerprint/model/
+/// dimension; every `chunks.embedding_fingerprint` equals the configured fingerprint; and the same
+/// coverage + consistency for `zone_units`. It NEVER mutates. A snapshot-only rebaseline deliberately
+/// SKIPS the embed/finalize passes, so this guard is what keeps it from publishing an under-embedded or
+/// fingerprint-inconsistent corpus (fail closed).
+///
+/// # Errors
+/// [`BuildError`] (mapped to the producer `publish-failed` class) on a stale schema, missing/inconsistent
+/// chunk embeddings, or missing/inconsistent zone-unit embeddings.
+pub fn rebaseline_preflight(
+    producer: &impl DbClientSource,
+    params: &BaselineParams,
+) -> Result<(), BuildError> {
+    bootstrap_preflight(producer, params)
+}
+
 /// Fail-closed real-DB embedding/schema preconditions for a FULL first-baseline build (Codex adjustment
 /// 7). Each rejection carries an exact, actionable message; none mutate. Verified against the producer's
 /// `public` tables under the config-supplied embedding contract. The existing-media-row decision (build
 /// vs resume vs refuse) is made by [`bootstrap_locked`] BEFORE this runs, so a resume never re-checks
-/// embeddings — this only guards the path that actually builds a fresh baseline.
+/// embeddings — this only guards the path that actually builds a fresh baseline. The public
+/// [`rebaseline_preflight`] wrapper reuses this exact check for the snapshot-only rebaseline path.
 fn bootstrap_preflight(
     producer: &impl DbClientSource,
     params: &BaselineParams,

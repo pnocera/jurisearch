@@ -16,7 +16,9 @@ use jurisearch_producer::config::ProducerConfig;
 use jurisearch_producer::error::ProducerError;
 use jurisearch_producer::exit::exit_code_for;
 use jurisearch_producer::freshness::JudilibreAccelerator;
-use jurisearch_producer::update::{UpdateOptions, plan_forced_rebaseline};
+use jurisearch_producer::update::{
+    UpdateOptions, plan_forced_rebaseline, plan_snapshot_rebaseline,
+};
 use jurisearch_producer::{
     PRODUCER_CONFIG_EXAMPLE, build_status, cron_equivalent, fetch, install, provision_db,
     run_publish_baseline, run_retention, run_update,
@@ -117,6 +119,14 @@ enum Command {
         skip_fetch: bool,
         #[arg(long)]
         skip_enrich: bool,
+        /// SNAPSHOT-ONLY (`--from-db`): re-publish the CURRENT producer `public.*` as a fresh full
+        /// rebaseline generation by running ONLY the rebaseline publish — skipping fetch/ingest/enrich/
+        /// embed (a pure, mirror-independent DB snapshot, no re-projection). Runs a media coverage
+        /// preflight before publishing (fails closed on an under-embedded corpus), and AFTER a successful
+        /// publish seeds each source's completed-ingest cursor to "now" so normal delta-only timers resume
+        /// (the operator accepts the DILA retention gap).
+        #[arg(long)]
+        from_db: bool,
     },
     /// Reclaim ONLY temporary/partial/quarantined download files. Accepted official archives and
     /// published packages are retained indefinitely and never touched. `--dry-run` (default) reports only.
@@ -335,13 +345,46 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
             dry_run,
             skip_fetch,
             skip_enrich,
+            from_db,
         } => {
             let cfg = ProducerConfig::load(&config)?;
             // A rebaseline re-anchors the whole `core` corpus; the run is locked + ingested per GROUP, so
             // resolve the requested SOURCE to its fetch group and run the repair over that group.
             let group = cfg.group_for_source(&source)?;
-            if dry_run {
-                // Pure preview: no fetch, no lock, no mutation — just what a real run WOULD re-anchor.
+            if dry_run && from_db {
+                // READ-ONLY preview for `--from-db --dry-run`: plan from on-disk state (fetch cursors +
+                // adoption markers, mirror-independently) WITHOUT opening the DB, taking the lock, or
+                // writing any state-dir file (no RunRecord/RunCheckpoint). Same side-effect-free contract
+                // as the non-`--from-db` dry-run below, just using the snapshot baseline source.
+                let plan = plan_snapshot_rebaseline(&cfg, &group)?;
+                return Ok(CommandOutput {
+                    exit_class: "dry-run",
+                    json: json!({
+                        "status": "ok",
+                        "command": "rebaseline",
+                        "dry_run": true,
+                        "from_db": true,
+                        "source": source,
+                        "group": plan.group,
+                        "sources": plan.sources,
+                        "would_rebaseline": plan.has_work(),
+                        "planned_baselines": plan
+                            .baselines
+                            .iter()
+                            .map(|(token, name)| json!({ "source": token, "baseline": name }))
+                            .collect::<Vec<_>>(),
+                        // A dry run mutates nothing: nothing published, nothing adopted, no cursor seeded.
+                        // A REAL `--from-db` run WOULD seed every group source's completed-ingest cursor.
+                        "rebaselined": false,
+                        "cursor_seeded": Vec::<String>::new(),
+                        "would_seed_cursor": plan.has_work(),
+                        "exit_class": "dry-run",
+                    }),
+                });
+            }
+            if dry_run && !from_db {
+                // Pure preview (fetch-cursor-based forced repair): no fetch, no lock, no mutation — just
+                // what a real run WOULD re-anchor.
                 let plan = plan_forced_rebaseline(&cfg, &group)?;
                 return Ok(CommandOutput {
                     exit_class: "dry-run",
@@ -349,6 +392,7 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                         "status": "ok",
                         "command": "rebaseline",
                         "dry_run": true,
+                        "from_db": false,
                         "source": source,
                         "group": plan.group,
                         "sources": plan.sources,
@@ -362,7 +406,12 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                     }),
                 });
             }
-            let mut options = UpdateOptions::rebaseline(group.clone());
+            let mut options = if from_db {
+                UpdateOptions::rebaseline_from_db(group.clone())
+            } else {
+                UpdateOptions::rebaseline(group.clone())
+            };
+            options.dry_run = dry_run;
             options.skip_fetch = skip_fetch;
             options.skip_enrich = skip_enrich;
             match run_update(&cfg, &options) {
@@ -381,7 +430,8 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                         json: json!({
                             "status": "ok",
                             "command": "rebaseline",
-                            "dry_run": false,
+                            "dry_run": report.dry_run,
+                            "from_db": from_db,
                             "source": source,
                             "group": report.group,
                             "run_id": report.run_id,
@@ -390,6 +440,7 @@ fn run(cli: Cli) -> Result<CommandOutput, ProducerError> {
                             "rebaselined": report.rebaselined,
                             "adopted_baselines": report.adopted_baselines,
                             "published_package": report.built_incremental,
+                            "cursor_seeded": report.cursor_seeded,
                             "enrichment": format!("{:?}", report.enrichment),
                         }),
                     })

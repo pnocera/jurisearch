@@ -11,6 +11,7 @@ use jurisearch_storage::{
         load_ingest_health_with_replay_snapshot_mode, load_ingest_readiness,
         load_or_compute_query_readiness, record_ingest_error, record_ingest_member,
         start_ingest_run, store_query_readiness, update_ingest_member_status,
+        update_ingest_run_manifest,
     },
     runtime::{ManagedPostgres, StorageError},
 };
@@ -549,6 +550,92 @@ fn completed_run_cursor_excludes_member_limited_runs() -> Result<(), StorageErro
         cursor.as_deref(),
         Some("20250714000000"),
         "a member-limited completed run must NOT advance the cursor past the prior full run"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn cursor_seed_run_advances_the_completed_cursor_to_now() -> Result<(), StorageError> {
+    let Some(pg_config) = discover_pg_config("cursor seed")? else {
+        return Ok(());
+    };
+    let root = tempfile::Builder::new()
+        .prefix("jurisearch-cursor-seed.")
+        .tempdir()
+        .map_err(StorageError::Io)?;
+    let postgres = ManagedPostgres::start_durable(pg_config, root.path())?;
+
+    // Model the producer's `--from-db` cursor seed EXACTLY: start (empty manifest) -> update manifest
+    // with the synthetic cursor-seed freshness -> finish Completed. The manifest carries a "now" compact
+    // and `member_limited = false`, so it must advance the producer's delta-only completed cursor.
+    let now_compact = "20260701120000";
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "cursor-seed-cass-1782734400",
+            source: "cass",
+            parser_version: "cursor-seed",
+            schema_version: "24",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: None,
+        },
+    )?;
+    update_ingest_run_manifest(
+        &postgres,
+        "cursor-seed-cass-1782734400",
+        &format!(
+            r#"{{"freshness":{{"latest_archive_timestamp_compact":"{now_compact}","member_limited":false}},"kind":"cursor_seed","note":"operator accepted DILA retention gap; DB-snapshot rebaseline core-2-3 published"}}"#
+        ),
+    )?;
+    finish_ingest_run(
+        &postgres,
+        "cursor-seed-cass-1782734400",
+        IngestRunStatus::Completed,
+        None,
+    )?;
+
+    let mut client = postgres.client()?;
+    let cursor = latest_completed_ingest_archive_compact_with_client(&mut client, "cass")?;
+    assert_eq!(
+        cursor.as_deref(),
+        Some(now_compact),
+        "the memberless cursor-seed completed run advances the delta-only cursor to the now anchor"
+    );
+
+    // Guard: a member-limited cursor seed at a NEWER compact must NOT advance the cursor (defence in
+    // depth — the producer always writes member_limited=false, but the query must exclude limited runs).
+    start_ingest_run(
+        &postgres,
+        &IngestRunInput {
+            run_id: "cursor-seed-cass-limited",
+            source: "cass",
+            parser_version: "cursor-seed",
+            schema_version: "24",
+            code_version: "test-code-sha",
+            safe_mode: false,
+            archive_plan_json: None,
+            manifest_json: None,
+        },
+    )?;
+    update_ingest_run_manifest(
+        &postgres,
+        "cursor-seed-cass-limited",
+        r#"{"freshness":{"latest_archive_timestamp_compact":"20260801120000","member_limited":true},"kind":"cursor_seed"}"#,
+    )?;
+    finish_ingest_run(
+        &postgres,
+        "cursor-seed-cass-limited",
+        IngestRunStatus::Completed,
+        None,
+    )?;
+    let cursor_after = latest_completed_ingest_archive_compact_with_client(&mut client, "cass")?;
+    assert_eq!(
+        cursor_after.as_deref(),
+        Some(now_compact),
+        "a member-limited run never advances the cursor past the real seed anchor"
     );
 
     Ok(())

@@ -21,6 +21,7 @@ pub use cycle::{
     ProducerCycleConfig, ProducerCycleReport, PublishFault, RebaselineCycleConfig,
     RebaselineCycleReport, bootstrap_first_baseline, bootstrap_first_baseline_faulted,
     producer_cycle, producer_cycle_faulted, rebaseline_cycle, rebaseline_cycle_faulted,
+    rebaseline_preflight,
 };
 pub use error::BuildError;
 pub use incremental::{IncrementalBuildReport, IncrementalParams, build_incremental};
