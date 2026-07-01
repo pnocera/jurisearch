@@ -23,6 +23,7 @@ fn the_three_coordinates_are_distinct_types_recorded_separately() {
         run_id: Some("legi-42".to_owned()),
         journal_compact_timestamp: Some("20260628200000".to_owned()),
         archives_ingested: 42,
+        full_scan: false,
     };
     let hwm = PackageHighWaterMark {
         corpus: "core".to_owned(),
@@ -62,6 +63,7 @@ fn run_checkpoint_records_all_three_coordinates_and_round_trips() {
         run_id: Some("ingest-1".to_owned()),
         journal_compact_timestamp: Some("20260628200000".to_owned()),
         archives_ingested: 1,
+        full_scan: true,
     }];
     checkpoint.package_high_water_mark = Some(PackageHighWaterMark {
         corpus: "core".to_owned(),

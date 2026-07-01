@@ -41,6 +41,11 @@ pub struct IngestJournalCoordinate {
     /// Compact `YYYYMMDDHHMMSS` timestamp of the latest archive actually processed, if any.
     pub journal_compact_timestamp: Option<String>,
     pub archives_ingested: usize,
+    /// Whether this source full-scanned this cycle (`!mode.incremental`: rebaseline / pending baseline /
+    /// cold-or-stale cursor). Carries the per-source refresh signal to the cycle-level `any_full_scan`
+    /// that gates the chunk-embed replay-snapshot refresh.
+    #[serde(default)]
+    pub full_scan: bool,
 }
 
 /// (3) The package high-water mark: the corpus's packaged sequence + the `change_seq` window high it

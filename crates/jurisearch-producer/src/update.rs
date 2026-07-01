@@ -310,6 +310,12 @@ fn run_update_inner(
     checkpoint.ingest_journals = ingest_journals.clone();
     checkpoint.save(state_dir)?;
 
+    // Cycle-level replay-snapshot policy for the chunk-embed pass: refresh iff ANY source full-scanned
+    // this cycle. This is the correct axis (full-scan vs delta-only), NOT "did embed insert rows": a
+    // full-scan cycle must leave fresh replay evidence even with few/no new chunks, and a delta-only
+    // cycle must skip even if it embedded many new chunks.
+    let any_full_scan = ingest_journals.iter().any(|journal| journal.full_scan);
+
     // --- Phase 4: enrich (Judilibre covers cass/inca). Honest skip with no creds. ---
     let enrichment =
         if options.skip_enrich || config.enrichment.mode == EnrichmentModeConfig::Disabled {
@@ -321,8 +327,11 @@ fn run_update_inner(
     checkpoint.save(state_dir)?;
 
     // --- Phase 5: embed pending documents + zone units (document embedding over public text). ---
-    embed_pending(config, &db, EmbedTarget::Chunks)?;
-    embed_pending(config, &db, EmbedTarget::ZoneUnits)?;
+    embed_pending(config, &db, EmbedTarget::Chunks, any_full_scan)?;
+    // Uniform API: zone embedding never refreshes the replay snapshot (`embed_zone_units_inner` returns
+    // `replay_snapshot: None`), so `any_full_scan` is a no-op here — passed only to keep the call sites
+    // uniform.
+    embed_pending(config, &db, EmbedTarget::ZoneUnits, any_full_scan)?;
     checkpoint.phase = RunPhase::Embedded;
     checkpoint.save(state_dir)?;
 
@@ -534,6 +543,10 @@ fn ingest_one(
             incremental: mode.incremental,
             since_compact: mode.since_compact.as_deref(),
         },
+        // Delta-only cycles skip the full-corpus replay-snapshot rehash; full-scan cycles
+        // (rebaseline / pending baseline / cold cursor → `incremental=false`) refresh as before. A stale
+        // cursor is not a full-scan case — `choose_ingest_mode` fails closed (`IngestCursorStale`) before ingest.
+        refresh_replay_snapshot: !mode.incremental,
     };
     let report = ingest_archives(db, req)?;
     // Fail closed on a member-failed (or otherwise non-completed) ingest run: the producer must not
@@ -552,6 +565,9 @@ fn ingest_one(
         run_id: Some(report.run_id),
         journal_compact_timestamp: report.journal_cursor,
         archives_ingested: report.archives_ingested,
+        // Same signal passed as the ingest `refresh_replay_snapshot`; the cycle-level `any_full_scan`
+        // (OR across sources) reads this to gate the chunk-embed replay-snapshot refresh.
+        full_scan: !mode.incremental,
     })
 }
 
@@ -608,6 +624,7 @@ fn embed_pending(
     config: &ProducerConfig,
     db: &impl DbClientSource,
     target: EmbedTarget,
+    refresh_replay_snapshot: bool,
 ) -> Result<(), ProducerError> {
     let embedding_config = config.embedding_config();
     let api_key = config
@@ -630,6 +647,9 @@ fn embed_pending(
         batch_size: EMBED_BATCH_SIZE,
         pool_concurrency: EMBED_POOL_CONCURRENCY,
         pool_endpoints: vec![endpoint],
+        // Only the Chunks target consumes this (ZoneUnits never refreshes); the cycle passes the
+        // `any_full_scan` signal so a delta-only cycle skips the full-corpus replay-snapshot rehash.
+        refresh_replay_snapshot,
     };
     match embed_documents(db, &embedding_config, req) {
         Ok(_) => Ok(()),
@@ -888,6 +908,7 @@ mod tests {
         make_run_id, rebaseline_baseline_id_for,
     };
     use crate::baseline::AdoptedBaseline;
+    use crate::cursors::IngestJournalCoordinate;
     use crate::error::ProducerError;
 
     // A fixed "now" for cursor-age tests: 2026-06-29T12:00:00Z.
@@ -1057,6 +1078,72 @@ mod tests {
             },
             "inca has no pending baseline -> delta-only from its cursor"
         );
+    }
+
+    /// The replay-snapshot refresh policy the producer threads into ingest is exactly `!incremental`
+    /// for EVERY mode `choose_ingest_mode` can resolve: full-scan modes (pending baseline / cold cursor)
+    /// refresh; a delta-only mode skips. This is the same value `ingest_one` also stores as the journal's
+    /// `full_scan`, so the two never diverge.
+    #[test]
+    fn ingest_refresh_policy_is_the_negation_of_incremental_for_every_mode() {
+        // Full-scan: a pending new baseline for this source.
+        let new_baselines = vec![baseline_name("legi", "20260101-000000")];
+        let full = choose_ingest_mode(ArchiveSource::Legi, &new_baselines, None, NOW_UNIX)
+            .expect("full scan");
+        assert!(
+            !full.incremental,
+            "full-scan cycle refreshes: !incremental == true"
+        );
+
+        // Full-scan: cold DB / hand-loaded corpus, no cursor.
+        let cold =
+            choose_ingest_mode(ArchiveSource::Legi, &[], None, NOW_UNIX).expect("cold full scan");
+        assert!(!cold.incremental);
+
+        // Delta-only: a fresh completed-run cursor, no pending baseline.
+        let delta = choose_ingest_mode(ArchiveSource::Legi, &[], Some("20260615120000"), NOW_UNIX)
+            .expect("delta only");
+        assert!(
+            delta.incremental,
+            "delta-only cycle skips: !incremental == false"
+        );
+    }
+
+    fn journal_with_full_scan(source: &str, full_scan: bool) -> IngestJournalCoordinate {
+        IngestJournalCoordinate {
+            source: source.to_owned(),
+            run_id: Some(format!("{source}-run")),
+            journal_compact_timestamp: Some("20260628200000".to_owned()),
+            archives_ingested: 1,
+            full_scan,
+        }
+    }
+
+    /// The cycle-level `any_full_scan` (the chunk-embed refresh gate) is the OR across per-source
+    /// journals: all-delta ⇒ false (skip the embed refresh), any full ⇒ true (refresh).
+    #[test]
+    fn any_full_scan_is_the_or_across_source_journals() {
+        let all_delta = [
+            journal_with_full_scan("cass", false),
+            journal_with_full_scan("inca", false),
+        ];
+        assert!(
+            !all_delta.iter().any(|journal| journal.full_scan),
+            "a delta-only cycle skips the chunk-embed replay refresh"
+        );
+
+        let mixed = [
+            journal_with_full_scan("cass", false),
+            journal_with_full_scan("inca", true),
+        ];
+        assert!(
+            mixed.iter().any(|journal| journal.full_scan),
+            "one full-scan source forces the cycle-level refresh"
+        );
+
+        // No sources ingested this cycle ⇒ no full scan ⇒ skip.
+        let none: Vec<IngestJournalCoordinate> = Vec::new();
+        assert!(!none.iter().any(|journal| journal.full_scan));
     }
 
     #[test]

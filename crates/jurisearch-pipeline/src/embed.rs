@@ -29,6 +29,11 @@ pub struct EmbedRequest {
     pub batch_size: usize,
     pub pool_concurrency: usize,
     pub pool_endpoints: Vec<EmbeddingPoolEndpoint>,
+    /// Policy: whether this pass should refresh the (full-corpus, expensive) replay snapshot. Consumed
+    /// ONLY by the `Chunks` target (the `ZoneUnits` target never refreshes the replay snapshot). Producer
+    /// sets it to the cycle-level `any_full_scan` so a delta-only cycle skips; all other callers pass
+    /// `true`. COMPOSES with `JURISEARCH_SKIP_REPLAY_SNAPSHOT`.
+    pub refresh_replay_snapshot: bool,
 }
 
 /// What one embed pass produced. `body` carries the historical `ingest embed-*` payload (minus
@@ -117,6 +122,7 @@ fn embed_chunks_inner(
         batch_size,
         pool_concurrency,
         pool_endpoints,
+        refresh_replay_snapshot,
         ..
     } = req;
     let mut client = db.client().map_err(storage_error_object)?;
@@ -222,7 +228,7 @@ fn embed_chunks_inner(
         Some(&outbox),
     )
     .map_err(storage_error_object)?;
-    let replay_snapshot = maybe_refresh_replay_snapshot(&mut client)?;
+    let replay_snapshot = maybe_refresh_replay_snapshot(&mut client, refresh_replay_snapshot)?;
 
     let body = json!({
         "schema_version": SCHEMA_VERSION,
@@ -442,6 +448,7 @@ mod tests {
             batch_size: batch,
             pool_concurrency: pool,
             pool_endpoints: Vec::new(),
+            refresh_replay_snapshot: true,
         }
     }
 

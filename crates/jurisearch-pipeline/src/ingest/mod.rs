@@ -39,6 +39,11 @@ pub struct IngestArchivesRequest<'a> {
     pub quarantine_dir: Option<&'a Path>,
     pub safe_mode: bool,
     pub filter: ArchiveSyncFilter<'a>,
+    /// Policy: whether this pass should refresh the (full-corpus, expensive) replay snapshot after a
+    /// completed run. Producer sets it `false` on delta-only cycles (leaving the last full snapshot in
+    /// `index_manifest` untouched); all other callers pass `true` to preserve prior behavior. It
+    /// COMPOSES with `JURISEARCH_SKIP_REPLAY_SNAPSHOT` (env still forces skip when set).
+    pub refresh_replay_snapshot: bool,
 }
 
 /// What one archive-ingest run produced. The typed fields are the producer's contract surface;
@@ -183,17 +188,30 @@ pub(crate) fn replay_snapshot_refresh_skipped() -> bool {
     std::env::var_os("JURISEARCH_SKIP_REPLAY_SNAPSHOT").is_some()
 }
 
-/// Refresh the replay snapshot on `client` unless skipped via env. Returns `None` when skipped.
+/// Refresh the replay snapshot on `client` unless the caller's `refresh_replay_snapshot` policy is
+/// `false` OR the env skip (`JURISEARCH_SKIP_REPLAY_SNAPSHOT`) is set (the two compose as an AND-guard:
+/// either condition skips). Returns `None` when skipped, which leaves the stored
+/// `index_manifest['replay_snapshot']` row untouched (only `store_replay_snapshot`, reached via a real
+/// refresh, ever writes it).
 pub(crate) fn maybe_refresh_replay_snapshot(
     client: &mut postgres::Client,
+    refresh_replay_snapshot: bool,
 ) -> Result<Option<ReplaySnapshotReport>, ErrorObject> {
-    if replay_snapshot_refresh_skipped() {
-        Ok(None)
-    } else {
+    if replay_snapshot_refresh_effective(refresh_replay_snapshot) {
         Ok(Some(
             refresh_replay_snapshot_with_client(client).map_err(storage_error_object)?,
         ))
+    } else {
+        Ok(None)
     }
+}
+
+/// Whether a real refresh should run given the caller's `refresh_replay_snapshot` policy: the policy
+/// AND the absence of the `JURISEARCH_SKIP_REPLAY_SNAPSHOT` env skip. Both must allow it — the env skip
+/// is an ADDITIONAL AND-guard that forces a skip even when the policy is `true`. Pure (env-only) so the
+/// composition is unit-testable without a DB.
+pub(crate) fn replay_snapshot_refresh_effective(refresh_replay_snapshot: bool) -> bool {
+    refresh_replay_snapshot && !replay_snapshot_refresh_skipped()
 }
 
 /// Report value for a maybe-refreshed snapshot: the full cache JSON when refreshed, else `skipped`.
@@ -215,6 +233,60 @@ pub(crate) fn replay_snapshot_cache_json(source: &str, snapshot: &ReplaySnapshot
         "embeddings": snapshot.embeddings.count,
         "manifests": snapshot.manifests.count
     })
+}
+
+#[cfg(test)]
+mod replay_policy_tests {
+    use super::{replay_snapshot_cache_value, replay_snapshot_refresh_effective};
+
+    /// The refresh policy composes with the env skip as an AND-guard, and is fully covered without a DB:
+    /// a real refresh runs iff the caller policy is `true` AND `JURISEARCH_SKIP_REPLAY_SNAPSHOT` is unset.
+    /// A single test owns the process-global env var (set then restore) so it never races a sibling.
+    #[test]
+    fn refresh_policy_composes_with_env_skip() {
+        let restore = std::env::var_os("JURISEARCH_SKIP_REPLAY_SNAPSHOT");
+        // SAFETY: this is the only test that reads/writes this env var; it is restored before returning.
+        unsafe { std::env::remove_var("JURISEARCH_SKIP_REPLAY_SNAPSHOT") };
+
+        // No env skip: policy is the decider.
+        assert!(
+            replay_snapshot_refresh_effective(true),
+            "policy true + no env skip -> refresh"
+        );
+        assert!(
+            !replay_snapshot_refresh_effective(false),
+            "policy false (delta-only cycle) -> skip even with no env skip"
+        );
+
+        // Env skip set: BOTH policies skip (additional AND-guard).
+        // SAFETY: same single-owner justification as above.
+        unsafe { std::env::set_var("JURISEARCH_SKIP_REPLAY_SNAPSHOT", "1") };
+        assert!(
+            !replay_snapshot_refresh_effective(true),
+            "env skip forces skip even when policy is true"
+        );
+        assert!(
+            !replay_snapshot_refresh_effective(false),
+            "env skip + policy false -> skip"
+        );
+
+        // Restore the environment for any later-running code in this process.
+        // SAFETY: restoring the original value; single owner.
+        unsafe {
+            match restore {
+                Some(value) => std::env::set_var("JURISEARCH_SKIP_REPLAY_SNAPSHOT", value),
+                None => std::env::remove_var("JURISEARCH_SKIP_REPLAY_SNAPSHOT"),
+            }
+        }
+    }
+
+    /// A skipped refresh surfaces `{"source":"skipped"}` (the report shape callers emit when the policy
+    /// or the env skip suppressed the refresh) — distinct from a refreshed `{"source":"refreshed",...}`.
+    #[test]
+    fn skipped_refresh_reports_source_skipped() {
+        let value = replay_snapshot_cache_value(None);
+        assert_eq!(value, serde_json::json!({ "source": "skipped" }));
+    }
 }
 
 #[cfg(test)]

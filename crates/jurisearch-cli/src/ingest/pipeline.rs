@@ -188,6 +188,9 @@ pub(crate) fn embed_zone_units_payload(
             batch_size,
             pool_concurrency,
             pool_endpoints: loaded.pool_endpoints,
+            // Zone embedding never refreshes the replay snapshot, but keep the field explicit/`true` for
+            // a uniform CLI contract (no silent default-to-false).
+            refresh_replay_snapshot: true,
         },
     )
     .map_err(jurisearch_pipeline::EmbedError::into_error_object)?;
@@ -216,6 +219,9 @@ pub(crate) fn embed_chunks_payload(
             batch_size,
             pool_concurrency,
             pool_endpoints: loaded.pool_endpoints,
+            // CLI chunk embedding keeps the prior behavior: always refresh the replay snapshot (still
+            // honoring the JURISEARCH_SKIP_REPLAY_SNAPSHOT env skip).
+            refresh_replay_snapshot: true,
         },
     )
     .map_err(jurisearch_pipeline::EmbedError::into_error_object)?;

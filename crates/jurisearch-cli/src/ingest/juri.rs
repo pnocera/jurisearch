@@ -29,6 +29,9 @@ pub(crate) fn ingest_juri_archives_payload(
             quarantine_dir,
             safe_mode,
             filter: archive_filter,
+            // CLI archive ingest keeps the prior behavior: always refresh the replay snapshot on a
+            // completed run (still honoring the JURISEARCH_SKIP_REPLAY_SNAPSHOT env skip).
+            refresh_replay_snapshot: true,
         },
     )
     .map_err(jurisearch_pipeline::IngestError::into_error_object)?;

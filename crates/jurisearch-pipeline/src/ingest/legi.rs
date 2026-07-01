@@ -128,6 +128,7 @@ pub(crate) fn ingest_legi_archives(
         quarantine_dir,
         safe_mode,
         filter: archive_filter,
+        refresh_replay_snapshot,
     } = req;
     // The producer DB hands out a fresh client; the CLI opened it with the BulkIngest profile so the
     // bulk tuning is already applied server-side. Match the original by also relaxing
@@ -314,8 +315,14 @@ pub(crate) fn ingest_legi_archives(
     if let Some(error) = fatal_error {
         return Err(error);
     }
+    // Refresh the replay snapshot ONLY on a completed run AND when the caller's policy allows it (the
+    // producer passes `false` on delta-only cycles). `maybe_refresh_replay_snapshot` additionally honors
+    // the `JURISEARCH_SKIP_REPLAY_SNAPSHOT` env skip.
     let replay_snapshot_cache = if run_status == IngestRunStatus::Completed {
-        Some(maybe_refresh_replay_snapshot(&mut ingest_client)?)
+        Some(maybe_refresh_replay_snapshot(
+            &mut ingest_client,
+            refresh_replay_snapshot,
+        )?)
     } else {
         None
     };
